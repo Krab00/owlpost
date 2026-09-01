@@ -273,6 +273,42 @@ fn whoami_text_after_init() {
     assert!(stdout.contains("endpoints: "), "stdout: {stdout}");
 }
 
+fn seed_endpoints(home: &std::path::Path) {
+    let path = home.join("config.json");
+    let mut cfg: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    cfg["endpoints"] = serde_json::json!(["a:1", "b:2"]);
+    std::fs::write(&path, serde_json::to_vec(&cfg).unwrap()).unwrap();
+}
+
+#[test]
+fn whoami_prints_configured_endpoints() {
+    let home = tempfile::tempdir().unwrap();
+    assert!(run_init(home.path()).status.success());
+    seed_endpoints(home.path());
+    let text = owl()
+        .args(["--home"])
+        .arg(home.path())
+        .arg("whoami")
+        .output()
+        .unwrap();
+    assert_eq!(text.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&text.stdout);
+    assert!(
+        stdout.lines().any(|l| l == "endpoints: a:1, b:2"),
+        "stdout: {stdout}"
+    );
+    let json = owl()
+        .args(["--home"])
+        .arg(home.path())
+        .args(["whoami", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(json.status.code(), Some(0));
+    let v: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(v["endpoints"], serde_json::json!(["a:1", "b:2"]));
+}
+
 #[test]
 fn unimplemented_subcommand_exits_1() {
     let home = tempfile::tempdir().unwrap();
