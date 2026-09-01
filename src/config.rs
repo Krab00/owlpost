@@ -206,8 +206,6 @@ impl Config {
         }
     }
 
-    // ponytail: dead_code allow until `owl init` (OWL-002) calls this from the bin.
-    #[allow(dead_code)]
     pub fn save(&self, home: &Path) -> anyhow::Result<()> {
         std::fs::create_dir_all(home).with_context(|| format!("creating {}", home.display()))?;
         let path = Self::path(home);

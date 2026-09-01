@@ -6,6 +6,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 
 mod config;
+mod identity;
 
 #[derive(Parser)]
 #[command(
@@ -128,23 +129,63 @@ enum Cmd {
     Doctor,
 }
 
-fn whoami(home: &Path) -> anyhow::Result<()> {
-    let _cfg = config::Config::load(home)?;
+fn init(home: &Path, name: Option<String>, emails: Vec<String>) -> anyhow::Result<()> {
+    // Check the key BEFORE touching config so a refused init leaves the home untouched.
+    if home.join("key").exists() {
+        anyhow::bail!(
+            "key already exists at {} — refusing to overwrite",
+            home.join("key").display()
+        );
+    }
+    let mut cfg = config::Config::load(home)?;
+    if let Some(n) = name {
+        cfg.name = n;
+    }
+    if !emails.is_empty() {
+        cfg.emails = emails;
+    }
+    cfg.save(home)?;
+    let id = identity::Identity::generate();
+    id.save(home)?;
+    println!("{}", identity::fingerprint(&id.verifying_key()));
+    Ok(())
+}
+
+fn whoami(home: &Path, json: bool) -> anyhow::Result<()> {
     if !config::Config::path(home).exists() || !home.join("key").exists() {
         anyhow::bail!(
             "no identity found in {} — run `owl init` first",
             home.display()
         );
     }
-    // ponytail: full identity summary lands in OWL-002.
-    anyhow::bail!("not implemented yet")
+    let cfg = config::Config::load(home)?;
+    let id = identity::Identity::load(home)?;
+    let pk = id.verifying_key();
+    let fp = identity::fingerprint(&pk);
+    let pubkey = identity::pubkey_string(&pk);
+    if json {
+        let out = serde_json::json!({
+            "fingerprint": fp,
+            "pubkey": pubkey,
+            "name": cfg.name,
+            "endpoints": cfg.endpoints,
+        });
+        println!("{out}");
+    } else {
+        println!("fingerprint: {fp}");
+        println!("pubkey: {pubkey}");
+        println!("name: {}", cfg.name);
+        println!("endpoints: {}", cfg.endpoints.join(", "));
+    }
+    Ok(())
 }
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let home = config::home_dir(cli.home.as_deref());
     let result = match cli.cmd {
-        Cmd::Whoami => whoami(&home),
+        Cmd::Init { name, email } => init(&home, name, email),
+        Cmd::Whoami => whoami(&home, cli.json),
         _ => Err(anyhow::anyhow!("not implemented yet")),
     };
     match result {
