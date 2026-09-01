@@ -71,7 +71,8 @@ scripts/
     "redact": [
       "(?i)(api[_-]?key|secret|token|password)\\s*[:=]\\s*\\S+",
       "-----BEGIN [A-Z ]*PRIVATE KEY-----[\\s\\S]*?-----END [A-Z ]*PRIVATE KEY-----"
-    ]
+    ],
+    "timeout_secs": 180
   },
   "harnesses": {
     "claude":   { "cmd": ["claude", "-p", "--allowed-tools", "Read,Grep,Glob", "--output-format", "json", "{prompt}"], "answer_path": "result" },

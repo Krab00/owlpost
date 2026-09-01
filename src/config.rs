@@ -243,6 +243,90 @@ mod tests {
     }
 
     #[test]
+    fn defaults_match_design_section_3() {
+        let cfg = Config::default();
+        assert_eq!(cfg.outbox_ttl_days, 14);
+        assert!(cfg.notify);
+        assert!(cfg.responder.enabled);
+        assert_eq!(cfg.responder.harness, "claude");
+        assert_eq!(cfg.responder.timeout_secs, 180);
+        assert_eq!(
+            cfg.responder.scope,
+            Scope {
+                repo: true,
+                project_files: true,
+                private_memory: false
+            }
+        );
+        assert_eq!(
+            cfg.responder.redact,
+            vec![
+                r"(?i)(api[_-]?key|secret|token|password)\s*[:=]\s*\S+".to_string(),
+                r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"
+                    .to_string(),
+            ]
+        );
+        let cmd = |k: &str| cfg.harnesses[k].cmd.clone();
+        let ap = |k: &str| cfg.harnesses[k].answer_path.as_str();
+        assert_eq!(
+            cmd("claude"),
+            [
+                "claude",
+                "-p",
+                "--allowed-tools",
+                "Read,Grep,Glob",
+                "--output-format",
+                "json",
+                "{prompt}"
+            ]
+        );
+        assert_eq!(ap("claude"), "result");
+        assert_eq!(
+            cmd("codex"),
+            [
+                "codex",
+                "exec",
+                "--sandbox",
+                "read-only",
+                "--ephemeral",
+                "--json",
+                "{prompt}"
+            ]
+        );
+        assert_eq!(ap("codex"), "last_message");
+        assert_eq!(
+            cmd("opencode"),
+            [
+                "opencode",
+                "run",
+                "--format",
+                "json",
+                "--agent",
+                "owl-readonly",
+                "{prompt}"
+            ]
+        );
+        assert_eq!(ap("opencode"), "last_text");
+        assert_eq!(
+            cmd("kimi"),
+            ["kimi", "-p", "{prompt}", "--output-format", "stream-json"]
+        );
+        assert_eq!(ap("kimi"), "last_text");
+        assert!(!cfg.harnesses["kimi"].enabled);
+        assert_eq!(
+            cfg.harnesses["kimi"].disabled_reason.as_deref(),
+            Some("read-only enforcement under -p unverified (see concept.md open questions)")
+        );
+        assert_eq!(cmd("fake"), ["tests/fixtures/fake-harness.sh", "{prompt}"]);
+        assert_eq!(ap("fake"), "raw");
+        for k in ["claude", "codex", "opencode", "fake"] {
+            assert!(cfg.harnesses[k].enabled, "{k} enabled");
+            assert!(cfg.harnesses[k].disabled_reason.is_none(), "{k} reason");
+        }
+        assert_eq!(cfg.harnesses.len(), 5);
+    }
+
+    #[test]
     fn roundtrip() {
         let home = tempfile::tempdir().unwrap();
         let home = home.path().join("nested"); // save must create the dir
@@ -299,12 +383,18 @@ mod tests {
         }
         assert_eq!(home_dir(Some(cli.path())), cli.path());
         assert_eq!(home_dir(None), env_home.path());
+        let fallback = user_home.path().join(".config").join("owlpost");
         unsafe {
-            std::env::remove_var("OWLPOST_HOME");
+            std::env::set_var("OWLPOST_HOME", "");
         }
         assert_eq!(
             home_dir(None),
-            user_home.path().join(".config").join("owlpost")
+            fallback,
+            "empty OWLPOST_HOME must fall back"
         );
+        unsafe {
+            std::env::remove_var("OWLPOST_HOME");
+        }
+        assert_eq!(home_dir(None), fallback);
     }
 }
