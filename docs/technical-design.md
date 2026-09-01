@@ -297,8 +297,10 @@ uses its own home; `cargo test` must pass offline.
 Local harness versions available for the manual run: Claude Code 2.1.257 (`claude -p
 --allowed-tools`), Codex CLI 0.145.0 (`codex exec --sandbox read-only --json`), opencode 1.18.18
 (`opencode run --format json --agent <name>`; the `owl-readonly` agent definition with
-`tools: {write:false, edit:false, bash:false}` ships in `scripts/opencode-agent.json`), kimi-cli
-1.49.0 (`kimi -p --output-format stream-json`; disabled).
+`tools: {write:false, edit:false, bash:false}` ships in `scripts/opencode-agent.json`), Kimi Code
+CLI 0.39.1 (`kimi -p --output-format stream-json`; disabled until the read-only test passes).
+`kimi` is installed under `~/.kimi-code/bin`, which may not be on the PATH of a non-interactive
+shell — the runner template and `owl doctor` must resolve it there as a fallback.
 
 ## 13. Known ceilings (`ponytail:` markers in code)
 

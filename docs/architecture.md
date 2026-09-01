@@ -167,7 +167,7 @@ harness's native memory (Claude Code: auto-memory / `CLAUDE.md` as appropriate) 
 ## 6. Adapter matrix
 
 Verified against official docs and repos on 2026-09-01. Local test versions: Claude Code
-2.1.257, Codex CLI 0.145.0, kimi-cli 1.49.0 (legacy; Kimi Code CLI 0.39 is the successor),
+2.1.257, Codex CLI 0.145.0, Kimi Code CLI 0.39.1,
 opencode 1.18.18.
 
 | Pillar | Claude Code | Codex CLI | Kimi Code CLI | opencode |
