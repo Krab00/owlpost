@@ -5,8 +5,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
-mod config;
-mod identity;
+use owlpost::{config, identity};
 
 #[derive(Parser)]
 #[command(
