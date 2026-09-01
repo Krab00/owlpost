@@ -5,3 +5,4 @@ pub mod contacts;
 pub mod envelope;
 pub mod identity;
 pub mod spool;
+pub mod tls;
