@@ -165,6 +165,11 @@ mod tests {
         assert_eq!(parse_pubkey(&s).unwrap(), pk);
         let wrong_prefix = s.replacen("ed25519:", "foo:", 1);
         assert!(parse_pubkey(&wrong_prefix).is_err());
+        let same_len_prefix = s.replacen("ed25519:", "ed25518:", 1);
+        assert!(
+            parse_pubkey(&same_len_prefix).is_err(),
+            "prefix must be checked literally"
+        );
         assert!(parse_pubkey("ed25519:not*base64").is_err());
         assert!(parse_pubkey("ed25519:AAAA").is_err(), "wrong length");
     }
@@ -176,6 +181,7 @@ mod tests {
         assert!(s.starts_with("ed25519:"));
         assert_eq!(parse_sig(&s).unwrap(), sig);
         assert!(parse_sig("foo:AAAA").is_err());
+        assert!(parse_sig(&s.replacen("ed25519:", "ed25518:", 1)).is_err());
         assert!(parse_sig("ed25519:AAAA").is_err());
     }
 
