@@ -16,3 +16,6 @@ Same pattern as OWL-001: code correct, round 1 failed on 4 untested branches (33
 
 ## OWL-003 (2026-09-02)
 Round 1 found two real bugs, both in hand-rolled I/O edges: a permissive RFC3339 parser (range checks only, so `-1` and `+2026` slipped through) and an atomic-write helper that left `<id>.json.tmp` when rename failed. Fix pattern: hand-written parsers must be shape-strict (fixed width, digits only) with a reject case per field, and every temp-file write needs a failure-path test (block the destination with a directory). Test gaps again matched the "negative twin" lesson (verify-before-parse, exact prune boundary).
+
+## OWL-005 (2026-09-02)
+Code correct from round 1; three rounds spent purely on test coverage. Round 2 closed six negative cases, round 3 the missing POSITIVE twin (unpinned mode must still identify a known client) — the reviewer and the mutant sweep hit it independently. Lesson: for every boolean mode flag on a verifier, test the 2×2 matrix (flag on/off × input known/unknown), not just the corners the AC names. Recurs with OWL-002/003/004's "negative twin" pattern → promote a test-matrix rule into standing_checks_extra.
