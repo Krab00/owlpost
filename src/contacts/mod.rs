@@ -197,10 +197,11 @@ impl ContactBook {
                 serde_json::to_value(&full)?
             }
         };
-        v["policy"] = serde_json::to_value(&policy)?;
-        v.as_object_mut()
-            .context("overlay file is not a JSON object")?
-            .remove("fingerprint");
+        let obj = v
+            .as_object_mut()
+            .with_context(|| format!("{} is not a JSON object", path.display()))?;
+        obj.insert("policy".into(), serde_json::to_value(&policy)?);
+        obj.remove("fingerprint");
         std::fs::write(&path, serde_json::to_vec_pretty(&v)?)?;
         contact.policy = Some(policy);
         Ok(())
