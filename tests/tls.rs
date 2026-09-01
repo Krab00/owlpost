@@ -7,11 +7,14 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use owlpost::identity::{Identity, fingerprint};
-use owlpost::tls::{AllowedKeys, client_config, peer_fingerprint_from_cert, server_config};
+use owlpost::tls::{
+    AllowedKeys, cert_from_identity, client_config, peer_fingerprint_from_cert, server_config,
+};
 use rustls::pki_types::ServerName;
 use rustls::{ClientConnection, ServerConnection, StreamOwned};
 
 const TIMEOUT: Duration = Duration::from_secs(3);
+const REJECTED: &str = "invalid peer certificate: ApplicationVerificationFailure";
 
 fn id(n: u8) -> Identity {
     Identity::from_seed([n; 32])
@@ -76,10 +79,7 @@ fn unknown_client_is_refused() {
     let res = connect(port, client_config(Some(&c), Some(key(&b))).unwrap());
     let server_err = srv.join().unwrap().unwrap_err();
     assert!(res.is_err(), "client should not get data: {res:?}");
-    assert!(
-        server_err.contains("invalid peer certificate"),
-        "server: {server_err}"
-    );
+    assert_eq!(server_err, REJECTED);
 }
 
 #[test]
@@ -87,7 +87,7 @@ fn wrong_server_key_is_refused() {
     let (a, b, c) = (id(1), id(2), id(3));
     let (port, srv) = spawn_server(server_config(&b, book(&[&a]), false).unwrap());
     let err = connect(port, client_config(Some(&a), Some(key(&c))).unwrap()).unwrap_err();
-    assert!(err.contains("invalid peer certificate"), "client: {err}");
+    assert_eq!(err, REJECTED);
     assert!(srv.join().unwrap().is_err());
 }
 
@@ -106,7 +106,142 @@ fn unpinned_client_allowed_when_enabled() {
         res.is_err(),
         "flag=false must refuse a cert-less client: {res:?}"
     );
-    assert!(server_err.contains("certificate"), "server: {server_err}");
+    assert_eq!(server_err, "peer sent no certificates");
+}
+
+#[test]
+fn unpinned_mode_still_refuses_unknown_client_cert() {
+    let (a, b, c) = (id(1), id(2), id(3));
+    let (port, srv) = spawn_server(server_config(&b, book(&[&a]), true).unwrap());
+    let res = connect(port, client_config(Some(&c), Some(key(&b))).unwrap());
+    let server_err = srv.join().unwrap().unwrap_err();
+    assert!(
+        res.is_err(),
+        "unknown cert must be refused even with the flag: {res:?}"
+    );
+    assert_eq!(server_err, REJECTED);
+}
+
+#[test]
+fn near_miss_client_key_is_refused() {
+    let (a, b) = (id(1), id(2));
+    let mut almost_a = key(&a);
+    almost_a[31] ^= 0x01;
+    let (port, srv) = spawn_server(server_config(&b, [almost_a].into(), false).unwrap());
+    let res = connect(port, client_config(Some(&a), Some(key(&b))).unwrap());
+    let server_err = srv.join().unwrap().unwrap_err();
+    assert!(res.is_err(), "{res:?}");
+    assert_eq!(server_err, REJECTED);
+}
+
+#[test]
+fn near_miss_server_key_is_refused() {
+    let (a, b) = (id(1), id(2));
+    let mut almost_b = key(&b);
+    almost_b[31] ^= 0x01;
+    let (port, srv) = spawn_server(server_config(&b, book(&[&a]), false).unwrap());
+    let err = connect(port, client_config(Some(&a), Some(almost_b)).unwrap()).unwrap_err();
+    assert_eq!(err, REJECTED);
+    assert!(srv.join().unwrap().is_err());
+}
+
+/// Server presenting a P-256 (non-Ed25519) cert; the TOFU client must still refuse it.
+#[test]
+fn tofu_client_refuses_non_ed25519_server() {
+    let a = id(1);
+    let kp = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+    let cert = rcgen::CertificateParams::new(vec!["owlpost".to_string()])
+        .unwrap()
+        .self_signed(&kp)
+        .unwrap();
+    let key = rustls::pki_types::PrivateKeyDer::Pkcs8(kp.serialize_der().into());
+    let cfg = rustls::ServerConfig::builder_with_provider(ring())
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(vec![cert.der().clone()], key)
+        .unwrap();
+    let (port, srv) = spawn_server(Arc::new(cfg));
+    let err = connect(port, client_config(Some(&a), None).unwrap()).unwrap_err();
+    assert_eq!(err, REJECTED);
+    assert!(srv.join().unwrap().is_err());
+}
+
+/// Client presents A's certificate but signs the handshake with C's key.
+#[test]
+fn forged_handshake_signature_is_refused() {
+    let (a, b, c) = (id(1), id(2), id(3));
+    let (cert_a, _) = cert_from_identity(&a).unwrap();
+    let (_, key_c) = cert_from_identity(&c).unwrap();
+    let signer_c = rustls::crypto::ring::sign::any_supported_type(&key_c).unwrap();
+    let forged = Arc::new(rustls::sign::CertifiedKey::new(vec![cert_a], signer_c));
+    let cfg = rustls::ClientConfig::builder_with_provider(ring())
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(AcceptAnyServer))
+        .with_client_cert_resolver(Arc::new(Forged(forged)));
+    let (port, srv) = spawn_server(server_config(&b, book(&[&a]), false).unwrap());
+    let res = connect(port, Arc::new(cfg));
+    let server_err = srv.join().unwrap().unwrap_err();
+    assert!(res.is_err(), "{res:?}");
+    assert_eq!(server_err, "invalid peer certificate: BadSignature");
+}
+
+fn ring() -> Arc<rustls::crypto::CryptoProvider> {
+    Arc::new(rustls::crypto::ring::default_provider())
+}
+
+#[derive(Debug)]
+struct Forged(Arc<rustls::sign::CertifiedKey>);
+
+impl rustls::client::ResolvesClientCert for Forged {
+    fn resolve(
+        &self,
+        _root_hint_subjects: &[&[u8]],
+        _sigschemes: &[rustls::SignatureScheme],
+    ) -> Option<Arc<rustls::sign::CertifiedKey>> {
+        Some(self.0.clone())
+    }
+    fn has_certs(&self) -> bool {
+        true
+    }
+}
+
+/// Test-only server verifier that accepts anything (the forged test targets the server side).
+#[derive(Debug)]
+struct AcceptAnyServer;
+
+impl rustls::client::danger::ServerCertVerifier for AcceptAnyServer {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        ring().signature_verification_algorithms.supported_schemes()
+    }
 }
 
 #[test]
