@@ -64,6 +64,11 @@ impl Identity {
         self.signing.verifying_key()
     }
 
+    /// Raw 32-byte seed (for building the TLS key; never log it).
+    pub fn seed(&self) -> [u8; 32] {
+        self.signing.to_bytes()
+    }
+
     // ponytail: dead_code until the envelope task uses it from the bin.
     #[allow(dead_code)]
     pub fn sign(&self, msg: &[u8]) -> Signature {
