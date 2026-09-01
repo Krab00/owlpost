@@ -18,7 +18,17 @@ fn help_lists_all_subcommands() {
     let out = owl().arg("--help").output().unwrap();
     assert!(out.status.success());
     let help = String::from_utf8_lossy(&out.stdout);
-    for name in [
+    // Parse the "Commands:" block: first token of each indented line up to the blank line.
+    let listed: Vec<&str> = help
+        .split("Commands:\n")
+        .nth(1)
+        .expect("Commands: block")
+        .lines()
+        .take_while(|l| !l.trim().is_empty())
+        .filter_map(|l| l.split_whitespace().next())
+        .filter(|t| *t != "help")
+        .collect();
+    let expected = [
         "init",
         "whoami",
         "card",
@@ -39,12 +49,8 @@ fn help_lists_all_subcommands() {
         "install",
         "uninstall",
         "doctor",
-    ] {
-        assert!(
-            help.lines().any(|l| l.trim_start().starts_with(name)),
-            "missing subcommand {name} in help:\n{help}"
-        );
-    }
+    ];
+    assert_eq!(listed, expected, "help:\n{help}");
     for flag in ["--home", "--json", "--quiet"] {
         assert!(help.contains(flag), "missing global flag {flag}");
     }
@@ -75,6 +81,51 @@ fn whoami_honours_owlpost_home_env() {
         .unwrap();
     assert_eq!(out.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&out.stderr).contains("owl init"));
+}
+
+#[test]
+fn whoami_with_config_but_no_key_asks_for_init() {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(home.path().join("config.json"), "{}").unwrap();
+    let out = owl()
+        .args(["--home"])
+        .arg(home.path())
+        .arg("whoami")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("owl init"));
+}
+
+#[test]
+fn whoami_with_key_but_no_config_asks_for_init() {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(home.path().join("key"), "k").unwrap();
+    let out = owl()
+        .args(["--home"])
+        .arg(home.path())
+        .arg("whoami")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("owl init"));
+}
+
+#[test]
+fn whoami_with_config_and_key_is_not_implemented_yet() {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(home.path().join("config.json"), "{}").unwrap();
+    std::fs::write(home.path().join("key"), "k").unwrap();
+    let out = owl()
+        .args(["--home"])
+        .arg(home.path())
+        .arg("whoami")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("not implemented yet"), "stderr: {err}");
+    assert!(!err.contains("owl init"), "stderr: {err}");
 }
 
 #[test]
