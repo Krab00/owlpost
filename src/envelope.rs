@@ -206,15 +206,27 @@ pub fn rfc3339_now() -> String {
 
 // ponytail: UTC 'Z' only — add offsets if a peer ever sends them.
 pub fn parse_rfc3339_to_unix(s: &str) -> Option<u64> {
-    let s = s.strip_suffix('Z')?;
-    let (date, time) = s.split_once('T')?;
-    let mut d = date.split('-').map(|x| x.parse::<i64>());
-    let mut t = time.split(':').map(|x| x.parse::<i64>());
-    let (y, m, day) = (d.next()?.ok()?, d.next()?.ok()?, d.next()?.ok()?);
-    let (h, mi, sec) = (t.next()?.ok()?, t.next()?.ok()?, t.next()?.ok()?);
-    if d.next().is_some() || t.next().is_some() {
+    // Exact shape `YYYY-MM-DDTHH:MM:SSZ`: 20 ASCII bytes, digits only in the numeric fields.
+    let b = s.as_bytes();
+    if b.len() != 20
+        || b[4] != b'-'
+        || b[7] != b'-'
+        || b[10] != b'T'
+        || b[13] != b':'
+        || b[16] != b':'
+        || b[19] != b'Z'
+    {
         return None;
     }
+    let field = |from: usize, to: usize| -> Option<i64> {
+        let f = &s[from..to];
+        if !f.bytes().all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        f.parse().ok()
+    };
+    let (y, m, day) = (field(0, 4)?, field(5, 7)?, field(8, 10)?);
+    let (h, mi, sec) = (field(11, 13)?, field(14, 16)?, field(17, 19)?);
     if !(1..=12).contains(&m) || !(1..=31).contains(&day) || h > 23 || mi > 59 || sec > 60 {
         return None;
     }
@@ -355,6 +367,26 @@ mod tests {
         };
         let err = junk.verify(&me.verifying_key()).err().unwrap().to_string();
         assert!(err.contains("parsing"), "{err}");
+        // Verify BEFORE parse: non-JSON raw with a foreign signature fails on the signature,
+        // never reaching the parser.
+        let foreign = Envelope {
+            raw: "not json".into(),
+            sig: identity::sig_string(&other.sign(b"not json")),
+        };
+        let err = foreign
+            .verify(&me.verifying_key())
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(err.contains("signature"), "{err}");
+        assert!(!err.contains("parsing"), "{err}");
+        let bad = Envelope {
+            raw: "not json".into(),
+            sig: "ed25519:AAAA".into(),
+        };
+        let err = bad.verify(&me.verifying_key()).err().unwrap().to_string();
+        assert!(err.contains("signature"), "{err}");
+        assert!(!err.contains("parsing"), "{err}");
     }
 
     #[test]
@@ -433,18 +465,29 @@ mod tests {
             seen.insert("other", now - 601),
             "old entry inserted for pruning check"
         );
+        assert!(seen.insert("edge", now - 600), "boundary entry");
         seen.save(home.path()).unwrap();
         assert_eq!(
             std::fs::read_to_string(home.path().join("seen-ids.txt")).unwrap(),
-            format!("{ID} {now}\nother {}\n", now - 601)
+            format!("{ID} {now}\nother {}\nedge {}\n", now - 601, now - 600)
         );
         let mut loaded = SeenIds::load(home.path(), now).unwrap();
+        assert_eq!(
+            loaded.ids.len(),
+            2,
+            "now-601 pruned, now-600 kept: {:?}",
+            loaded.ids
+        );
         assert!(!loaded.insert(ID, now), "must survive save/load");
+        assert!(
+            !loaded.insert("edge", now),
+            "entry at exactly 600 s is kept"
+        );
         assert!(
             loaded.insert("other", now),
             "entries older than 600 s are pruned on load"
         );
-        assert_eq!(loaded.ids.len(), 2);
+        assert_eq!(loaded.ids.len(), 3);
     }
 
     #[test]
@@ -467,6 +510,13 @@ mod tests {
             "2026-09-01T10:00:00+02:00",
             "2026-09-01T10:00:00.000Z",
             "1969-12-31T23:59:59Z",
+            "2026-09-01T-1:00:00Z",
+            "+2026-09-01T10:00:00Z",
+            "2026-9-01T10:00:00Z",
+            "2026-09-01T10:00:0Z",
+            "2026-09-01-05T10:00:00Z",
+            "2026-09-01T10:00:00:00Z",
+            "2026-09-01T10:00:00Zz",
         ] {
             assert_eq!(parse_rfc3339_to_unix(bad), None, "{bad:?}");
         }

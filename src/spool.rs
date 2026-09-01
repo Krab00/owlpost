@@ -69,7 +69,11 @@ impl Spool {
         let tmp = path.with_extension("json.tmp");
         let json = serde_json::to_vec_pretty(rec)?;
         std::fs::write(&tmp, json).with_context(|| format!("writing {}", tmp.display()))?;
-        std::fs::rename(&tmp, &path).with_context(|| format!("renaming to {}", path.display()))
+        if let Err(e) = std::fs::rename(&tmp, &path) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e).with_context(|| format!("renaming to {}", path.display()));
+        }
+        Ok(())
     }
 
     /// Missing → None. Malformed → error.

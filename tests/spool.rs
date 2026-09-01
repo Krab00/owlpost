@@ -76,6 +76,13 @@ fn atomic_put_leaves_no_temp_files() {
         spool.get(Dir::Inbox, "id-001").unwrap().unwrap().state,
         "pending"
     );
+    // When the rename itself fails (a directory sits at `<id>.json`), the tmp is cleaned up.
+    std::fs::create_dir(home.path().join("spool/inbox/blocked.json")).unwrap();
+    assert!(spool.put(Dir::Inbox, "blocked", &rec("x")).is_err());
+    assert!(
+        !home.path().join("spool/inbox/blocked.json.tmp").exists(),
+        "tmp left behind"
+    );
 }
 
 #[test]
