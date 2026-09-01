@@ -110,6 +110,19 @@ fn unpinned_client_allowed_when_enabled() {
 }
 
 #[test]
+fn unpinned_mode_still_identifies_known_client() {
+    let (a, b) = (id(1), id(2));
+    let (port, srv) = spawn_server(server_config(&b, book(&[&a]), true).unwrap());
+    let got = connect(port, client_config(Some(&a), Some(key(&b))).unwrap()).unwrap();
+    assert_eq!(
+        got,
+        fingerprint(&a.verifying_key()),
+        "known client must be identified even with the flag"
+    );
+    srv.join().unwrap().unwrap();
+}
+
+#[test]
 fn unpinned_mode_still_refuses_unknown_client_cert() {
     let (a, b, c) = (id(1), id(2), id(3));
     let (port, srv) = spawn_server(server_config(&b, book(&[&a]), true).unwrap());
