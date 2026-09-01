@@ -5,7 +5,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
-use owlpost::{config, identity};
+use owlpost::{config, contacts, identity};
 
 #[derive(Parser)]
 #[command(
@@ -43,8 +43,8 @@ enum Cmd {
     Card { peer: Option<String> },
     /// Merged contact book: list | export | show <peer>
     Contact {
-        #[arg(trailing_var_arg = true)]
-        args: Vec<String>,
+        #[command(subcommand)]
+        cmd: ContactCmd,
     },
     /// TOFU-add a peer to the local provider
     Add {
@@ -128,6 +128,16 @@ enum Cmd {
     Doctor,
 }
 
+#[derive(Subcommand)]
+enum ContactCmd {
+    /// One row per merged contact: name, fingerprint, source, policy
+    List,
+    /// Print one contact as JSON
+    Show { peer: String },
+    /// This machine's repo-provider entry (from config + key) as JSON
+    Export,
+}
+
 fn init(home: &Path, name: Option<String>, emails: Vec<String>) -> anyhow::Result<()> {
     // Check the key BEFORE touching config so a refused init leaves the home untouched.
     if home.join("key").exists() {
@@ -179,12 +189,62 @@ fn whoami(home: &Path, json: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn require_identity(home: &Path) -> anyhow::Result<(config::Config, identity::Identity)> {
+    if !config::Config::path(home).exists() || !home.join("key").exists() {
+        anyhow::bail!(
+            "no identity found in {} — run `owl init` first",
+            home.display()
+        );
+    }
+    Ok((config::Config::load(home)?, identity::Identity::load(home)?))
+}
+
+fn contact(home: &Path, cmd: ContactCmd, json: bool) -> anyhow::Result<()> {
+    let book = || contacts::ContactBook::load(home, &std::env::current_dir()?);
+    match cmd {
+        ContactCmd::List => {
+            let book = book()?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&book.contacts)?);
+            } else {
+                println!(
+                    "{:<20} {:<20} {:<6} POLICY",
+                    "NAME", "FINGERPRINT", "SOURCE"
+                );
+                for c in &book.contacts {
+                    let mode = c.policy.as_ref().map_or("-", |p| p.mode.as_str());
+                    println!(
+                        "{:<20} {:<20} {:<6} {mode}",
+                        c.name, c.fingerprint, c.source
+                    );
+                }
+            }
+        }
+        ContactCmd::Show { peer } => {
+            let book = book()?;
+            println!("{}", serde_json::to_string_pretty(book.resolve(&peer)?)?);
+        }
+        ContactCmd::Export => {
+            let (cfg, id) = require_identity(home)?;
+            let out = serde_json::json!({
+                "name": cfg.name,
+                "emails": cfg.emails,
+                "pubkey": identity::pubkey_string(&id.verifying_key()),
+                "endpoints": cfg.endpoints,
+            });
+            println!("{}", serde_json::to_string_pretty(&out)?);
+        }
+    }
+    Ok(())
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let home = config::home_dir(cli.home.as_deref());
     let result = match cli.cmd {
         Cmd::Init { name, email } => init(&home, name, email),
         Cmd::Whoami => whoami(&home, cli.json),
+        Cmd::Contact { cmd } => contact(&home, cmd, cli.json),
         _ => Err(anyhow::anyhow!("not implemented yet")),
     };
     match result {
