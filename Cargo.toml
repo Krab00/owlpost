@@ -17,6 +17,9 @@ rand_core = { version = "0.6", features = ["getrandom"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+# ring backend for both: one crypto stack, Ed25519 certs + TLS1.3 sigs, no cmake/nasm build deps.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rcgen = { version = "0.14", default-features = false, features = ["ring"] }
 
 [dev-dependencies]
 tempfile = "3"
