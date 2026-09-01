@@ -69,6 +69,13 @@ fn atomic_put_leaves_no_temp_files() {
             .iter()
             .any(|p| p.to_string_lossy().ends_with(".tmp"))
     );
+    // The temp file is `<id>.json.tmp`: when it cannot be written, the old record survives.
+    std::fs::create_dir(home.path().join("spool/inbox/id-001.json.tmp")).unwrap();
+    assert!(spool.put(Dir::Inbox, "id-001", &rec("clobbered")).is_err());
+    assert_eq!(
+        spool.get(Dir::Inbox, "id-001").unwrap().unwrap().state,
+        "pending"
+    );
 }
 
 #[test]
