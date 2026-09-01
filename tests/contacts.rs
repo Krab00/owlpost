@@ -306,3 +306,189 @@ fn set_policy_writes_overlay() {
             .exists()
     );
 }
+
+fn auto() -> Policy {
+    Policy {
+        mode: Mode::Auto,
+        scope: Scope::default(),
+        rate_limit_per_hour: None,
+    }
+}
+
+#[test]
+fn set_policy_rejects_non_object_overlay_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let (_root, sub) = fixture_repo(tmp.path());
+    let dir = home.join("contacts");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("{}.json", fp(1)));
+    std::fs::write(&path, "[]").unwrap();
+    let mut book = ContactBook::load(&home, &sub).unwrap();
+    let err = book
+        .set_policy(&home, &fp(1), auto())
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("not a JSON object"), "{err}");
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "[]",
+        "file untouched"
+    );
+    assert!(
+        book.policy_for(&fp(1)).is_none(),
+        "in-memory policy untouched"
+    );
+    // A string is not an object either.
+    std::fs::write(&path, "\"x\"").unwrap();
+    assert!(book.set_policy(&home, &fp(1), auto()).is_err());
+}
+
+#[test]
+fn fingerprint_tier_beats_email_tier() {
+    // Peer 3's email is literally peer 1's fingerprint string.
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let (root, sub) = fixture_repo(tmp.path());
+    std::fs::write(
+        root.join(".agents/peers/aaa.json"),
+        peer_json("Zed", &fp(1), 3),
+    )
+    .unwrap();
+    let book = ContactBook::load(&home, &sub).unwrap();
+    assert_eq!(book.contacts.len(), 3);
+    assert_eq!(
+        book.contacts[0].name, "Zed",
+        "sorted first, so a naive scan would hit it"
+    );
+    let c = book.resolve(&fp(1)).unwrap();
+    assert_eq!(c.name, "Maciek");
+    assert_eq!(c.fingerprint(), fp(1));
+}
+
+#[test]
+fn prefix_tier_matches_names_only() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let (_root, sub) = fixture_repo(tmp.path());
+    let book = ContactBook::load(&home, &sub).unwrap();
+    // "maciek@" is a prefix of Maciek's email but of no name.
+    assert!(book.resolve("maciek@").is_err());
+    assert!(book.resolve("maciek@company").is_err());
+    // Exact email still works.
+    assert_eq!(book.resolve("maciek@company.com").unwrap().name, "Maciek");
+}
+
+#[test]
+fn email_match_is_exact_case_sensitive() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let (_root, sub) = fixture_repo(tmp.path());
+    let book = ContactBook::load(&home, &sub).unwrap();
+    assert_eq!(book.resolve("marek@company.com").unwrap().name, "Marek");
+    assert!(book.resolve("Marek@company.com").is_err());
+    assert!(book.resolve("MAREK@COMPANY.COM").is_err());
+    assert!(book.resolve(" marek@company.com").is_err());
+}
+
+#[test]
+fn git_file_marks_worktree_root() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let (root, sub) = fixture_repo(tmp.path());
+    std::fs::remove_dir(root.join(".git")).unwrap();
+    std::fs::write(root.join(".git"), "gitdir: /elsewhere/.git/worktrees/x\n").unwrap();
+    assert_eq!(
+        owlpost::contacts::repo::find_git_root(&sub).as_deref(),
+        Some(root.as_path())
+    );
+    let book = ContactBook::load(&home, &sub).unwrap();
+    assert_eq!(book.contacts.len(), 2);
+    assert!(book.contacts.iter().all(|c| c.source == "repo"));
+}
+
+#[test]
+fn set_policy_on_slug_named_local_contact_writes_fp_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let (_root, sub) = fixture_repo(tmp.path());
+    let dir = home.join("contacts");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("ola.json"),
+        serde_json::json!({
+            "name": "Ola", "emails": ["ola@example.org"], "pubkey": pk(3),
+            "endpoints": ["ola.example.org:7411"],
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let mut book = ContactBook::load(&home, &sub).unwrap();
+    book.set_policy(&home, &fp(3), auto()).unwrap();
+    let path = dir.join(format!("{}.json", fp(3)));
+    let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let mut keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "added_at",
+            "emails",
+            "endpoints",
+            "name",
+            "policy",
+            "pubkey",
+            "source"
+        ],
+        "{v}"
+    );
+    assert_eq!(v["name"], "Ola");
+    assert_eq!(v["emails"], serde_json::json!(["ola@example.org"]));
+    assert_eq!(v["endpoints"], serde_json::json!(["ola.example.org:7411"]));
+    assert_eq!(v["pubkey"], pk(3));
+    assert_eq!(v["source"], "local");
+    assert_eq!(v["policy"]["mode"], "auto");
+    assert!(v.get("fingerprint").is_none(), "{v}");
+    assert!(dir.join("ola.json").exists(), "slug file left alone");
+}
+
+#[test]
+fn non_json_extensions_are_ignored_silently() {
+    // Loading in-process: stderr can't be captured here, so the CLI twin in tests/cli.rs
+    // pins "no warning"; this one pins "not loaded".
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let (root, sub) = fixture_repo(tmp.path());
+    let peers = root.join(".agents/peers");
+    std::fs::write(peers.join("upper.JSON"), peer_json("Upper", "u@x.org", 5)).unwrap();
+    std::fs::write(peers.join("old.json.bak"), peer_json("Bak", "b@x.org", 6)).unwrap();
+    std::fs::write(peers.join("noext"), peer_json("NoExt", "n@x.org", 7)).unwrap();
+    let book = ContactBook::load(&home, &sub).unwrap();
+    let mut names: Vec<&str> = book.contacts.iter().map(|c| c.name.as_str()).collect();
+    names.sort_unstable();
+    assert_eq!(names, ["Maciek", "Marek"]);
+}
+
+#[test]
+fn contacts_are_ordered_by_filename() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let root = tmp.path().join("repo2");
+    std::fs::create_dir_all(root.join(".git")).unwrap();
+    let peers = root.join(".agents/peers");
+    std::fs::create_dir_all(&peers).unwrap();
+    // Filenames sort z < ... no: "a" < "b", but names sort the other way round.
+    std::fs::write(peers.join("a.json"), peer_json("Zoe", "z@x.org", 1)).unwrap();
+    std::fs::write(peers.join("b.json"), peer_json("Adam", "a@x.org", 2)).unwrap();
+    let book = ContactBook::load(&home, &root).unwrap();
+    let names: Vec<&str> = book.contacts.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, ["Zoe", "Adam"]);
+    // Same rule for the local provider.
+    let dir = home.join("contacts");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("1.json"), peer_json("Yara", "y@x.org", 3)).unwrap();
+    std::fs::write(dir.join("0.json"), peer_json("Bea", "b@x.org", 4)).unwrap();
+    let book = ContactBook::load(&home, &root).unwrap();
+    let names: Vec<&str> = book.contacts.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, ["Zoe", "Adam", "Bea", "Yara"]);
+}

@@ -333,7 +333,20 @@ fn unknown_subcommand_is_usage_error() {
 #[test]
 fn contact_export_matches_whoami() {
     let home = tempfile::tempdir().unwrap();
-    assert!(run_init(home.path()).status.success());
+    // Random name so a hard-coded "Test" in the binary cannot pass.
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let name = format!("Peer-{nonce}");
+    let email = format!("p{nonce}@example.org");
+    let init = owl()
+        .args(["--home"])
+        .arg(home.path())
+        .args(["init", "--name", &name, "--email", &email])
+        .output()
+        .unwrap();
+    assert!(init.status.success());
     seed_endpoints(home.path());
     let out = owl()
         .args(["--home"])
@@ -351,8 +364,8 @@ fn contact_export_matches_whoami() {
     let mut keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
     keys.sort_unstable();
     assert_eq!(keys, ["emails", "endpoints", "name", "pubkey"]);
-    assert_eq!(v["name"], "Test");
-    assert_eq!(v["emails"], serde_json::json!(["t@example.org"]));
+    assert_eq!(v["name"], name);
+    assert_eq!(v["emails"], serde_json::json!([email]));
     assert_eq!(v["endpoints"], serde_json::json!(["a:1", "b:2"]));
     let who = owl()
         .args(["--home"])
@@ -363,6 +376,7 @@ fn contact_export_matches_whoami() {
     let w: serde_json::Value = serde_json::from_slice(&who.stdout).unwrap();
     assert!(w["pubkey"].as_str().unwrap().starts_with("ed25519:"));
     assert_eq!(v["pubkey"], w["pubkey"]);
+    assert_eq!(v["name"], w["name"]);
 }
 
 #[test]
@@ -552,4 +566,125 @@ fn contact_list_warns_on_malformed_peer_file() {
     assert!(err.starts_with("owl: warning: skipping "), "stderr: {err}");
     assert!(err.contains("bad.json"), "stderr: {err}");
     assert_eq!(String::from_utf8_lossy(&out.stdout).lines().count(), 3);
+}
+
+#[test]
+fn contact_export_with_config_only_or_key_only_asks_for_init() {
+    let cfg_only = tempfile::tempdir().unwrap();
+    std::fs::write(cfg_only.path().join("config.json"), "{}").unwrap();
+    let key_only = tempfile::tempdir().unwrap();
+    assert!(run_init(key_only.path()).status.success());
+    std::fs::remove_file(key_only.path().join("config.json")).unwrap();
+    for home in [cfg_only.path(), key_only.path()] {
+        let out = owl()
+            .args(["--home"])
+            .arg(home)
+            .args(["contact", "export"])
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(1), "{}", home.display());
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains("owl init"), "stderr: {err}");
+        assert!(out.stdout.is_empty());
+    }
+}
+
+#[test]
+fn contact_list_empty_book_prints_header_only() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    // No repo (no .git above), no local contacts dir.
+    let cwd = tmp.path().join("plain");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let out = owl()
+        .args(["--home"])
+        .arg(&home)
+        .args(["contact", "list"])
+        .current_dir(&cwd)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "NAME                 FINGERPRINT          SOURCE POLICY\n"
+    );
+    assert!(out.stderr.is_empty());
+    let json = owl()
+        .args(["--home"])
+        .arg(&home)
+        .args(["contact", "list", "--json"])
+        .current_dir(&cwd)
+        .output()
+        .unwrap();
+    assert_eq!(json.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&json.stdout).trim(), "[]");
+    assert!(json.stderr.is_empty());
+}
+
+#[test]
+fn contact_list_ignores_non_json_extensions_without_warning() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let (sub, _) = fixture_repo(tmp.path());
+    let peers = tmp.path().join("repo/.agents/peers");
+    std::fs::write(peers.join("junk.JSON"), "{not json").unwrap();
+    std::fs::write(peers.join("junk.json.bak"), "{not json").unwrap();
+    std::fs::write(peers.join("junk.bak"), "{not json").unwrap();
+    let out = owl()
+        .args(["--home"])
+        .arg(&home)
+        .args(["contact", "list"])
+        .current_dir(&sub)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert!(
+        out.stderr.is_empty(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout).lines().count(), 3);
+}
+
+#[test]
+fn contact_list_rows_follow_filename_order() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let root = tmp.path().join("repo");
+    std::fs::create_dir_all(root.join(".git")).unwrap();
+    let peers = root.join(".agents/peers");
+    std::fs::create_dir_all(&peers).unwrap();
+    let (pk1, fp1) = peer(1);
+    let (pk2, fp2) = peer(2);
+    std::fs::write(
+        peers.join("a.json"),
+        serde_json::json!({"name": "Zoe", "pubkey": pk1}).to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        peers.join("b.json"),
+        serde_json::json!({"name": "Adam", "pubkey": pk2}).to_string(),
+    )
+    .unwrap();
+    let out = owl()
+        .args(["--home"])
+        .arg(&home)
+        .args(["contact", "list"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    let text = String::from_utf8(out.stdout).unwrap();
+    let rows: Vec<Vec<&str>> = text
+        .lines()
+        .skip(1)
+        .map(|l| l.split_whitespace().collect())
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            ["Zoe", fp1.as_str(), "repo", "-"],
+            ["Adam", fp2.as_str(), "repo", "-"]
+        ]
+    );
 }
