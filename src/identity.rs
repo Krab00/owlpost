@@ -153,6 +153,8 @@ mod tests {
         let mut bad_sig = sig.to_bytes();
         bad_sig[5] ^= 0x01;
         assert!(!verify(&pk, msg, &Signature::from_bytes(&bad_sig)));
+        let other = Identity::from_seed([8u8; 32]).verifying_key();
+        assert!(!verify(&other, msg, &sig), "different pubkey must reject");
     }
 
     #[test]
@@ -171,6 +173,10 @@ mod tests {
             "prefix must be checked literally"
         );
         assert!(parse_pubkey("ed25519:not*base64").is_err());
+        assert!(
+            parse_pubkey(&s[8..]).is_err(),
+            "bare base64 must be rejected"
+        );
         assert!(parse_pubkey("ed25519:AAAA").is_err(), "wrong length");
     }
 
@@ -181,6 +187,7 @@ mod tests {
         assert!(s.starts_with("ed25519:"));
         assert_eq!(parse_sig(&s).unwrap(), sig);
         assert!(parse_sig("foo:AAAA").is_err());
+        assert!(parse_sig(&s[8..]).is_err(), "bare base64 must be rejected");
         assert!(parse_sig(&s.replacen("ed25519:", "ed25518:", 1)).is_err());
         assert!(parse_sig("ed25519:AAAA").is_err());
     }
@@ -219,6 +226,9 @@ mod tests {
         std::fs::write(home.path().join("key"), [1u8; 31]).unwrap();
         let err = Identity::load(home.path()).err().unwrap().to_string();
         assert!(err.contains("32 bytes"), "{err}");
+        std::fs::write(home.path().join("key"), [1u8; 33]).unwrap();
+        let err = Identity::load(home.path()).err().unwrap().to_string();
+        assert!(err.contains("got 33"), "{err}");
         assert!(Identity::load(&home.path().join("missing")).is_err());
     }
 
