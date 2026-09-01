@@ -19,3 +19,6 @@ Round 1 found two real bugs, both in hand-rolled I/O edges: a permissive RFC3339
 
 ## OWL-005 (2026-09-02)
 Code correct from round 1; three rounds spent purely on test coverage. Round 2 closed six negative cases, round 3 the missing POSITIVE twin (unpinned mode must still identify a known client) — the reviewer and the mutant sweep hit it independently. Lesson: for every boolean mode flag on a verifier, test the 2×2 matrix (flag on/off × input known/unknown), not just the corners the AC names. Recurs with OWL-002/003/004's "negative twin" pattern → promote a test-matrix rule into standing_checks_extra.
+
+## OWL-004 (2026-09-02)
+Round 1 caught a real panic: `set_policy` indexed `v["policy"]` on a serde_json::Value before checking it was an object. Rule: any code that indexes into a parsed JSON Value must go through `as_object_mut()`/`get()` first, and every file-reading path needs a test with wrong-shape (not just invalid) JSON. The 11 test gaps were again tier/ordering "negative twins" (email-before-fingerprint, prefix on emails, `.git` as file).
