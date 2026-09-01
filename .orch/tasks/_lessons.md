@@ -13,3 +13,6 @@ Round 1 failed only on test gaps, not behaviour: a `starts_with` help assertion 
 
 ## OWL-002 (2026-09-02)
 Same pattern as OWL-001: code correct, round 1 failed on 4 untested branches (33-byte key accepted by a truncating read, verify() ignoring the pubkey, parse_* falling back to bare base64, endpoints joiner). Each was a "negative twin" of an existing positive assertion — for every parser/validator/verifier, add the reject case for each input dimension (wrong length above AND below, wrong key, missing prefix), and a non-empty-collection case for every formatter. Recurring across 2 tasks → candidate for `standing_checks_extra`.
+
+## OWL-003 (2026-09-02)
+Round 1 found two real bugs, both in hand-rolled I/O edges: a permissive RFC3339 parser (range checks only, so `-1` and `+2026` slipped through) and an atomic-write helper that left `<id>.json.tmp` when rename failed. Fix pattern: hand-written parsers must be shape-strict (fixed width, digits only) with a reject case per field, and every temp-file write needs a failure-path test (block the destination with a directory). Test gaps again matched the "negative twin" lesson (verify-before-parse, exact prune boundary).
