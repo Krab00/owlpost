@@ -1,5 +1,11 @@
 //! mTLS from the ed25519 identity: self-signed cert via rcgen, pinned verifiers (§4, §7).
 //!
+//! Crypto provider: `ring` for both rustls and rcgen — one backend, supports Ed25519
+//! certificates and TLS 1.3 Ed25519 handshake signatures, accepts PKCS#8 v1 seeds, and
+//! needs no cmake/nasm at build time (aws-lc-rs does). TLS 1.3 only (`tls12` feature off):
+//! every peer is this same binary, so there is nothing to be compatible with, and it keeps
+//! the verifier surface (and this spike) smaller.
+//!
 //! rustls `danger` APIs used, and why:
 //! - `rustls::server::danger::ClientCertVerifier` — replaces the PKI chain check with
 //!   "client SPKI key ∈ allowed set"; signatures are still verified via the provider.
@@ -266,10 +272,26 @@ mod tests {
 
     #[test]
     fn spki_rejects_non_ed25519_der() {
+        let no_spki = "certificate has no Ed25519 SubjectPublicKeyInfo";
         let junk = CertificateDer::from(vec![0x30, 0x03, 0x02, 0x01, 0x05]);
-        assert!(spki_pubkey(&junk).is_err());
+        assert_eq!(spki_pubkey(&junk).unwrap_err().to_string(), no_spki);
+        // X25519 SPKI (OID 1.3.101.110) with a 32-byte key: right shape, wrong algorithm.
+        let mut x25519 = SPKI_ED25519_HEADER.to_vec();
+        x25519[8] = 0x6e;
+        x25519.extend_from_slice(&[1u8; 32]);
+        assert_eq!(
+            spki_pubkey(&CertificateDer::from(x25519))
+                .unwrap_err()
+                .to_string(),
+            no_spki
+        );
         let mut truncated = SPKI_ED25519_HEADER.to_vec();
         truncated.extend_from_slice(&[1u8; 31]);
-        assert!(spki_pubkey(&CertificateDer::from(truncated)).is_err());
+        assert_eq!(
+            spki_pubkey(&CertificateDer::from(truncated))
+                .unwrap_err()
+                .to_string(),
+            "truncated SubjectPublicKeyInfo"
+        );
     }
 }
