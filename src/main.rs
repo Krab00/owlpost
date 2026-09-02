@@ -7,6 +7,8 @@ use clap::{Parser, Subcommand};
 
 use owlpost::{config, contacts, daemon, identity};
 
+mod cli;
+
 #[derive(Parser)]
 #[command(
     name = "owl",
@@ -265,13 +267,18 @@ fn main() -> ExitCode {
         Cmd::Whoami => whoami(&home, cli.json),
         Cmd::Contact { cmd } => contact(&home, cmd, cli.json),
         Cmd::Daemon { foreground } => daemon_cmd(&home, foreground),
+        Cmd::Watch { id, timeout } => cli::watch::run(&home, id.as_deref(), timeout),
+        Cmd::Install { dry_run } => cli::install::install(&home, dry_run),
+        Cmd::Uninstall => cli::install::uninstall(),
+        Cmd::Doctor => cli::doctor::run(&home, cli.json),
         _ => Err(anyhow::anyhow!("not implemented yet")),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("owl: {e:#}");
-            ExitCode::from(1)
+            let code = e.downcast_ref::<cli::ExitError>().map_or(1, |x| x.code);
+            ExitCode::from(code)
         }
     }
 }
