@@ -264,6 +264,29 @@ fn main() -> ExitCode {
         Cmd::Whoami => whoami(&home, cli.json),
         Cmd::Contact { cmd } => contact(&home, cmd, cli.json),
         Cmd::Daemon { foreground } => daemon_cmd(&home, foreground),
+        Cmd::Inbox {
+            count,
+            new,
+            all,
+            format,
+        } => cli::inbox::run(
+            &home,
+            cli::inbox::Opts {
+                count,
+                new,
+                all,
+                format,
+                json: cli.json,
+            },
+        ),
+        Cmd::Show { id } => cli::show::run(&home, &id, cli.json),
+        Cmd::Draft { id, harness } => cli::draft::run(&home, &id, harness.as_deref(), cli.json),
+        Cmd::Edit { id } => cli::edit::run(&home, &id, cli.json),
+        Cmd::Send { id } => cli::send::run(&home, &id, cli.json),
+        Cmd::Reject { id } => cli::reject::run(&home, &id, cli.json),
+        Cmd::History { peer, path, since } => {
+            cli::history::run(&home, cli::history::Filters { peer, path, since }, cli.json)
+        }
         Cmd::Ask(args) => cli::ask::run(&home, args, cli.json, cli.quiet),
         Cmd::Watch { id, timeout } => cli::watch::run(&home, id.as_deref(), timeout),
         Cmd::Install { dry_run } => cli::install::install(&home, dry_run),
