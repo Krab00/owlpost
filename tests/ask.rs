@@ -1317,19 +1317,22 @@ async fn project_comes_from_origin_remote_unless_overridden() {
 // AC7
 #[test]
 fn blame_candidates() {
-    let (a, zed, ana) = (id(1), id(2), id(3));
+    let (a, ana, zed) = (id(1), id(2), id(3));
     // 20 blamed lines; the unmatched author owns 11 of them, so a share over matched lines
     // only (6/9, 3/9) is nowhere near a share over all blamed lines (6/20, 3/20).
-    // Zed owns more lines than Ana but sorts after her by name, and Ana is committed first:
-    // the expected order [Zed, Ana] is the line-share order and neither the name order nor
-    // the commit order.
+    // Zed owns more lines than Ana but sorts after her by name, Ana is committed first, and
+    // Ana's fingerprint sorts first (the contact book's own order): the expected order
+    // [Zed, Ana] is the line-share order and none of the name, commit or book orders.
     let repo = fixture_repo(&[
         ("ana@example.org", 3),
         ("zed@example.org", 6),
         ("nobody@example.org", 11),
     ]);
+    assert!(
+        fp(&ana) < fp(&zed),
+        "book order is fingerprint order: Ana first"
+    );
     let home = tempfile::tempdir().unwrap();
-    // Ana's contact is written before Zed's, so contact order is not the expected order either.
     prepare_home(
         home.path(),
         &a,
