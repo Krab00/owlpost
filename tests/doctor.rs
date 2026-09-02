@@ -102,6 +102,35 @@ async fn doctor_reports_each_check() {
         line(&stdout, "pull").starts_with("ok   pull: last pull "),
         "{stdout}"
     );
+    // The stale threshold is 2 × pull_interval_secs: an 11 s old pull is fine at the default
+    // 60 s interval, stale at 5 s.
+    let eleven_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(11);
+    std::fs::File::create(d.home().join("last-pull"))
+        .unwrap()
+        .set_modified(eleven_ago)
+        .unwrap();
+    let out = owl(d.home()).arg("doctor").output().unwrap();
+    assert!(
+        line(&text(&out).0, "pull").starts_with("ok   pull: last pull 11s ago"),
+        "{}",
+        text(&out).0
+    );
+    let mut cfg = owlpost::config::Config::load(d.home()).unwrap();
+    cfg.pull_interval_secs = 5;
+    cfg.save(d.home()).unwrap();
+    let out = owl(d.home()).arg("doctor").output().unwrap();
+    let (stdout, _) = text(&out);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "warn is not a failure: {stdout}"
+    );
+    assert!(
+        line(&stdout, "pull").starts_with("warn pull: last pull 11s ago (interval 5s)"),
+        "{stdout}"
+    );
+    cfg.pull_interval_secs = 60;
+    cfg.save(d.home()).unwrap();
 
     // --json: one object per check with the same content.
     let out = owl(d.home()).args(["--json", "doctor"]).output().unwrap();

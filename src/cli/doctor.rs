@@ -591,4 +591,51 @@ mod tests {
         assert_eq!(human_age(Duration::from_secs(7200)), "2h");
         assert_eq!(human_age(Duration::from_secs(3 * 86_400)), "3d");
     }
+
+    #[test]
+    fn pull_warn_threshold_follows_pull_interval() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join(LAST_PULL_FILE);
+        let now = SystemTime::now();
+        let set_age = |secs: u64| {
+            let f = std::fs::File::create(&path).unwrap();
+            f.set_modified(now - Duration::from_secs(secs)).unwrap();
+        };
+        let short = Config {
+            pull_interval_secs: 5,
+            ..Default::default()
+        };
+        let long = Config::default();
+        assert_eq!(long.pull_interval_secs, 60);
+        // 11 s old: past 2 × 5 s → warn; within 2 × 60 s → ok.
+        set_age(11);
+        let c = pull_check(home.path(), &short, now);
+        assert_eq!(c.status, Status::Warn, "{c:?}");
+        assert!(
+            c.detail.contains("last pull 11s ago (interval 5s)"),
+            "{c:?}"
+        );
+        let c = pull_check(home.path(), &long, now);
+        assert_eq!(
+            (c.status, c.detail.as_str()),
+            (Status::Ok, "last pull 11s ago")
+        );
+        // 9 s old: within both.
+        set_age(9);
+        let c = pull_check(home.path(), &short, now);
+        assert_eq!(
+            (c.status, c.detail.as_str()),
+            (Status::Ok, "last pull 9s ago")
+        );
+        let c = pull_check(home.path(), &long, now);
+        assert_eq!(
+            (c.status, c.detail.as_str()),
+            (Status::Ok, "last pull 9s ago")
+        );
+        // Exactly 2 × interval is still ok; one second more warns.
+        set_age(10);
+        assert_eq!(pull_check(home.path(), &short, now).status, Status::Ok);
+        set_age(121);
+        assert_eq!(pull_check(home.path(), &long, now).status, Status::Warn);
+    }
 }

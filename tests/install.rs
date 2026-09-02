@@ -262,3 +262,135 @@ fn install_without_home_env_fails() {
         .unwrap();
     assert!(out.status.success(), "{}", text(&out).1);
 }
+
+/// A fake `systemctl` / `launchctl` / `id` on a temp PATH, each appending its argv to `log`.
+fn fake_service_manager(dir: &Path, exit_code: u8) -> (PathBuf, PathBuf) {
+    let bin = dir.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let log = dir.join("calls.log");
+    let write_exe = |name: &str, body: String| {
+        let script = bin.join(name);
+        std::fs::write(&script, body).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    };
+    for name in ["systemctl", "launchctl"] {
+        write_exe(
+            name,
+            format!(
+                "#!/bin/sh\necho \"{name} $*\" >> '{}'\nexit {exit_code}\n",
+                log.display()
+            ),
+        );
+    }
+    write_exe("id", "#!/bin/sh\necho 501\n".into());
+    (bin, log)
+}
+
+fn with_fake_path(mut cmd: Command, bin: &Path) -> Command {
+    let mut paths = vec![bin.to_path_buf()];
+    if let Some(p) = std::env::var_os("PATH") {
+        paths.extend(std::env::split_paths(&p));
+    }
+    cmd.env("PATH", std::env::join_paths(paths).unwrap());
+    cmd
+}
+
+fn calls(log: &Path) -> Vec<String> {
+    std::fs::read_to_string(log)
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+#[test]
+fn install_and_uninstall_drive_the_service_manager() {
+    let home = tempfile::tempdir().unwrap();
+    let user_home = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let (bin, log) = fake_service_manager(scratch.path(), 0);
+    let unit = unit_path(user_home.path());
+
+    let out = with_fake_path(owl(home.path(), user_home.path()), &bin)
+        .arg("install")
+        .output()
+        .unwrap();
+    let (stdout, stderr) = text(&out);
+    assert!(out.status.success(), "install: {stderr}");
+    assert!(unit.is_file());
+    assert!(stdout.contains("installed "), "{stdout}");
+    assert!(stdout.contains("started "), "{stdout}");
+    assert!(!stdout.contains("skipped"), "{stdout}");
+    let expected_install: Vec<String> = if cfg!(target_os = "macos") {
+        vec![format!("launchctl bootstrap gui/501 {}", unit.display())]
+    } else {
+        vec![
+            "systemctl --user daemon-reload".into(),
+            "systemctl --user enable --now owlpost.service".into(),
+        ]
+    };
+    assert_eq!(calls(&log), expected_install);
+
+    let out = with_fake_path(owl(home.path(), user_home.path()), &bin)
+        .arg("uninstall")
+        .output()
+        .unwrap();
+    let (stdout, stderr) = text(&out);
+    assert!(out.status.success(), "uninstall: {stderr}");
+    assert!(!unit.exists());
+    assert!(stdout.contains("stopped "), "{stdout}");
+    assert!(stdout.contains("removed "), "{stdout}");
+    let mut expected_all = expected_install.clone();
+    if cfg!(target_os = "macos") {
+        expected_all.push("launchctl bootout gui/501/dev.owlpost.owl".into());
+    } else {
+        expected_all.push("systemctl --user disable --now owlpost.service".into());
+        expected_all.push("systemctl --user daemon-reload".into());
+    }
+    assert_eq!(calls(&log), expected_all);
+}
+
+#[test]
+fn service_manager_failure_is_reported() {
+    let home = tempfile::tempdir().unwrap();
+    let user_home = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let (bin, log) = fake_service_manager(scratch.path(), 3);
+    let unit = unit_path(user_home.path());
+
+    let out = with_fake_path(owl(home.path(), user_home.path()), &bin)
+        .arg("install")
+        .output()
+        .unwrap();
+    let (stdout, stderr) = text(&out);
+    assert_eq!(out.status.code(), Some(1), "{stdout}{stderr}");
+    assert!(unit.is_file(), "the unit is written before loading");
+    assert!(stdout.contains("installed "), "{stdout}");
+    assert!(!stdout.contains("started"), "{stdout}");
+    if cfg!(target_os = "macos") {
+        // bootstrap failed → the `load -w` fallback ran and failed too.
+        assert_eq!(calls(&log).len(), 2, "{:?}", calls(&log));
+        assert!(stderr.contains("launchctl load -w"), "{stderr}");
+    } else {
+        assert_eq!(calls(&log), ["systemctl --user daemon-reload"]);
+        assert!(
+            stderr.contains("systemctl --user daemon-reload failed"),
+            "{stderr}"
+        );
+    }
+
+    // Uninstall with a failing manager: reports the error, keeps the unit file.
+    let out = with_fake_path(owl(home.path(), user_home.path()), &bin)
+        .arg("uninstall")
+        .output()
+        .unwrap();
+    let (stdout, stderr) = text(&out);
+    assert_eq!(out.status.code(), Some(1), "{stdout}{stderr}");
+    assert!(unit.is_file(), "unit kept when stopping fails");
+    assert!(!stdout.contains("removed"), "{stdout}");
+    assert!(stderr.contains("failed"), "{stderr}");
+}

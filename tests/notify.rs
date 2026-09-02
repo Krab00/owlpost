@@ -9,9 +9,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use owlpost::contacts::Mode;
-use owlpost::server::{AnswerIngested, on_answer_ingested};
+use owlpost::server::{AnswerIngested, Spooled, on_answer_ingested, on_question_spooled};
+use owlpost::spool::{Dir, Record};
 
-use common::{Peer, client, id, policy, post_envelope, signed, spawn_daemon, spawn_daemon_with};
+use common::{Peer, client, id, policy, post_envelope, signed, spawn_daemon_with};
 
 /// A shell script appending `"$1|$2"` to `<dir>/notify.log` per call.
 fn logging_script(dir: &Path) -> (PathBuf, PathBuf) {
@@ -59,17 +60,17 @@ async fn daemon_notifies_on_question_and_answer() {
 
     let bea = id(1);
     let maciek = id(2);
-    let d = spawn_daemon(
+    let nameless = id(4);
+    let d = spawn_daemon_with(
         1,
-        true,
-        &[Peer::new(
-            &maciek,
-            "Maciek",
-            Some(policy(Mode::Manual, None)),
-        )],
+        &[
+            Peer::new(&maciek, "Maciek", Some(policy(Mode::Manual, None))),
+            Peer::new(&nameless, "", Some(policy(Mode::Manual, None))),
+        ],
+        |cfg| cfg.notify = true,
     )
     .await;
-    assert!(d.running.state.config.notify, "default config notifies");
+    assert!(d.running.state.config.notify, "this test opts in");
 
     let question_text = "ZEBRA-SECRET-QUESTION why does session expiry drift?";
     let env = signed(&maciek, &bea, question_text);
@@ -121,9 +122,63 @@ async fn daemon_notifies_on_question_and_answer() {
     let lines = wait_for_lines(&log, 3);
     assert_eq!(lines[2], "owlpost|answer from owl:unknownpeer0000");
 
+    // A contact whose name is empty is announced by fingerprint, never as "" (§11).
+    let env = signed(&nameless, &bea, question_text);
+    let resp = post_envelope(&client(Some(&nameless), &bea), &d, &env).await;
+    assert_eq!(resp.status().as_u16(), 202);
+    let lines = wait_for_lines(&log, 4);
+    assert_eq!(
+        lines[3],
+        format!(
+            "owlpost|{} asks about {}",
+            common::fp(&nameless),
+            common::PATH
+        )
+    );
+
+    // Question events whose inbox record is missing or unreadable still notify, with `?`
+    // standing in for the path (the peer name is unaffected).
+    on_question_spooled(
+        &d.running.state,
+        Spooled {
+            id: "0191c7a0-0000-7000-8000-00000000dead".into(),
+            peer: common::fp(&maciek),
+            state: "pending".into(),
+            auto: false,
+        },
+    );
+    let lines = wait_for_lines(&log, 5);
+    assert_eq!(lines[4], "owlpost|Maciek asks about ?");
+    d.spool()
+        .put(
+            Dir::Inbox,
+            "0191c7a0-0000-7000-8000-00000000beef",
+            &Record {
+                raw: "not json".into(),
+                sig: String::new(),
+                state: "pending".into(),
+                seen: false,
+                received_at: "2026-09-01T10:00:00Z".into(),
+                draft: None,
+                meta: serde_json::json!({}),
+            },
+        )
+        .unwrap();
+    on_question_spooled(
+        &d.running.state,
+        Spooled {
+            id: "0191c7a0-0000-7000-8000-00000000beef".into(),
+            peer: common::fp(&maciek),
+            state: "pending".into(),
+            auto: false,
+        },
+    );
+    let lines = wait_for_lines(&log, 6);
+    assert_eq!(lines[5], "owlpost|Maciek asks about ?");
+
     // No further lines appear on their own.
     std::thread::sleep(Duration::from_millis(300));
-    assert_eq!(wait_for_lines(&log, 3).len(), 3);
+    assert_eq!(wait_for_lines(&log, 6).len(), 6);
     d.running.shutdown();
 
     // Same script, same peer, `notify = false`: the daemon spawns nothing for either event.
@@ -150,8 +205,8 @@ async fn daemon_notifies_on_question_and_answer() {
     );
     std::thread::sleep(Duration::from_millis(500));
     assert_eq!(
-        wait_for_lines(&log, 3).len(),
-        3,
+        wait_for_lines(&log, 6).len(),
+        6,
         "notify=false must stay silent"
     );
     quiet.running.shutdown();
