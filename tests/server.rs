@@ -47,6 +47,18 @@ async fn card_at(client: &reqwest::Client, d: &TestDaemon, path: &str) -> Value 
 }
 
 // AC1
+/// The shared fixture must never reach the OS notifier (`tests/notify.rs` opts in on its own).
+#[tokio::test]
+async fn fixture_daemon_has_notifications_off() {
+    let d = spawn_daemon(1, true, &[]).await;
+    assert!(!d.running.state.config.notify, "fixture must not notify");
+    assert!(
+        !owlpost::config::Config::load(d.home()).unwrap().notify,
+        "saved fixture config must not notify"
+    );
+    d.running.shutdown();
+}
+
 #[tokio::test]
 async fn card_is_served_unpinned_and_pinned() {
     let (a, c) = (id(1), id(3));

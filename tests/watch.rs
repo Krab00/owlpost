@@ -147,3 +147,35 @@ fn watch_ignores_seen_records_and_honours_timeout_zero() {
     // The record's question text never reaches stdout.
     assert!(!text(&out).0.contains("ZEBRA"));
 }
+
+#[test]
+fn watch_without_timeout_waits_indefinitely() {
+    let home = tempfile::tempdir().unwrap();
+    let spool = Spool::new(home.path()).unwrap();
+    let id = "0191c7a0-0000-7000-8000-00000000f00d";
+
+    // No deadline, record after 1 s: exit 0 with the id.
+    let start = Instant::now();
+    let child = owl(home.path()).arg("watch").spawn().unwrap();
+    std::thread::sleep(Duration::from_secs(1));
+    spool.put(Dir::Inbox, id, &record(false)).unwrap();
+    let (out, elapsed) = wait_bounded(child, start, Duration::from_secs(4));
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out).1);
+    assert_eq!(text(&out).0.trim(), id);
+    assert!(elapsed >= Duration::from_secs(1) && elapsed < Duration::from_secs(3));
+
+    // Negative twin: --id other, no deadline — still running after 2 s, then killed.
+    let mut child = owl(home.path())
+        .args(["watch", "--id", "other"])
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_secs(2));
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "watch without --timeout must never exit on its own"
+    );
+    child.kill().unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(!out.status.success());
+    assert!(text(&out).0.is_empty());
+}
