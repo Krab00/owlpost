@@ -368,7 +368,7 @@ fn render_cmd(
 /// A path with a separator is resolved against the *daemon's* cwd before the child chdirs to the
 /// checkout (so `tests/fixtures/fake-harness.sh` works from the repo root). A bare name is left to
 /// PATH lookup, except `kimi`, which falls back to `~/.kimi-code/bin/kimi` (§12).
-fn resolve_program(first: &str) -> anyhow::Result<PathBuf> {
+pub fn resolve_program(first: &str) -> anyhow::Result<PathBuf> {
     resolve_program_in(
         first,
         std::env::var_os("PATH").as_deref(),
@@ -376,7 +376,7 @@ fn resolve_program(first: &str) -> anyhow::Result<PathBuf> {
     )
 }
 
-fn resolve_program_in(
+pub fn resolve_program_in(
     first: &str,
     path_var: Option<&std::ffi::OsStr>,
     home: &Path,

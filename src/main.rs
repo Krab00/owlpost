@@ -265,6 +265,10 @@ fn main() -> ExitCode {
         Cmd::Contact { cmd } => contact(&home, cmd, cli.json),
         Cmd::Daemon { foreground } => daemon_cmd(&home, foreground),
         Cmd::Ask(args) => cli::ask::run(&home, args, cli.json, cli.quiet),
+        Cmd::Watch { id, timeout } => cli::watch::run(&home, id.as_deref(), timeout),
+        Cmd::Install { dry_run } => cli::install::install(&home, dry_run),
+        Cmd::Uninstall => cli::install::uninstall(),
+        Cmd::Doctor => cli::doctor::run(&home, cli.json),
         _ => Err(anyhow::anyhow!("not implemented yet")),
     };
     match result {

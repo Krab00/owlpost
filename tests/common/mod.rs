@@ -98,9 +98,12 @@ pub fn prepare_home_with(
     if !home.join("key").exists() {
         id.save(home).unwrap();
     }
+    // `notify` is off in every fixture daemon so the suite never fires real desktop
+    // notifications; `tests/notify.rs` opts in explicitly through `tweak`.
     let mut cfg = Config {
         name: "Bea".into(),
         listen: "127.0.0.1:0".into(),
+        notify: false,
         ..Default::default()
     };
     tweak(&mut cfg);
