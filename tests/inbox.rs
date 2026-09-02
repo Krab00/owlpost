@@ -1486,3 +1486,198 @@ fn count_json_separates_questions_from_answers() {
         format!("{SENTENCE_TWO}\n")
     );
 }
+
+// ---------------------------------------------------------------- finish(): unlink failure
+
+/// Makes `spool/inbox` read-only (0o555) so `finish` can write `done/` but cannot unlink the
+/// inbox file; restores 0o755 on drop, on every path, so the tempdir can be cleaned up.
+/// `None` when the chmod does not block writes (running as root): the caller skips.
+struct ReadOnlyInbox(std::path::PathBuf);
+
+impl ReadOnlyInbox {
+    fn lock(h: &Home) -> Option<ReadOnlyInbox> {
+        let dir = h.path().join("spool").join(Dir::Inbox.name());
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let guard = ReadOnlyInbox(dir.clone());
+        let probe = dir.join(".write-probe");
+        if std::fs::write(&probe, b"x").is_ok() {
+            let _ = std::fs::remove_file(&probe);
+            eprintln!("skipping: a read-only inbox/ does not block writes here (root?)");
+            return None;
+        }
+        Some(guard)
+    }
+
+    fn unlock(self) {}
+}
+
+impl Drop for ReadOnlyInbox {
+    fn drop(&mut self) {
+        let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+    }
+}
+
+/// `inbox/` not writable: `done/` is written (state `answered`) but the inbox file cannot be
+/// removed, so `owl send` exits 1 with `removing`; the inbox record is byte-identical. After
+/// unlocking, the retry exits 0 with the same answer id, rewrites `done/` in place, removes
+/// the original and leaves exactly one outbox envelope.
+#[test]
+fn send_with_unremovable_inbox_exits_1_and_retries_with_same_answer() {
+    let h = Home::new();
+    let qid = h.put(&h.maciek, "Where is the retry policy defined?", "pending");
+    h.ok(&["draft", &qid]);
+    let before = h.inbox(&qid).unwrap();
+    let inbox_file = h.spool().path(Dir::Inbox, &qid);
+    let bytes_before = std::fs::read(&inbox_file).unwrap();
+    let Some(lock) = ReadOnlyInbox::lock(&h) else {
+        return;
+    };
+
+    let err = h.fails(&["send", &qid], "removing ");
+    assert!(err.contains(&format!("inbox/{qid}.json")), "{err}");
+    assert_eq!(err.lines().count(), 1, "one clean line: {err}");
+    assert_eq!(std::fs::read(&inbox_file).unwrap(), bytes_before);
+    assert_eq!(h.inbox(&qid).unwrap(), before);
+    let done = h.done(&qid).unwrap();
+    assert_eq!(
+        done.state, "answered",
+        "done/ was written before the unlink failed"
+    );
+    let outbox = h.outbox();
+    assert_eq!(outbox.len(), 1, "{outbox:?}");
+    let (aid, arec) = &outbox[0];
+    assert_eq!(done.meta["answer_id"], *aid);
+    let first_done_at = done.meta["done_at"].clone();
+    no_tmp_files(&h, Dir::Done);
+
+    lock.unlock();
+    let out = h.ok(&["send", &qid]);
+    assert_eq!(
+        out,
+        format!("sent {aid} (reply to {qid}, to {})\n", fp(&h.maciek)),
+        "the retry reuses the answer id from the first attempt"
+    );
+    assert!(
+        h.inbox(&qid).is_none(),
+        "the original is gone after the retry"
+    );
+    let done = h.done(&qid).unwrap();
+    assert_eq!(done.state, "answered");
+    assert_eq!(done.meta["answer_id"], *aid);
+    assert!(done.meta["done_at"].is_string());
+    assert_eq!(done.raw, before.raw);
+    assert_eq!(done.draft, before.draft);
+    let _ = first_done_at; // rewritten in place: same shape, timestamp may or may not differ
+    let outbox = h.outbox();
+    assert_eq!(outbox.len(), 1, "exactly one envelope: {outbox:?}");
+    assert_eq!(outbox[0].1, *arec);
+    no_tmp_files(&h, Dir::Done);
+    no_tmp_files(&h, Dir::Inbox);
+}
+
+/// Same for `owl reject`: exit 1 with `removing`, `done/` holds `rejected` with
+/// `previous_state = consent`, inbox byte-identical; the retry keeps `previous_state`.
+#[test]
+fn reject_with_unremovable_inbox_exits_1_and_retries() {
+    let h = Home::new();
+    let qid = h.put(&h.maciek, "reject me?", "consent");
+    let before = h.inbox(&qid).unwrap();
+    let inbox_file = h.spool().path(Dir::Inbox, &qid);
+    let bytes_before = std::fs::read(&inbox_file).unwrap();
+    let Some(lock) = ReadOnlyInbox::lock(&h) else {
+        return;
+    };
+
+    let err = h.fails(&["reject", &qid], "removing ");
+    assert!(err.contains(&format!("inbox/{qid}.json")), "{err}");
+    assert_eq!(err.lines().count(), 1, "one clean line: {err}");
+    assert_eq!(std::fs::read(&inbox_file).unwrap(), bytes_before);
+    assert_eq!(h.inbox(&qid).unwrap(), before);
+    let done = h.done(&qid).unwrap();
+    assert_eq!(done.state, "rejected");
+    assert_eq!(done.meta["previous_state"], "consent");
+    assert!(h.outbox().is_empty());
+
+    lock.unlock();
+    assert_eq!(h.ok(&["reject", &qid]), format!("rejected {qid}\n"));
+    assert!(h.inbox(&qid).is_none());
+    let done = h.done(&qid).unwrap();
+    assert_eq!(done.state, "rejected");
+    assert_eq!(
+        done.meta["previous_state"], "consent",
+        "the retry re-reads the untouched original, so previous_state is still consent"
+    );
+    assert!(done.meta["done_at"].is_string());
+    assert!(h.outbox().is_empty());
+    no_tmp_files(&h, Dir::Done);
+    no_tmp_files(&h, Dir::Inbox);
+}
+
+/// Between a failed `send` and its retry the answer is already signed and spooled, so `owl
+/// edit` refuses (exit 1, names the outbox envelope, points to `owl send`) instead of
+/// accepting an edit the retry would silently drop. The editor never runs; the draft is
+/// unchanged; the retry ships the original text.
+#[test]
+fn edit_after_failed_send_is_refused_because_the_answer_is_spooled() {
+    let h = Home::new();
+    let qid = h.put(&h.maciek, "Where is the retry policy defined?", "pending");
+    h.ok(&["draft", &qid]);
+    let before = h.inbox(&qid).unwrap();
+    let block = h.spool().path(Dir::Done, &qid);
+    std::fs::create_dir(&block).unwrap();
+    h.fails(&["send", &qid], &format!("finishing record {qid}"));
+    let (aid, arec) = h.outbox().into_iter().next().unwrap();
+
+    let log = h.path().join("editor-ran.txt");
+    let script = h.editor_script(&format!("touch {}\necho EDITED >> \"$1\"", log.display()));
+    let out = h
+        .owl()
+        .env("EDITOR", &script)
+        .args(["edit", &qid])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let err = String::from_utf8(out.stderr).unwrap();
+    assert!(err.contains(&format!("outbox/{aid}.json")), "{err}");
+    assert!(err.contains(&format!("owl send {qid}")), "{err}");
+    assert!(!log.exists(), "the editor must not run");
+    assert_eq!(h.inbox(&qid).unwrap(), before, "draft unchanged");
+    // --json is refused the same way, with nothing on stdout.
+    let out = h
+        .owl()
+        .env("EDITOR", &script)
+        .args(["edit", &qid, "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty());
+    assert!(!log.exists());
+
+    std::fs::remove_dir(&block).unwrap();
+    h.ok(&["send", &qid]);
+    let outbox = h.outbox();
+    assert_eq!(outbox.len(), 1);
+    assert_eq!(
+        outbox[0].1, arec,
+        "the retry ships the envelope from the first attempt"
+    );
+    let (text, ..) = answer_body(&payload(&outbox[0].1));
+    assert!(!text.contains("EDITED"));
+    assert_eq!(text, before.draft.unwrap()["text"]);
+
+    // Negative twin: an ordinary drafted record (no envelope) is still editable.
+    let other = h.put(&h.maciek, "editable?", "pending");
+    h.ok(&["draft", &other]);
+    let out = h
+        .owl()
+        .env("EDITOR", &script)
+        .args(["edit", &other])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(log.exists());
+}

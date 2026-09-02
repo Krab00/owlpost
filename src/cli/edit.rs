@@ -11,7 +11,7 @@ use owlpost::envelope;
 use owlpost::spool::{Dir, Spool};
 use serde_json::json;
 
-use super::{StoredDraft, inbox_record, print_json, user_error};
+use super::{StoredDraft, existing_answer, inbox_record, print_json, user_error};
 
 pub fn run(home: &Path, id: &str, json: bool) -> anyhow::Result<()> {
     let spool = Spool::new(home)?;
@@ -21,6 +21,11 @@ pub fn run(home: &Path, id: &str, json: bool) -> anyhow::Result<()> {
             "record {id} has no draft — run `owl draft {id}` first"
         ))
     })?;
+    if let Some((aid, _)) = existing_answer(&spool, id)? {
+        return Err(user_error(format!(
+            "record {id} already has its answer spooled as outbox/{aid}.json — run `owl send {id}` to finish it (the draft is not editable any more)"
+        )));
+    }
     let editor = std::env::var("EDITOR")
         .ok()
         .filter(|e| !e.trim().is_empty())

@@ -12,9 +12,11 @@ use anyhow::Context;
 use owlpost::envelope::{self, Body, Envelope, Kind, Payload};
 use owlpost::identity::{self, Identity};
 use owlpost::spool::{Dir, Record, Spool};
-use serde_json::{Value, json};
+use serde_json::json;
 
-use super::{StoredDraft, finish, inbox_record, payload_of, print_json, user_error};
+use super::{
+    StoredDraft, existing_answer, finish, inbox_record, payload_of, print_json, user_error,
+};
 
 pub fn run(home: &Path, id: &str, json: bool) -> anyhow::Result<()> {
     let spool = Spool::new(home)?;
@@ -59,7 +61,8 @@ pub fn run(home: &Path, id: &str, json: bool) -> anyhow::Result<()> {
 
     // A previous `send` may have written the answer and then failed to finish the question
     // (§3.4 step 5 is not one atomic step). The outbox record carries `meta.question_id`, so
-    // an existing envelope for this question is reused rather than signed and spooled twice.
+    // an existing envelope for this question is reused rather than signed and spooled twice;
+    // `owl edit` refuses to touch the draft once that envelope exists, so the two agree.
     let (answer_id, answer_to) = match existing_answer(&spool, id)? {
         Some((aid, ato)) => (aid, ato),
         None => {
@@ -107,16 +110,4 @@ pub fn run(home: &Path, id: &str, json: bool) -> anyhow::Result<()> {
         println!("sent {answer_id} (reply to {id}, to {answer_to})");
     }
     Ok(())
-}
-
-/// `(answer id, recipient)` of the outbox envelope already answering question `id`, if any.
-fn existing_answer(spool: &Spool, id: &str) -> anyhow::Result<Option<(String, String)>> {
-    let found = spool.list(Dir::Outbox, |r| {
-        r.meta.get("question_id").and_then(Value::as_str) == Some(id)
-    })?;
-    let Some((aid, arec)) = found.into_iter().next() else {
-        return Ok(None);
-    };
-    let answer = payload_of(&aid, &arec)?;
-    Ok(Some((aid, answer.to)))
 }
