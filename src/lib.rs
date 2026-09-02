@@ -2,8 +2,10 @@
 
 pub mod config;
 pub mod contacts;
+pub mod daemon;
 pub mod envelope;
 pub mod identity;
 pub mod runner;
+pub mod server;
 pub mod spool;
 pub mod tls;
