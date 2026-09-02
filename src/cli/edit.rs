@@ -54,7 +54,9 @@ pub fn run(home: &Path, id: &str, json: bool) -> anyhow::Result<()> {
     draft.text = text;
     draft.status = "edited".into();
     let mut v = draft.to_value();
-    v["edited_at"] = json!(envelope::rfc3339_now());
+    if let Some(m) = v.as_object_mut() {
+        m.insert("edited_at".into(), json!(envelope::rfc3339_now()));
+    }
     rec.draft = Some(v);
     spool.put(Dir::Inbox, id, &rec)?;
     if json {

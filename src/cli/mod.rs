@@ -119,10 +119,12 @@ pub fn meta_object(rec: &mut Record) -> &mut Map<String, Value> {
     }
 }
 
-/// Finishes an inbox record: `state`, `meta.done_at` and the `extra` meta keys are written to
-/// the record while it is still in `inbox/`, and only then is it renamed into `done/`. Both
-/// steps are atomic on their own, so no failure leaves `done/` holding a record with its old
-/// state; the worst case is a finished record still sitting in `inbox/`, which a retry redoes.
+/// Finishes an inbox record: `state`, `meta.done_at` and the `extra` meta keys are set on the
+/// record, which is written atomically (temp file + rename, `Spool::put`) into `done/`; only
+/// after that succeeds is the `inbox/` file removed. A failure writing `done/` therefore leaves
+/// the inbox record byte-for-byte as it was, so the caller can simply be run again; a failure
+/// removing the inbox file leaves a finished copy in `done/` next to the untouched original,
+/// which a retry overwrites in place.
 pub fn finish(
     spool: &Spool,
     id: &str,
@@ -136,8 +138,11 @@ pub fn finish(
     for (k, v) in extra {
         meta.insert((*k).to_string(), v.clone());
     }
-    spool.put(Dir::Inbox, id, &rec)?;
-    spool.move_to(Dir::Inbox, id, Dir::Done)
+    spool
+        .put(Dir::Done, id, &rec)
+        .with_context(|| format!("finishing record {id}"))?;
+    let src = spool.path(Dir::Inbox, id);
+    std::fs::remove_file(&src).with_context(|| format!("removing {}", src.display()))
 }
 
 /// Loads the merged contact book for the current directory; a missing git root is fine.

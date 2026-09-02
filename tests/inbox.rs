@@ -1188,3 +1188,301 @@ fn send_without_draft_points_to_draft() {
     assert!(h.outbox().is_empty());
     h.fails(&["send", "nope"], "no inbox record nope");
 }
+
+// ---------------------------------------------------------------- finish() failure paths
+
+/// No `<id>.json.tmp` left behind in `dir` (OWL-003 rule for every temp-file write).
+fn no_tmp_files(h: &Home, dir: Dir) {
+    let d = h.path().join("spool").join(dir.name());
+    let leftovers: Vec<String> = std::fs::read_dir(&d)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".tmp"))
+        .collect();
+    assert!(leftovers.is_empty(), "{}: {leftovers:?}", d.display());
+}
+
+/// `done/<id>.json` blocked by a directory: `owl send` exits 1, the inbox record is left
+/// byte-for-byte as it was (state `drafted`), and the retry after unblocking succeeds while
+/// reusing the one envelope already in `outbox/`.
+#[test]
+fn send_with_blocked_done_leaves_inbox_intact_and_retries_once() {
+    let h = Home::new();
+    let qid = h.put(&h.maciek, "Where is the retry policy defined?", "pending");
+    h.ok(&["draft", &qid]);
+    let before = h.inbox(&qid).unwrap();
+    assert_eq!(before.state, "drafted");
+    let block = h.spool().path(Dir::Done, &qid);
+    std::fs::create_dir(&block).unwrap();
+
+    let err = h.fails(&["send", &qid], &format!("finishing record {qid}"));
+    assert!(err.starts_with("owl: "), "{err}");
+    assert_eq!(err.lines().count(), 1, "one clean line: {err}");
+    assert_eq!(
+        h.inbox(&qid).unwrap(),
+        before,
+        "inbox record untouched by the failed send"
+    );
+    assert!(block.is_dir(), "the blocking directory is still there");
+    let outbox = h.outbox();
+    assert_eq!(
+        outbox.len(),
+        1,
+        "the answer was already spooled: {outbox:?}"
+    );
+    let (aid, arec) = &outbox[0];
+    assert_eq!(arec.meta["question_id"], qid);
+    no_tmp_files(&h, Dir::Done);
+    no_tmp_files(&h, Dir::Inbox);
+
+    // Still wedged: a second attempt is the same clean failure, still one envelope.
+    h.fails(&["send", &qid], &format!("finishing record {qid}"));
+    assert_eq!(h.inbox(&qid).unwrap(), before);
+    assert_eq!(h.outbox().len(), 1);
+
+    std::fs::remove_dir(&block).unwrap();
+    let out = h.ok(&["send", &qid]);
+    assert_eq!(
+        out,
+        format!("sent {aid} (reply to {qid}, to {})\n", fp(&h.maciek)),
+        "the retry reports the envelope written by the first attempt"
+    );
+    let outbox = h.outbox();
+    assert_eq!(
+        outbox.len(),
+        1,
+        "exactly one envelope after the retry: {outbox:?}"
+    );
+    assert_eq!(&outbox[0].0, aid);
+    assert_eq!(outbox[0].1, *arec, "the envelope was not re-signed");
+    assert!(h.inbox(&qid).is_none());
+    let done = h.done(&qid).unwrap();
+    assert_eq!(done.state, "answered");
+    assert_eq!(done.meta["answer_id"], *aid);
+    assert!(done.meta["done_at"].is_string());
+    assert_eq!(done.raw, before.raw);
+    assert_eq!(done.draft, before.draft);
+    let hash = before.meta["hash"].as_str().unwrap();
+    assert_eq!(h.spool().cache_get(hash).unwrap().unwrap().raw, arec.raw);
+    no_tmp_files(&h, Dir::Done);
+    no_tmp_files(&h, Dir::Inbox);
+
+    // A finished question cannot be sent twice.
+    h.fails(&["send", &qid], &format!("no inbox record {qid}"));
+    assert_eq!(h.outbox().len(), 1);
+}
+
+/// Same block for `owl reject`: exit 1, record untouched in its original state, and the retry
+/// records the original state (not `rejected`) as `previous_state`.
+#[test]
+fn reject_with_blocked_done_leaves_inbox_intact_and_retries() {
+    let h = Home::new();
+    let qid = h.put(&h.maciek, "reject me?", "consent");
+    let before = h.inbox(&qid).unwrap();
+    let block = h.spool().path(Dir::Done, &qid);
+    std::fs::create_dir(&block).unwrap();
+
+    let err = h.fails(&["reject", &qid], &format!("finishing record {qid}"));
+    assert_eq!(err.lines().count(), 1, "one clean line: {err}");
+    let after = h.inbox(&qid).unwrap();
+    assert_eq!(after, before, "inbox record untouched by the failed reject");
+    assert_eq!(after.state, "consent");
+    assert!(after.meta.get("previous_state").is_none());
+    assert!(after.meta.get("done_at").is_none());
+    assert!(h.outbox().is_empty());
+    no_tmp_files(&h, Dir::Done);
+    no_tmp_files(&h, Dir::Inbox);
+
+    std::fs::remove_dir(&block).unwrap();
+    assert_eq!(h.ok(&["reject", &qid]), format!("rejected {qid}\n"));
+    assert!(h.inbox(&qid).is_none());
+    let done = h.done(&qid).unwrap();
+    assert_eq!(done.state, "rejected");
+    assert_eq!(
+        done.meta["previous_state"], "consent",
+        "the retry keeps the original state, not `rejected`"
+    );
+    assert!(done.meta["done_at"].is_string());
+    no_tmp_files(&h, Dir::Done);
+}
+
+/// `send` reuses an outbox envelope for this question even when `finish` never failed — e.g.
+/// the inbox file was restored from a backup — but never one answering a different question.
+#[test]
+fn send_reuses_only_the_envelope_for_this_question() {
+    let h = Home::new();
+    let first = h.put(&h.maciek, "first?", "pending");
+    let second = h.put(&h.maciek, "second?", "pending");
+    h.ok(&["draft", &first]);
+    h.ok(&["draft", &second]);
+    h.ok(&["send", &first]);
+    assert_eq!(h.outbox().len(), 1);
+
+    // Restore the finished record into the inbox as if from a backup: the answer is reused.
+    let mut restored = h.done(&first).unwrap();
+    restored.state = "drafted".into();
+    h.spool().put(Dir::Inbox, &first, &restored).unwrap();
+    std::fs::remove_file(h.spool().path(Dir::Done, &first)).unwrap();
+    h.ok(&["send", &first]);
+    assert_eq!(
+        h.outbox().len(),
+        1,
+        "no second envelope for the same question"
+    );
+
+    // A different question gets its own envelope.
+    h.ok(&["send", &second]);
+    let outbox = h.outbox();
+    assert_eq!(outbox.len(), 2, "{outbox:?}");
+    let by_q: Vec<&str> = outbox
+        .iter()
+        .map(|(_, r)| r.meta["question_id"].as_str().unwrap())
+        .collect();
+    assert!(by_q.contains(&first.as_str()) && by_q.contains(&second.as_str()));
+}
+
+// ---------------------------------------------------------------- history without a key
+
+/// With no identity key in the home, `owl history` still lists `done/` and names `from` as the
+/// peer of every record — including one this identity sent, which with the key present would
+/// have named `to` (the negative twin of `history_names_the_other_party_...`).
+#[test]
+fn history_without_identity_key_lists_done_with_from_as_peer() {
+    let h = Home::new();
+    let received = h.put(&h.maciek, "received?", "pending");
+    h.ok(&["reject", &received]);
+    let sent = h.put_done(&signed(&h.me, &h.maciek, "i asked?"), "acked");
+
+    let with_key = h.json(&["history", "--json"]);
+    let peer_of = |v: &Value, id: &str| -> (String, String) {
+        let r = v
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["id"] == id)
+            .unwrap_or_else(|| panic!("{id} missing from {v}"));
+        (
+            r["peer"].as_str().unwrap().to_string(),
+            r["peer_name"].as_str().unwrap().to_string(),
+        )
+    };
+    assert_eq!(
+        peer_of(&with_key, &sent),
+        (fp(&h.maciek), "Maciek".into()),
+        "with the key, the other party of a sent record is `to`"
+    );
+
+    std::fs::remove_file(h.path().join("key")).unwrap();
+    assert!(!h.path().join("key").exists());
+    let (code, out, err) = h.run(&["history", "--json"]);
+    assert_eq!(code, 0, "history must not need the key: {err}");
+    assert_eq!(err, "");
+    let no_key: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(no_key.as_array().unwrap().len(), 2, "{no_key}");
+    assert_eq!(
+        peer_of(&no_key, &received),
+        (fp(&h.maciek), "Maciek".into())
+    );
+    assert_eq!(
+        peer_of(&no_key, &sent),
+        (fp(&h.me), fp(&h.me)),
+        "without the key, peer falls back to `from` even for a record this identity sent"
+    );
+
+    // The plain table works too and shows the fallback peer column.
+    let (code, out, _) = h.run(&["history"]);
+    assert_eq!(code, 0);
+    assert!(out.starts_with("ID  "), "{out}");
+    assert!(out.contains(&fp(&h.me)), "{out}");
+    assert_eq!(out.lines().count(), 3, "{out}");
+}
+
+// ---------------------------------------------------------------- machine output shapes
+
+#[test]
+fn send_and_edit_json_shapes() {
+    let h = Home::new();
+    let qid = h.put(&h.maciek, "Where is sk-test-123456 used?", "pending");
+    h.ok(&["draft", &qid]);
+    let before = h.inbox(&qid).unwrap().draft.unwrap();
+
+    let script = h.editor_script("echo EDITED >> \"$1\"");
+    let out = h
+        .owl()
+        .env("EDITOR", &script)
+        .args(["edit", &qid, "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let edited: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(edited["id"], qid);
+    assert_eq!(edited["state"], "drafted");
+    let d = &edited["draft"];
+    assert_eq!(
+        d["text"],
+        format!("{}EDITED", before["text"].as_str().unwrap()),
+        "the stored text has no trailing newline, so the editor appended straight onto it"
+    );
+    assert_eq!(d["status"], "edited");
+    assert_eq!(d["harness"], "fake");
+    assert_eq!(d["redactions"], 1);
+    assert_eq!(d["drafted_at"], before["drafted_at"]);
+    assert!(envelope::parse_rfc3339_to_unix(d["edited_at"].as_str().unwrap()).is_some());
+    assert_eq!(d.as_object().unwrap().len(), 6, "{d}");
+    assert_eq!(edited.as_object().unwrap().len(), 3, "{edited}");
+    assert_eq!(
+        h.inbox(&qid).unwrap().draft.unwrap(),
+        *d,
+        "stored draft == printed draft"
+    );
+
+    let sent = h.json(&["send", &qid, "--json"]);
+    let outbox = h.outbox();
+    assert_eq!(outbox.len(), 1);
+    let (aid, _) = &outbox[0];
+    assert_eq!(
+        sent,
+        json!({
+            "id": aid,
+            "in_reply_to": qid,
+            "to": fp(&h.maciek),
+            "outbox": h.spool().path(Dir::Outbox, aid),
+            "redactions": 1,
+            "harness": "fake",
+        })
+    );
+    assert!(
+        sent["outbox"]
+            .as_str()
+            .unwrap()
+            .ends_with(&format!("/spool/outbox/{aid}.json"))
+    );
+    assert!(Path::new(sent["outbox"].as_str().unwrap()).is_file());
+}
+
+/// `--count --json` counts every unseen record but reports only questions under `questions`.
+#[test]
+fn count_json_separates_questions_from_answers() {
+    let h = Home::new();
+    let q = h.put(&h.maciek, "a question?", "pending");
+    let asked = question(&h.me, &h.maciek, "what I asked?");
+    let reply = Payload::answer(&asked, "the answer", "fake", 0, false);
+    let env = Envelope::sign(&reply, &h.maciek);
+    let aid = h.put_env(&env, "pending");
+    assert_ne!(q, aid);
+
+    assert_eq!(
+        h.json(&["inbox", "--count", "--json"]),
+        json!({ "count": 2, "questions": 1, "peers": [{ "name": "Maciek", "count": 2 }] })
+    );
+    assert_eq!(h.ok(&["inbox", "--count"]), "2\n");
+    // The claude hook line counts unseen records the same way.
+    assert_eq!(
+        h.ok(&["inbox", "--count", "--format", "plain"]),
+        format!("{SENTENCE_TWO}\n")
+    );
+}
