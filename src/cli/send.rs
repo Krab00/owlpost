@@ -12,7 +12,7 @@ use anyhow::Context;
 use owlpost::envelope::{self, Body, Envelope, Kind, Payload};
 use owlpost::identity::{self, Identity};
 use owlpost::spool::{Dir, Record, Spool};
-use serde_json::json;
+use serde_json::{Value, json};
 
 use super::{StoredDraft, finish, inbox_record, payload_of, print_json, user_error};
 
@@ -57,45 +57,66 @@ pub fn run(home: &Path, id: &str, json: bool) -> anyhow::Result<()> {
     };
     let hash = envelope::question_hash(project, path, text);
 
-    let answer = Payload::answer(
-        &question,
-        &draft.text,
-        &draft.harness,
-        draft.redactions,
-        false,
-    );
-    let env = Envelope::sign(&answer, &identity);
-    let now = envelope::rfc3339_now();
-    let out = Record {
-        raw: env.raw,
-        sig: env.sig,
-        state: "unacked".into(),
-        seen: false,
-        received_at: now,
-        draft: None,
-        meta: json!({ "peer": question.from, "question_id": id, "hash": hash }),
+    // A previous `send` may have written the answer and then failed to finish the question
+    // (§3.4 step 5 is not one atomic step). The outbox record carries `meta.question_id`, so
+    // an existing envelope for this question is reused rather than signed and spooled twice.
+    let (answer_id, answer_to) = match existing_answer(&spool, id)? {
+        Some((aid, ato)) => (aid, ato),
+        None => {
+            let answer = Payload::answer(
+                &question,
+                &draft.text,
+                &draft.harness,
+                draft.redactions,
+                false,
+            );
+            let env = Envelope::sign(&answer, &identity);
+            let now = envelope::rfc3339_now();
+            let out = Record {
+                raw: env.raw,
+                sig: env.sig,
+                state: "unacked".into(),
+                seen: false,
+                received_at: now,
+                draft: None,
+                meta: json!({ "peer": question.from, "question_id": id, "hash": hash }),
+            };
+            spool.put(Dir::Outbox, &answer.id, &out)?;
+            spool.cache_put(&hash, &out)?;
+            (answer.id, answer.to)
+        }
     };
-    spool.put(Dir::Outbox, &answer.id, &out)?;
-    spool.cache_put(&hash, &out)?;
     finish(
         &spool,
         id,
         rec,
         "answered",
-        &[("answer_id", json!(answer.id))],
+        &[("answer_id", json!(answer_id))],
     )?;
 
     if json {
         print_json(&json!({
-            "id": answer.id,
+            "id": answer_id,
             "in_reply_to": id,
-            "to": answer.to,
-            "outbox": spool.path(Dir::Outbox, &answer.id),
+            "to": answer_to,
+            "outbox": spool.path(Dir::Outbox, &answer_id),
             "redactions": draft.redactions,
             "harness": draft.harness,
         }))?;
     } else {
-        println!("sent {} (reply to {id}, to {})", answer.id, answer.to);
+        println!("sent {answer_id} (reply to {id}, to {answer_to})");
     }
     Ok(())
+}
+
+/// `(answer id, recipient)` of the outbox envelope already answering question `id`, if any.
+fn existing_answer(spool: &Spool, id: &str) -> anyhow::Result<Option<(String, String)>> {
+    let found = spool.list(Dir::Outbox, |r| {
+        r.meta.get("question_id").and_then(Value::as_str) == Some(id)
+    })?;
+    let Some((aid, arec)) = found.into_iter().next() else {
+        return Ok(None);
+    };
+    let answer = payload_of(&aid, &arec)?;
+    Ok(Some((aid, answer.to)))
 }
