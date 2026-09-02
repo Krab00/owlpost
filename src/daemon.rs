@@ -13,7 +13,9 @@ use tokio::task::JoinHandle;
 use crate::config::Config;
 use crate::contacts::ContactBook;
 use crate::identity::{self, Identity};
-use crate::server::{AppState, PeerAcceptor, Spooled};
+use crate::notify::{self, Kind};
+use crate::server::{AppState, DaemonEvent, PeerAcceptor};
+use crate::spool::Dir;
 use crate::tls::{self, AllowedKeys};
 
 pub const ADDR_FILE: &str = "daemon.addr";
@@ -65,14 +67,8 @@ pub async fn spawn(home: &Path, config: Config) -> anyhow::Result<Running> {
         .with_context(|| format!("config.listen {:?} is not host:port", config.listen))?;
     let tls_config = tls::server_config(&identity, allowed_keys(&book), true)?;
 
-    // ponytail: auto-accept scheduler (OWL-008) consumes this channel; today it only logs.
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Spooled>();
-    tokio::spawn(async move {
-        while let Some(ev) = rx.recv().await {
-            tracing::info!(id = %ev.id, peer = %ev.peer, state = %ev.state, auto = ev.auto, "spooled");
-        }
-    });
-
+    // ponytail: auto-accept scheduler (OWL-008) joins this consumer; today it notifies only.
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<DaemonEvent>();
     let state = Arc::new(AppState::new(
         home.to_path_buf(),
         cwd,
@@ -80,6 +76,12 @@ pub async fn spawn(home: &Path, config: Config) -> anyhow::Result<Running> {
         identity,
         Some(tx),
     )?);
+    let events_state = state.clone();
+    tokio::spawn(async move {
+        while let Some(ev) = rx.recv().await {
+            handle_event(&events_state, ev);
+        }
+    });
     let app = crate::server::router(state.clone());
     let acceptor = PeerAcceptor::new(RustlsAcceptor::new(RustlsConfig::from_config(tls_config)));
     let handle = Handle::new();
@@ -103,6 +105,60 @@ pub async fn spawn(home: &Path, config: Config) -> anyhow::Result<Running> {
         handle,
         task,
     })
+}
+
+/// One daemon-loop event: log it and fire the OS notification (§11).
+fn handle_event(state: &AppState, ev: DaemonEvent) {
+    match ev {
+        DaemonEvent::Question(q) => {
+            tracing::info!(id = %q.id, peer = %q.peer, state = %q.state, auto = q.auto, "spooled");
+            let path = question_path(state, &q.id);
+            notify::notify(
+                &state.config,
+                Kind::Question,
+                &peer_name(state, &q.peer),
+                &path,
+            );
+        }
+        DaemonEvent::Answer(a) => {
+            tracing::info!(id = %a.id, peer = %a.peer, path = %a.path, "answer ingested");
+            notify::notify(
+                &state.config,
+                Kind::Answer,
+                &peer_name(state, &a.peer),
+                &a.path,
+            );
+        }
+    }
+}
+
+/// Display name for a fingerprint: the contact's name, else the fingerprint itself.
+pub fn peer_name(state: &AppState, fingerprint: &str) -> String {
+    ContactBook::load(&state.home, &state.cwd)
+        .ok()
+        .and_then(|book| {
+            book.contacts
+                .into_iter()
+                .find(|c| c.fingerprint == fingerprint)
+                .map(|c| c.name)
+        })
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| fingerprint.to_string())
+}
+
+/// `body.path` of the spooled question `id`; `"?"` when the record cannot be read.
+fn question_path(state: &AppState, id: &str) -> String {
+    let rec = match state.spool.get(Dir::Inbox, id) {
+        Ok(Some(rec)) => rec,
+        _ => return "?".to_string(),
+    };
+    match serde_json::from_str::<crate::envelope::Payload>(&rec.raw) {
+        Ok(crate::envelope::Payload {
+            body: crate::envelope::Body::Question { path, .. },
+            ..
+        }) => path,
+        _ => "?".to_string(),
+    }
 }
 
 /// Atomically writes `<home>/daemon.addr` (`host:port\n`): temp file + rename, like the spool.

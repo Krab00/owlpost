@@ -11,7 +11,7 @@ use owlpost::contacts::{Mode, Policy, Scope};
 use owlpost::daemon::{self, Running};
 use owlpost::envelope::{Envelope, Payload};
 use owlpost::identity::{Identity, fingerprint, pubkey_string};
-use owlpost::spool::Spool;
+use owlpost::spool::{Record, Spool};
 use owlpost::tls::client_config;
 use tempfile::TempDir;
 
@@ -51,15 +51,22 @@ impl<'a> Peer<'a> {
     }
 }
 
-/// Writes `$home/contacts/<fingerprint>.json` in the `contacts::local` file shape.
+/// Writes `$home/contacts/<fingerprint>.json` in the `contacts::local` file shape
+/// (email `<name lowercased>@example.org`, no endpoints).
 pub fn write_contact(home: &Path, peer: &Peer<'_>) {
+    let email = format!("{}@example.org", peer.name.to_lowercase());
+    write_contact_full(home, peer, &[], &[&email]);
+}
+
+/// `write_contact` with explicit endpoints and emails (for the asker side of `owl ask`).
+pub fn write_contact_full(home: &Path, peer: &Peer<'_>, endpoints: &[&str], emails: &[&str]) {
     let dir = home.join("contacts");
     std::fs::create_dir_all(&dir).unwrap();
     let mut v = serde_json::json!({
         "name": peer.name,
-        "emails": [format!("{}@example.org", peer.name.to_lowercase())],
+        "emails": emails,
         "pubkey": pubkey_string(&peer.id.verifying_key()),
-        "endpoints": [],
+        "endpoints": endpoints,
         "source": "local",
         "added_at": "2026-09-01T10:00:00Z",
     });
@@ -91,9 +98,12 @@ pub fn prepare_home_with(
     if !home.join("key").exists() {
         id.save(home).unwrap();
     }
+    // `notify` is off in every fixture daemon so the suite never fires real desktop
+    // notifications; `tests/notify.rs` opts in explicitly through `tweak`.
     let mut cfg = Config {
         name: "Bea".into(),
         listen: "127.0.0.1:0".into(),
+        notify: false,
         ..Default::default()
     };
     tweak(&mut cfg);
@@ -164,6 +174,19 @@ pub fn client(client: Option<&Identity>, server: &Identity) -> reqwest::Client {
         .use_preconfigured_tls(Arc::unwrap_or_clone(cfg))
         .build()
         .unwrap()
+}
+
+/// Spool record for an envelope in `state`, no meta.
+pub fn record(env: &Envelope, state: &str) -> Record {
+    Record {
+        raw: env.raw.clone(),
+        sig: env.sig.clone(),
+        state: state.into(),
+        seen: false,
+        received_at: owlpost::envelope::rfc3339_now(),
+        draft: None,
+        meta: serde_json::Value::Null,
+    }
 }
 
 pub fn question(from: &Identity, to: &Identity, text: &str) -> Payload {
