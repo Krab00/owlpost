@@ -1,0 +1,226 @@
+//! Daemon run loop: the mTLS listener (this task), plus hooks where the auto-accept scheduler
+//! and the pull loop plug in later.
+
+use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use anyhow::Context;
+use axum_server::Handle;
+use axum_server::tls_rustls::{RustlsAcceptor, RustlsConfig};
+use tokio::task::JoinHandle;
+
+use crate::config::Config;
+use crate::contacts::ContactBook;
+use crate::identity::{self, Identity};
+use crate::server::{AppState, PeerAcceptor, Spooled};
+use crate::tls::{self, AllowedKeys};
+
+pub const ADDR_FILE: &str = "daemon.addr";
+
+/// A daemon running inside this process.
+pub struct Running {
+    pub addr: SocketAddr,
+    pub state: Arc<AppState>,
+    handle: Handle<SocketAddr>,
+    task: JoinHandle<std::io::Result<()>>,
+}
+
+impl std::fmt::Debug for Running {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Running").field("addr", &self.addr).finish()
+    }
+}
+
+impl Running {
+    /// Stops accepting and drops open connections.
+    pub fn shutdown(&self) {
+        self.handle.shutdown();
+    }
+
+    /// Waits for the listener task to end (after `shutdown`, or on a listener error).
+    pub async fn wait(self) -> anyhow::Result<()> {
+        self.task.await.context("listener task")??;
+        Ok(())
+    }
+}
+
+/// Client keys allowed through the TLS handshake: every contact in the merged book.
+pub fn allowed_keys(book: &ContactBook) -> AllowedKeys {
+    book.contacts
+        .iter()
+        .filter_map(|c| identity::parse_pubkey(&c.pubkey).ok())
+        .map(|pk| *pk.as_bytes())
+        .collect()
+}
+
+/// Binds `config.listen` (port 0 allowed) and serves the API on the tokio runtime.
+pub async fn spawn(home: &Path, config: Config) -> anyhow::Result<Running> {
+    let identity = Identity::load(home)?;
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let book = ContactBook::load(home, &cwd)?;
+    let listen: SocketAddr = config
+        .listen
+        .parse()
+        .with_context(|| format!("config.listen {:?} is not host:port", config.listen))?;
+    let tls_config = tls::server_config(&identity, allowed_keys(&book), true)?;
+
+    // ponytail: auto-accept scheduler (OWL-008) consumes this channel; today it only logs.
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Spooled>();
+    tokio::spawn(async move {
+        while let Some(ev) = rx.recv().await {
+            tracing::info!(id = %ev.id, peer = %ev.peer, state = %ev.state, auto = ev.auto, "spooled");
+        }
+    });
+
+    let state = Arc::new(AppState::new(
+        home.to_path_buf(),
+        cwd,
+        config,
+        identity,
+        Some(tx),
+    )?);
+    let app = crate::server::router(state.clone());
+    let acceptor = PeerAcceptor::new(RustlsAcceptor::new(RustlsConfig::from_config(tls_config)));
+    let handle = Handle::new();
+    let server = axum_server::bind(listen)
+        .acceptor(acceptor)
+        .handle(handle.clone());
+    let task = tokio::spawn(server.serve(app.into_make_service()));
+    let Some(addr) = handle.listening().await else {
+        let err = match task.await {
+            Ok(Err(e)) => anyhow::Error::from(e),
+            Ok(Ok(())) => anyhow::anyhow!("listener exited before binding"),
+            Err(e) => anyhow::Error::from(e),
+        };
+        return Err(err.context(format!("binding {listen}")));
+    };
+    let _ = state.bound.set(addr);
+    tracing::info!(%addr, fingerprint = %state.fingerprint(), "listening");
+    Ok(Running {
+        addr,
+        state,
+        handle,
+        task,
+    })
+}
+
+/// Atomically writes `<home>/daemon.addr` (`host:port\n`): temp file + rename, like the spool.
+pub fn write_addr_file(home: &Path, addr: SocketAddr) -> anyhow::Result<()> {
+    let path = home.join(ADDR_FILE);
+    let tmp = home.join(format!("{ADDR_FILE}.tmp"));
+    std::fs::write(&tmp, format!("{addr}\n"))
+        .with_context(|| format!("writing {}", tmp.display()))?;
+    if let Err(e) = std::fs::rename(&tmp, &path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e).with_context(|| format!("renaming to {}", path.display()));
+    }
+    Ok(())
+}
+
+/// `owl daemon --foreground`: serve until the listener stops (or the process is killed).
+pub async fn run_foreground(home: &Path, config: Config) -> anyhow::Result<()> {
+    let running = spawn(home, config).await?;
+    write_addr_file(home, running.addr)?;
+    tracing::info!(path = %home.join(ADDR_FILE).display(), "wrote daemon.addr");
+    // ponytail: pull loop (OWL-011) and spool scan join here as sibling tasks.
+    running.wait().await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn addr_file_is_written_atomically() {
+        let home = tempfile::tempdir().unwrap();
+        let addr: SocketAddr = "127.0.0.1:4242".parse().unwrap();
+        write_addr_file(home.path(), addr).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(home.path().join(ADDR_FILE)).unwrap(),
+            "127.0.0.1:4242\n"
+        );
+        assert!(!home.path().join("daemon.addr.tmp").exists());
+        // Overwrite on restart.
+        write_addr_file(home.path(), "127.0.0.1:1".parse().unwrap()).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(home.path().join(ADDR_FILE)).unwrap(),
+            "127.0.0.1:1\n"
+        );
+    }
+
+    #[test]
+    fn addr_file_failure_leaves_no_tmp() {
+        let home = tempfile::tempdir().unwrap();
+        // Destination blocked by a non-empty directory: rename must fail.
+        let blocker = home.path().join(ADDR_FILE);
+        std::fs::create_dir_all(blocker.join("child")).unwrap();
+        let err = write_addr_file(home.path(), "127.0.0.1:1".parse().unwrap())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("renaming to"), "{err}");
+        assert!(!home.path().join("daemon.addr.tmp").exists());
+        assert!(blocker.is_dir(), "blocker untouched");
+        // Missing home: the temp write itself fails.
+        let err = write_addr_file(&home.path().join("missing"), "127.0.0.1:1".parse().unwrap())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("writing"), "{err}");
+    }
+
+    #[test]
+    fn allowed_keys_skips_bad_pubkeys() {
+        use crate::contacts::Contact;
+        let good = Identity::from_seed([5u8; 32]);
+        let mk = |pubkey: &str| Contact {
+            name: String::new(),
+            emails: vec![],
+            pubkey: pubkey.into(),
+            endpoints: vec![],
+            source: "local".into(),
+            policy: None,
+            added_at: None,
+            fingerprint: String::new(),
+        };
+        let book = ContactBook {
+            contacts: vec![
+                mk(&identity::pubkey_string(&good.verifying_key())),
+                mk("ed25519:AAAA"),
+                mk("garbage"),
+            ],
+        };
+        let keys = allowed_keys(&book);
+        assert_eq!(keys.len(), 1);
+        assert!(keys.contains(good.verifying_key().as_bytes()));
+        assert!(allowed_keys(&ContactBook::default()).is_empty());
+    }
+
+    #[tokio::test]
+    async fn spawn_rejects_bad_listen_and_missing_key() {
+        let home = tempfile::tempdir().unwrap();
+        let cfg = Config {
+            listen: "127.0.0.1:0".into(),
+            ..Default::default()
+        };
+        let err = spawn(home.path(), cfg.clone())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("reading"), "no key: {err}");
+        Identity::from_seed([6u8; 32]).save(home.path()).unwrap();
+        let bad = Config {
+            listen: "nonsense".into(),
+            ..cfg.clone()
+        };
+        let err = spawn(home.path(), bad).await.unwrap_err().to_string();
+        assert!(err.contains("not host:port"), "{err}");
+        // Port already taken → bind error surfaces, no panic.
+        let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let busy = Config {
+            listen: taken.local_addr().unwrap().to_string(),
+            ..cfg
+        };
+        let err = format!("{:#}", spawn(home.path(), busy).await.unwrap_err());
+        assert!(err.contains("binding 127.0.0.1:"), "{err}");
+    }
+}

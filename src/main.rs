@@ -5,7 +5,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
-use owlpost::{config, contacts, identity};
+use owlpost::{config, contacts, daemon, identity};
 
 #[derive(Parser)]
 #[command(
@@ -114,6 +114,7 @@ enum Cmd {
     },
     /// Run the listener and loops
     Daemon {
+        /// Stay attached to the terminal (currently the only mode; `owl install` supervises)
         #[arg(long)]
         foreground: bool,
     },
@@ -238,6 +239,24 @@ fn contact(home: &Path, cmd: ContactCmd, json: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `owl daemon [--foreground]`. Both forms run attached: detaching is the service manager's
+/// job (`owl install`, OWL-012), so the flag documents intent rather than changing behaviour.
+// ponytail: no self-daemonising — launchd/systemd keep the process in the foreground anyway.
+fn daemon_cmd(home: &Path, _foreground: bool) -> anyhow::Result<()> {
+    let (cfg, _id) = require_identity(home)?;
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .with_writer(std::io::stderr)
+        .init();
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(daemon::run_foreground(home, cfg))
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let home = config::home_dir(cli.home.as_deref());
@@ -245,6 +264,7 @@ fn main() -> ExitCode {
         Cmd::Init { name, email } => init(&home, name, email),
         Cmd::Whoami => whoami(&home, cli.json),
         Cmd::Contact { cmd } => contact(&home, cmd, cli.json),
+        Cmd::Daemon { foreground } => daemon_cmd(&home, foreground),
         _ => Err(anyhow::anyhow!("not implemented yet")),
     };
     match result {
