@@ -16,7 +16,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 use axum::body::Bytes;
-use axum::extract::{Extension, Path, State};
+use axum::extract::rejection::BytesRejection;
+use axum::extract::{DefaultBodyLimit, Extension, Path, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::middleware::AddExtension;
 use axum::response::{IntoResponse, Response};
@@ -37,6 +38,8 @@ use crate::spool::{Dir, Record, Spool};
 pub const SIGNATURE_HEADER: &str = "x-owl-signature";
 /// A2A protocol version the card claims to speak.
 pub const A2A_PROTOCOL_VERSION: &str = "0.3.0";
+/// Largest request body accepted (a question is a few hundred bytes; 413 beyond this).
+pub const MAX_BODY_BYTES: usize = 64 * 1024;
 
 /// Fingerprint of the client certificate on this connection; `None` = unpinned client.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -197,7 +200,43 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/questions", post(post_question))
         .route("/v1/outbox", get(get_outbox))
         .route("/v1/outbox/{id}/ack", post(ack_outbox))
+        .fallback(not_found)
+        .method_not_allowed_fallback(method_not_allowed)
+        .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .with_state(state)
+}
+
+async fn not_found() -> ApiError {
+    ApiError::not_found()
+}
+
+async fn method_not_allowed() -> ApiError {
+    ApiError::new(StatusCode::METHOD_NOT_ALLOWED, "method not allowed")
+}
+
+/// Body extraction failures as JSON: 413 over `MAX_BODY_BYTES`, 400 for a broken stream.
+fn body_bytes(body: Result<Bytes, BytesRejection>) -> ApiResult<Bytes> {
+    body.map_err(|e| {
+        if e.status() == StatusCode::PAYLOAD_TOO_LARGE {
+            ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, "body too large")
+        } else {
+            ApiError::bad_request("unreadable body")
+        }
+    })
+}
+
+/// Inbox state for a spooled question and whether the scheduler should auto-answer it.
+pub fn record_state(mode: Option<Mode>) -> (&'static str, bool) {
+    match mode {
+        None => ("consent", false),
+        Some(Mode::Auto) => ("pending", true),
+        Some(Mode::Manual) | Some(Mode::Never) => ("pending", false),
+    }
+}
+
+/// Only a peer the owner has already allowed (`manual`/`auto`) may receive a cached answer.
+pub fn may_read_cache(mode: Option<Mode>) -> bool {
+    matches!(mode, Some(Mode::Manual) | Some(Mode::Auto))
 }
 
 /// A2A-shaped agent card (§7). Served to pinned and unpinned clients alike.
@@ -305,14 +344,15 @@ fn policy_of(book: &ContactBook, fp: &str) -> Option<Policy> {
 
 /// `POST /v1/questions` — check order: JSON → signature header → contact → signature →
 /// schema (`from` = caller) → replay window → duplicate id → rate limit → policy →
-/// cache → spool. Nothing is written before every check has passed.
+/// cache (allowed peers only) → spool. Nothing is written before every check has passed.
 async fn post_question(
     State(state): State<Arc<AppState>>,
     Extension(peer): Extension<PeerId>,
     headers: HeaderMap,
-    body: Bytes,
+    body: Result<Bytes, BytesRejection>,
 ) -> ApiResult<Response> {
     let caller = require_peer(&peer)?.to_string();
+    let body = body_bytes(body)?;
     let value: Value =
         serde_json::from_slice(&body).map_err(|_| ApiError::bad_request("body is not JSON"))?;
     let sig = signature_header(&headers)?;
@@ -377,16 +417,15 @@ async fn post_question(
         }
     };
     let hash = envelope::question_hash(project, path, question);
-    if let Some(cached) = state.spool.cache_get(&hash).map_err(ApiError::storage)? {
+    let mode = policy.as_ref().map(|p| p.mode);
+    if may_read_cache(mode)
+        && let Some(cached) = state.spool.cache_get(&hash).map_err(ApiError::storage)?
+    {
         remember(&state, &payload.id, now)?;
         tracing::info!(peer = %caller, id = %payload.id, "cache hit");
         return Ok(answer_response(&cached.raw, &cached.sig));
     }
-    let (record_state, auto) = match policy.as_ref().map(|p| p.mode) {
-        None => ("consent", false),
-        Some(Mode::Auto) => ("pending", true),
-        Some(Mode::Manual) | Some(Mode::Never) => ("pending", false),
-    };
+    let (record_state, auto) = record_state(mode);
     let sig_text = headers
         .get(SIGNATURE_HEADER)
         .and_then(|v| v.to_str().ok())
@@ -465,15 +504,43 @@ async fn get_outbox(
     Extension(peer): Extension<PeerId>,
 ) -> ApiResult<Json<Value>> {
     let caller = require_peer(&peer)?;
-    let records = state
-        .spool
-        .list(Dir::Outbox, |r| payload_to(r).as_deref() == Some(caller))
-        .map_err(ApiError::storage)?;
-    let items: Vec<Value> = records
-        .iter()
+    let items: Vec<Value> = list_lenient(&state.spool, Dir::Outbox)?
+        .into_iter()
+        .filter(|(_, r)| payload_to(r).as_deref() == Some(caller))
         .map(|(_, r)| json!({ "raw": r.raw, "sig": r.sig }))
         .collect();
     Ok(Json(Value::Array(items)))
+}
+
+/// Like `Spool::list`, but a corrupt record is skipped with a warning instead of failing
+/// the whole listing (one bad file must not take the outbox offline for every peer).
+fn list_lenient(spool: &Spool, dir: Dir) -> ApiResult<Vec<(String, Record)>> {
+    let dir_path = spool
+        .path(dir, "x")
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .ok_or_else(|| ApiError::storage(anyhow::anyhow!("spool dir has no parent")))?;
+    let entries = std::fs::read_dir(&dir_path)
+        .map_err(|e| ApiError::storage(anyhow::Error::from(e).context("listing spool dir")))?;
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(id) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        match spool.get(dir, id) {
+            Ok(Some(rec)) => out.push((id.to_string(), rec)),
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %format!("{e:#}"), "skipping corrupt record")
+            }
+        }
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(out)
 }
 
 /// `POST /v1/outbox/{id}/ack` — `204` and the record moves to `done/` (state `acked`);
@@ -487,18 +554,23 @@ async fn ack_outbox(
     if id.is_empty() || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
         return Err(ApiError::not_found());
     }
-    let rec = state
-        .spool
-        .get(Dir::Outbox, &id)
-        .map_err(ApiError::storage)?
-        .ok_or_else(ApiError::not_found)?;
+    let rec = match state.spool.get(Dir::Outbox, &id) {
+        Ok(Some(rec)) => rec,
+        Ok(None) => return Err(ApiError::not_found()),
+        Err(e) => {
+            // A corrupt file is nobody's answer: 404, like the lenient listing skips it.
+            tracing::warn!(id = %id, error = %format!("{e:#}"), "corrupt outbox record");
+            return Err(ApiError::not_found());
+        }
+    };
     if payload_to(&rec).as_deref() != Some(caller) {
         return Err(ApiError::not_found());
     }
+    // Move first: a failed move must not leave an `acked` record sitting in the outbox.
     state
         .spool
-        .set_state(Dir::Outbox, &id, "acked")
-        .and_then(|_| state.spool.move_to(Dir::Outbox, &id, Dir::Done))
+        .move_to(Dir::Outbox, &id, Dir::Done)
+        .and_then(|_| state.spool.set_state(Dir::Done, &id, "acked"))
         .map_err(ApiError::storage)?;
     tracing::info!(peer = %caller, id = %id, "answer acked");
     Ok(StatusCode::NO_CONTENT)
@@ -572,6 +644,29 @@ mod tests {
         let mut b = Bucket::full(1, 10.0);
         assert_eq!(b.take(1, 5.0), Ok(()));
         assert_eq!(b.take(1, 5.0), Err(3600));
+    }
+
+    #[test]
+    fn retry_after_rounds_up_to_a_full_second() {
+        let mut b = Bucket::full(3, 0.0);
+        for _ in 0..3 {
+            assert_eq!(b.take(3, 0.0), Ok(()));
+        }
+        assert_eq!(b.take(3, 0.5), Err(1200), "1199.5 s rounds up, not down");
+        assert_eq!(b.take(3, 1.5), Err(1199), "1198.5 s rounds up to 1199");
+        assert_eq!(b.take(3, 2.0), Err(1198), "exact seconds stay exact");
+    }
+
+    #[test]
+    fn record_state_and_cache_gate_per_policy() {
+        assert_eq!(record_state(None), ("consent", false));
+        assert_eq!(record_state(Some(Mode::Manual)), ("pending", false));
+        assert_eq!(record_state(Some(Mode::Auto)), ("pending", true));
+        assert_eq!(record_state(Some(Mode::Never)), ("pending", false));
+        assert!(!may_read_cache(None));
+        assert!(may_read_cache(Some(Mode::Manual)));
+        assert!(may_read_cache(Some(Mode::Auto)));
+        assert!(!may_read_cache(Some(Mode::Never)));
     }
 
     #[test]
