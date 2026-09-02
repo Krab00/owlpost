@@ -121,10 +121,16 @@ pub fn meta_object(rec: &mut Record) -> &mut Map<String, Value> {
 
 /// Finishes an inbox record: `state`, `meta.done_at` and the `extra` meta keys are set on the
 /// record, which is written atomically (temp file + rename, `Spool::put`) into `done/`; only
-/// after that succeeds is the `inbox/` file removed. A failure writing `done/` therefore leaves
-/// the inbox record byte-for-byte as it was, so the caller can simply be run again; a failure
-/// removing the inbox file leaves a finished copy in `done/` next to the untouched original,
-/// which a retry overwrites in place.
+/// after that succeeds is the `inbox/` file removed. Two failure shapes, both retryable by
+/// running the same command again:
+///
+/// * writing `done/` fails (destination blocked): nothing was touched, the inbox record is
+///   byte-for-byte as it was;
+/// * removing the inbox file fails (e.g. `inbox/` not writable): the finished copy sits in
+///   `done/` next to the untouched original in `inbox/`; the retry rewrites `done/` in place
+///   and removes the original.
+///
+/// Either way the error is returned, never swallowed, so the caller exits non-zero.
 pub fn finish(
     spool: &Spool,
     id: &str,
@@ -143,6 +149,20 @@ pub fn finish(
         .with_context(|| format!("finishing record {id}"))?;
     let src = spool.path(Dir::Inbox, id);
     std::fs::remove_file(&src).with_context(|| format!("removing {}", src.display()))
+}
+
+/// `(answer id, recipient)` of the outbox envelope already answering question `id`, if any.
+/// `send` reuses it instead of signing a second one and `edit` refuses to change a draft that
+/// has already been shipped this way.
+pub fn existing_answer(spool: &Spool, id: &str) -> anyhow::Result<Option<(String, String)>> {
+    let found = spool.list(Dir::Outbox, |r| {
+        r.meta.get("question_id").and_then(Value::as_str) == Some(id)
+    })?;
+    let Some((aid, arec)) = found.into_iter().next() else {
+        return Ok(None);
+    };
+    let answer = payload_of(&aid, &arec)?;
+    Ok(Some((aid, answer.to)))
 }
 
 /// Loads the merged contact book for the current directory; a missing git root is fine.
