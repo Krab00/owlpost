@@ -3,6 +3,8 @@
 #
 #   FAKE_HARNESS_LOG   append pid, argv, cwd, env marker and stdin here (prompt assertions)
 #   FAKE_SLEEP         sleep this many seconds before answering (timeout tests)
+#   FAKE_PRINT_THEN_SLEEP  print the answer first, then sleep this many seconds (partial-output timeout)
+#   FAKE_STDERR        print this text to stderr (error-message tests)
 #   FAKE_OUTPUT_FILE   print this file instead of the canned answer (extraction tests)
 #   FAKE_EXIT          exit with this code after printing (failure tests)
 #
@@ -19,6 +21,9 @@ if [ -n "$FAKE_HARNESS_LOG" ]; then
     echo "end"
   } >>"$FAKE_HARNESS_LOG"
 fi
+if [ -n "$FAKE_STDERR" ]; then
+  echo "$FAKE_STDERR" >&2
+fi
 if [ -n "$FAKE_SLEEP" ]; then
   sleep "$FAKE_SLEEP"
 fi
@@ -31,5 +36,8 @@ It reads the credentials file, whose sample line is:
 api_key = sk-test-123456
 Nothing else in the repository overrides it.
 ANSWER
+fi
+if [ -n "$FAKE_PRINT_THEN_SLEEP" ]; then
+  sleep "$FAKE_PRINT_THEN_SLEEP"
 fi
 exit "${FAKE_EXIT:-0}"
