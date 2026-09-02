@@ -14,7 +14,7 @@ use owlpost::identity::{self, Identity};
 use owlpost::spool::{Dir, Record, Spool};
 use serde_json::json;
 
-use super::{StoredDraft, inbox_record, payload_of, print_json, user_error};
+use super::{StoredDraft, finish, inbox_record, payload_of, print_json, user_error};
 
 pub fn run(home: &Path, id: &str, json: bool) -> anyhow::Result<()> {
     let spool = Spool::new(home)?;
@@ -71,20 +71,19 @@ pub fn run(home: &Path, id: &str, json: bool) -> anyhow::Result<()> {
         sig: env.sig,
         state: "unacked".into(),
         seen: false,
-        received_at: now.clone(),
+        received_at: now,
         draft: None,
         meta: json!({ "peer": question.from, "question_id": id, "hash": hash }),
     };
     spool.put(Dir::Outbox, &answer.id, &out)?;
     spool.cache_put(&hash, &out)?;
-    spool.move_to(Dir::Inbox, id, Dir::Done)?;
-    let mut done = spool
-        .get(Dir::Done, id)?
-        .with_context(|| format!("record {id} vanished from done/"))?;
-    done.state = "answered".into();
-    done.meta["answer_id"] = json!(answer.id);
-    done.meta["done_at"] = json!(now);
-    spool.put(Dir::Done, id, &done)?;
+    finish(
+        &spool,
+        id,
+        rec,
+        "answered",
+        &[("answer_id", json!(answer.id))],
+    )?;
 
     if json {
         print_json(&json!({
