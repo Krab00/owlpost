@@ -92,9 +92,48 @@ async fn card_is_served_unpinned_and_pinned() {
     for path in CARD_PATHS {
         assert!(unknown.get(b.url(path)).send().await.is_err(), "{path}");
     }
-    // Unknown route → 404, still not a 500.
+    // Unknown route and wrong method are JSON 4xx too.
     let resp = pinned.get(b.url("/v1/nope")).send().await.unwrap();
-    assert_eq!(resp.status(), 404);
+    assert_error(resp, 404, "not found").await;
+    let resp = unpinned.get(b.url("/nope")).send().await.unwrap();
+    assert_error(resp, 404, "not found").await;
+    let resp = pinned.get(b.url("/v1/questions")).send().await.unwrap();
+    assert_error(resp, 405, "method not allowed").await;
+    let resp = unpinned.post(b.url(CARD_PATHS[0])).send().await.unwrap();
+    assert_error(resp, 405, "method not allowed").await;
+    // Oversized body is 413 JSON, not a dropped connection.
+    let big = vec![b' '; owlpost::server::MAX_BODY_BYTES + 1024];
+    let resp = post_raw(&pinned, &b, big, Some("ed25519:AAAA")).await;
+    assert_error(resp, 413, "body too large").await;
+    b.running.shutdown();
+
+    // The card echoes the configured harness, not a constant.
+    let b = spawn_daemon_with(4, &[Peer::new(&a, "Ana", None)], |cfg| {
+        cfg.responder.harness = "codex".into();
+        cfg.name = "Cody".into();
+        cfg.endpoints = vec!["cody.example.org:7411".into()];
+    })
+    .await;
+    for path in CARD_PATHS {
+        let card = card_at(&client(None, &b.id), &b, path).await;
+        assert_eq!(card["owlpost"]["harness"], "codex");
+        assert_eq!(card["name"], "Cody");
+        assert_eq!(card["url"], "https://cody.example.org:7411/");
+        assert_eq!(card["owlpost"]["fingerprint"], b.fp());
+    }
+    b.running.shutdown();
+
+    // A daemon with no contacts at all still serves the card to unpinned clients.
+    let b = spawn_daemon(5, true, &[]).await;
+    let card = card_at(&client(None, &b.id), &b, CARD_PATHS[1]).await;
+    assert_eq!(card["owlpost"]["fingerprint"], b.fp());
+    assert!(
+        client(Some(&a), &b.id)
+            .get(b.url(CARD_PATHS[0]))
+            .send()
+            .await
+            .is_err()
+    );
     b.running.shutdown();
 }
 
@@ -457,6 +496,30 @@ async fn bad_inputs_are_4xx_never_500() {
             .unwrap();
         assert_eq!(resp.status(), 404, "ack {id:?}");
     }
+    // The same id from another peer is still a duplicate.
+    let mut from_c = question(&c, &b.id, "why?");
+    from_c.id = good.id.clone();
+    let raw = from_c.to_signed_bytes();
+    let resp = post_raw(
+        &client(Some(&c), &b.id),
+        &b,
+        raw.clone(),
+        Some(&sig_over(&c, &raw)),
+    )
+    .await;
+    assert_error(resp, 409, "duplicate id").await;
+
+    // Seen ids survive a daemon restart on the same home (§6: seen-ids.txt).
+    b.running.shutdown();
+    let TestDaemon { dir, id: b_id, .. } = b;
+    let b = respawn(dir, b_id).await;
+    let cl = client(Some(&a), &b.id);
+    let resp = post_raw(&cl, &b, good_raw.clone(), Some(&sig_over(&a, &good_raw))).await;
+    assert_error(resp, 409, "duplicate id").await;
+    let fresh = signed(&a, &b.id, "after restart?");
+    let resp = post_envelope(&cl, &b, &fresh).await;
+    assert_eq!(resp.status(), 202, "new ids still accepted after restart");
+    assert_eq!(inbox_ids(&b).len(), 3);
     b.running.shutdown();
 }
 
@@ -484,7 +547,10 @@ async fn rate_limit_trips() {
     assert!(start.elapsed() < Duration::from_secs(60));
     let headers = assert_error(resp, 429, "rate limited").await;
     let retry: u64 = headers["retry-after"].to_str().unwrap().parse().unwrap();
-    assert!((1..=1200).contains(&retry), "Retry-After {retry}");
+    assert_eq!(
+        retry, 1200,
+        "3/h bucket: one token every 1200 s, rounded up"
+    );
     assert_eq!(inbox_ids(&b).len(), 3, "the 4th question is not spooled");
     // A rate-limited id is not burned: the same envelope is still 429, never 409.
     let resp = post_envelope(&cl, &b, &fourth).await;
@@ -492,6 +558,51 @@ async fn rate_limit_trips() {
     // Buckets are per peer.
     let resp = post_envelope(&client(Some(&c), &b.id), &b, &signed(&c, &b.id, "c0")).await;
     assert_eq!(resp.status(), 202);
+    assert_eq!(inbox_ids(&b).len(), 4);
+    b.running.shutdown();
+
+    // Rate limit sits before policy (architecture §3.2): a denied peer burns tokens too.
+    let d = id(4);
+    let b = spawn_daemon(
+        5,
+        true,
+        &[Peer::new(&d, "Dee", Some(policy(Mode::Never, Some(3))))],
+    )
+    .await;
+    let cl = client(Some(&d), &b.id);
+    for i in 0..3 {
+        let resp = post_envelope(&cl, &b, &signed(&d, &b.id, &format!("n{i}"))).await;
+        assert_error(resp, 403, "unavailable").await;
+    }
+    let resp = post_envelope(&cl, &b, &signed(&d, &b.id, "n3")).await;
+    let headers = assert_error(resp, 429, "rate limited").await;
+    assert_eq!(headers["retry-after"], "1200");
+    assert!(inbox_ids(&b).is_empty());
+    b.running.shutdown();
+
+    // No per-contact rate: the global `rate_limit_per_peer_per_hour` applies.
+    let b = spawn_daemon_with(
+        6,
+        &[
+            Peer::new(&a, "Ana", Some(policy(Mode::Manual, None))),
+            Peer::new(&c, "Cat", None),
+        ],
+        |cfg| cfg.rate_limit_per_peer_per_hour = 2,
+    )
+    .await;
+    for (who, name) in [(&a, "a"), (&c, "c")] {
+        let cl = client(Some(who), &b.id);
+        for i in 0..2 {
+            let resp = post_envelope(&cl, &b, &signed(who, &b.id, &format!("{name}{i}"))).await;
+            assert_eq!(resp.status(), 202, "{name}{i}");
+        }
+        let resp = post_envelope(&cl, &b, &signed(who, &b.id, &format!("{name}2"))).await;
+        let headers = assert_error(resp, 429, "rate limited").await;
+        assert_eq!(
+            headers["retry-after"], "1800",
+            "2/h: one token every 1800 s"
+        );
+    }
     assert_eq!(inbox_ids(&b).len(), 4);
     b.running.shutdown();
 }
@@ -576,6 +687,59 @@ async fn cache_hit_returns_answer() {
     assert_eq!(resp.status(), 202);
     assert_eq!(inbox_ids(&b).len(), 1);
     b.running.shutdown();
+
+    // Policy is checked before the cache (architecture §3.2). Same cached hash, four peers:
+    // no policy → consent record, never a cached answer; never → 403; manual/auto → 200.
+    let (none, never, manual, auto) = (id(3), id(4), id(5), id(6));
+    let b = spawn_daemon(
+        7,
+        true,
+        &[
+            Peer::new(&none, "None", None),
+            Peer::new(&never, "Never", Some(policy(Mode::Never, None))),
+            Peer::new(&manual, "Manual", Some(policy(Mode::Manual, None))),
+            Peer::new(&auto, "Auto", Some(policy(Mode::Auto, None))),
+        ],
+    )
+    .await;
+    let earlier = question(&manual, &b.id, text);
+    let ans_env = Envelope::sign(
+        &Payload::answer(&earlier, "Cached.", "fake", 0, true),
+        &b.id,
+    );
+    b.spool()
+        .cache_put(
+            &question_hash(PROJECT, PATH, text),
+            &record(&ans_env.raw, &ans_env.sig, "cached"),
+        )
+        .unwrap();
+    let env = signed(&none, &b.id, text);
+    let resp = post_envelope(&client(Some(&none), &b.id), &b, &env).await;
+    assert_eq!(resp.status(), 202, "no policy: never a cached answer");
+    let id_none = serde_json::from_str::<Payload>(&env.raw).unwrap().id;
+    assert_eq!(
+        b.spool().get(Dir::Inbox, &id_none).unwrap().unwrap().state,
+        "consent"
+    );
+    let resp = post_envelope(
+        &client(Some(&never), &b.id),
+        &b,
+        &signed(&never, &b.id, text),
+    )
+    .await;
+    assert_error(resp, 403, "unavailable").await;
+    for (who, name) in [(&manual, "manual"), (&auto, "auto")] {
+        let resp = post_envelope(&client(Some(who), &b.id), &b, &signed(who, &b.id, text)).await;
+        assert_eq!(resp.status(), 200, "{name}: cache hit");
+        assert_eq!(resp.headers()["x-owl-signature"], ans_env.sig.as_str());
+        assert_eq!(resp.text().await.unwrap(), ans_env.raw);
+    }
+    assert_eq!(
+        inbox_ids(&b),
+        vec![id_none],
+        "only the consent record was spooled"
+    );
+    b.running.shutdown();
 }
 
 // AC8
@@ -600,8 +764,12 @@ async fn outbox_is_per_caller_and_ack_moves_to_done() {
     };
     let (id_a, env_a) = mk(&a, "for A?");
     let (id_c, env_c) = mk(&c, "for C?");
-    // A stray question record in the outbox is never listed.
-    let stray = signed(&a, &b.id, "stray");
+    // A stray *question* record addressed to A is never listed nor ack-able: only answers are.
+    let stray = Envelope::sign(&question(&b.id, &a, "stray question to A"), &b.id);
+    assert_eq!(
+        serde_json::from_str::<Payload>(&stray.raw).unwrap().to,
+        fp(&a)
+    );
     spool
         .put(
             Dir::Outbox,
@@ -609,6 +777,8 @@ async fn outbox_is_per_caller_and_ack_moves_to_done() {
             &record(&stray.raw, &stray.sig, "unacked"),
         )
         .unwrap();
+    // A corrupt file in outbox/ is skipped, never a 500.
+    std::fs::write(spool.path(Dir::Outbox, "corrupt"), b"{not json").unwrap();
 
     let cl_a = client(Some(&a), &b.id);
     let cl_c = client(Some(&c), &b.id);
@@ -630,6 +800,23 @@ async fn outbox_is_per_caller_and_ack_moves_to_done() {
         vec![json!({ "raw": env_c.raw, "sig": env_c.sig })]
     );
 
+    // A blocked done/ target: the ack fails and the outbox record is NOT marked acked.
+    let blocker = spool.path(Dir::Done, &id_a);
+    std::fs::create_dir_all(blocker.join("child")).unwrap();
+    let resp = cl_a
+        .post(b.url(&format!("/v1/outbox/{id_a}/ack")))
+        .send()
+        .await
+        .unwrap();
+    assert_error(resp, 500, "storage error").await;
+    assert_eq!(
+        spool.get(Dir::Outbox, &id_a).unwrap().unwrap().state,
+        "unacked",
+        "failed move must not leave an acked record in outbox"
+    );
+    assert_eq!(list(&cl_a).await.len(), 1, "still listed for A");
+    std::fs::remove_dir_all(&blocker).unwrap();
+
     // Ack by the addressee: 204, record lands in done/ as acked.
     let resp = cl_a
         .post(b.url(&format!("/v1/outbox/{id_a}/ack")))
@@ -646,7 +833,7 @@ async fn outbox_is_per_caller_and_ack_moves_to_done() {
     assert_eq!(list(&cl_c).await.len(), 1, "C's answer untouched");
 
     // Ack of someone else's answer, of an already acked id, of an unknown id: all 404.
-    for id in [id_c.as_str(), id_a.as_str(), "stray", "unknown"] {
+    for id in [id_c.as_str(), id_a.as_str(), "stray", "corrupt", "unknown"] {
         let resp = cl_a
             .post(b.url(&format!("/v1/outbox/{id}/ack")))
             .send()
@@ -659,7 +846,11 @@ async fn outbox_is_per_caller_and_ack_moves_to_done() {
         "unacked"
     );
     assert!(spool.get(Dir::Done, &id_c).unwrap().is_none());
-    assert!(spool.get(Dir::Outbox, "stray").unwrap().is_some());
+    assert_eq!(
+        spool.get(Dir::Outbox, "stray").unwrap().unwrap().state,
+        "unacked"
+    );
+    assert!(spool.path(Dir::Outbox, "corrupt").exists());
     // C can still ack its own.
     let resp = cl_c
         .post(b.url(&format!("/v1/outbox/{id_c}/ack")))

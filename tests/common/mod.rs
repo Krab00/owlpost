@@ -75,14 +75,28 @@ pub fn write_contact(home: &Path, peer: &Peer<'_>) {
 
 /// Prepares a home for `id`: key, config (`listen = 127.0.0.1:0`), contacts.
 pub fn prepare_home(home: &Path, id: &Identity, responder_enabled: bool, peers: &[Peer<'_>]) {
+    prepare_home_with(home, id, peers, |cfg| {
+        cfg.responder.enabled = responder_enabled
+    });
+}
+
+/// Like `prepare_home`, with a hook to tweak any config value before it is saved.
+pub fn prepare_home_with(
+    home: &Path,
+    id: &Identity,
+    peers: &[Peer<'_>],
+    tweak: impl FnOnce(&mut Config),
+) {
     std::fs::create_dir_all(home).unwrap();
-    id.save(home).unwrap();
+    if !home.join("key").exists() {
+        id.save(home).unwrap();
+    }
     let mut cfg = Config {
         name: "Bea".into(),
         listen: "127.0.0.1:0".into(),
         ..Default::default()
     };
-    cfg.responder.enabled = responder_enabled;
+    tweak(&mut cfg);
     cfg.save(home).unwrap();
     for p in peers {
         write_contact(home, p);
@@ -116,9 +130,23 @@ impl TestDaemon {
 
 /// Spawns an in-process daemon for `seed` with the given contacts.
 pub async fn spawn_daemon(seed: u8, responder_enabled: bool, peers: &[Peer<'_>]) -> TestDaemon {
+    spawn_daemon_with(seed, peers, |cfg| cfg.responder.enabled = responder_enabled).await
+}
+
+/// Spawns a daemon whose config was adjusted by `tweak` (non-default values under test).
+pub async fn spawn_daemon_with(
+    seed: u8,
+    peers: &[Peer<'_>],
+    tweak: impl FnOnce(&mut Config),
+) -> TestDaemon {
     let dir = tempfile::tempdir().unwrap();
     let id = id(seed);
-    prepare_home(dir.path(), &id, responder_enabled, peers);
+    prepare_home_with(dir.path(), &id, peers, tweak);
+    respawn(dir, id).await
+}
+
+/// (Re)starts a daemon on an already prepared home, e.g. after `running.shutdown()`.
+pub async fn respawn(dir: TempDir, id: Identity) -> TestDaemon {
     let cfg = Config::load(dir.path()).unwrap();
     let running = daemon::spawn(dir.path(), cfg).await.unwrap();
     TestDaemon {
