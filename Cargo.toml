@@ -18,9 +18,20 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 uuid = { version = "1", features = ["v7", "serde"] }
+regex = "1"
 # ring backend for both: one crypto stack, Ed25519 certs + TLS1.3 sigs, no cmake/nasm build deps.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rcgen = { version = "0.14", default-features = false, features = ["ring"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "process"] }
+axum = "0.8"
+# tls-rustls-no-provider: the plain `tls-rustls` feature would pull aws-lc-rs; we pass our own ring ServerConfig.
+axum-server = { version = "0.8", default-features = false, features = ["tls-rustls-no-provider"] }
+# tower: only for the `Layer` trait, to attach the peer fingerprint to each TLS connection's service.
+tower = "0.5"
+# rustls-no-provider: same reason as above; the client always gets a preconfigured ring ClientConfig.
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "json"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
 tempfile = "3"

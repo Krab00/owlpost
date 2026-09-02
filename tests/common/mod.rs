@@ -1,0 +1,213 @@
+//! Shared integration helpers: a daemon with a temp home on 127.0.0.1:0, peer contacts with
+//! optional policy overlays, pinned / unpinned reqwest clients, signed questions.
+#![allow(dead_code)]
+
+use std::net::SocketAddr;
+use std::path::Path;
+use std::sync::Arc;
+
+use owlpost::config::Config;
+use owlpost::contacts::{Mode, Policy, Scope};
+use owlpost::daemon::{self, Running};
+use owlpost::envelope::{Envelope, Payload};
+use owlpost::identity::{Identity, fingerprint, pubkey_string};
+use owlpost::spool::Spool;
+use owlpost::tls::client_config;
+use tempfile::TempDir;
+
+pub const PROJECT: &str = "github.com/company/monorepo";
+pub const PATH: &str = "src/auth/session.rs";
+
+pub fn id(seed: u8) -> Identity {
+    Identity::from_seed([seed; 32])
+}
+
+pub fn fp(id: &Identity) -> String {
+    fingerprint(&id.verifying_key())
+}
+
+pub fn key(id: &Identity) -> [u8; 32] {
+    *id.verifying_key().as_bytes()
+}
+
+pub fn policy(mode: Mode, rate_limit_per_hour: Option<u32>) -> Policy {
+    Policy {
+        mode,
+        scope: Scope::default(),
+        rate_limit_per_hour,
+    }
+}
+
+/// A contact entry in the daemon's local provider: full contact plus optional policy overlay.
+pub struct Peer<'a> {
+    pub id: &'a Identity,
+    pub name: &'a str,
+    pub policy: Option<Policy>,
+}
+
+impl<'a> Peer<'a> {
+    pub fn new(id: &'a Identity, name: &'a str, policy: Option<Policy>) -> Peer<'a> {
+        Peer { id, name, policy }
+    }
+}
+
+/// Writes `$home/contacts/<fingerprint>.json` in the `contacts::local` file shape.
+pub fn write_contact(home: &Path, peer: &Peer<'_>) {
+    let dir = home.join("contacts");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut v = serde_json::json!({
+        "name": peer.name,
+        "emails": [format!("{}@example.org", peer.name.to_lowercase())],
+        "pubkey": pubkey_string(&peer.id.verifying_key()),
+        "endpoints": [],
+        "source": "local",
+        "added_at": "2026-09-01T10:00:00Z",
+    });
+    if let Some(p) = &peer.policy {
+        v["policy"] = serde_json::to_value(p).unwrap();
+    }
+    std::fs::write(
+        dir.join(format!("{}.json", fp(peer.id))),
+        serde_json::to_vec_pretty(&v).unwrap(),
+    )
+    .unwrap();
+}
+
+/// Prepares a home for `id`: key, config (`listen = 127.0.0.1:0`), contacts.
+pub fn prepare_home(home: &Path, id: &Identity, responder_enabled: bool, peers: &[Peer<'_>]) {
+    prepare_home_with(home, id, peers, |cfg| {
+        cfg.responder.enabled = responder_enabled
+    });
+}
+
+/// Like `prepare_home`, with a hook to tweak any config value before it is saved.
+pub fn prepare_home_with(
+    home: &Path,
+    id: &Identity,
+    peers: &[Peer<'_>],
+    tweak: impl FnOnce(&mut Config),
+) {
+    std::fs::create_dir_all(home).unwrap();
+    if !home.join("key").exists() {
+        id.save(home).unwrap();
+    }
+    let mut cfg = Config {
+        name: "Bea".into(),
+        listen: "127.0.0.1:0".into(),
+        ..Default::default()
+    };
+    tweak(&mut cfg);
+    cfg.save(home).unwrap();
+    for p in peers {
+        write_contact(home, p);
+    }
+}
+
+pub struct TestDaemon {
+    pub dir: TempDir,
+    pub id: Identity,
+    pub addr: SocketAddr,
+    pub running: Running,
+}
+
+impl TestDaemon {
+    pub fn home(&self) -> &Path {
+        self.dir.path()
+    }
+
+    pub fn spool(&self) -> Spool {
+        Spool::new(self.home()).unwrap()
+    }
+
+    pub fn fp(&self) -> String {
+        fp(&self.id)
+    }
+
+    pub fn url(&self, path: &str) -> String {
+        format!("https://{}{}", self.addr, path)
+    }
+}
+
+/// Spawns an in-process daemon for `seed` with the given contacts.
+pub async fn spawn_daemon(seed: u8, responder_enabled: bool, peers: &[Peer<'_>]) -> TestDaemon {
+    spawn_daemon_with(seed, peers, |cfg| cfg.responder.enabled = responder_enabled).await
+}
+
+/// Spawns a daemon whose config was adjusted by `tweak` (non-default values under test).
+pub async fn spawn_daemon_with(
+    seed: u8,
+    peers: &[Peer<'_>],
+    tweak: impl FnOnce(&mut Config),
+) -> TestDaemon {
+    let dir = tempfile::tempdir().unwrap();
+    let id = id(seed);
+    prepare_home_with(dir.path(), &id, peers, tweak);
+    respawn(dir, id).await
+}
+
+/// (Re)starts a daemon on an already prepared home, e.g. after `running.shutdown()`.
+pub async fn respawn(dir: TempDir, id: Identity) -> TestDaemon {
+    let cfg = Config::load(dir.path()).unwrap();
+    let running = daemon::spawn(dir.path(), cfg).await.unwrap();
+    TestDaemon {
+        addr: running.addr,
+        dir,
+        id,
+        running,
+    }
+}
+
+/// reqwest client pinned to `server`'s key; `client = Some(id)` presents a certificate.
+pub fn client(client: Option<&Identity>, server: &Identity) -> reqwest::Client {
+    let cfg = client_config(client, Some(key(server))).unwrap();
+    reqwest::Client::builder()
+        .use_preconfigured_tls(Arc::unwrap_or_clone(cfg))
+        .build()
+        .unwrap()
+}
+
+pub fn question(from: &Identity, to: &Identity, text: &str) -> Payload {
+    Payload::question(&fp(from), &fp(to), PROJECT, PATH, text)
+}
+
+pub fn signed(from: &Identity, to: &Identity, text: &str) -> Envelope {
+    Envelope::sign(&question(from, to, text), from)
+}
+
+/// `POST /v1/questions` with the envelope's raw body and signature header.
+pub async fn post_envelope(
+    client: &reqwest::Client,
+    daemon: &TestDaemon,
+    env: &Envelope,
+) -> reqwest::Response {
+    post_raw(client, daemon, env.raw.clone().into_bytes(), Some(&env.sig)).await
+}
+
+pub async fn post_raw(
+    client: &reqwest::Client,
+    daemon: &TestDaemon,
+    body: Vec<u8>,
+    sig: Option<&str>,
+) -> reqwest::Response {
+    let mut req = client
+        .post(daemon.url("/v1/questions"))
+        .header("content-type", "application/json")
+        .body(body);
+    if let Some(s) = sig {
+        req = req.header("X-Owl-Signature", s);
+    }
+    req.send().await.unwrap()
+}
+
+/// Asserts a JSON `{"error": ...}` body with the given status and exact error string.
+pub async fn assert_error(
+    resp: reqwest::Response,
+    status: u16,
+    error: &str,
+) -> reqwest::header::HeaderMap {
+    assert_eq!(resp.status().as_u16(), status, "status for {error:?}");
+    let headers = resp.headers().clone();
+    let body: serde_json::Value = resp.json().await.expect("error body must be JSON");
+    assert_eq!(body.get("error").and_then(|e| e.as_str()), Some(error));
+    headers
+}
