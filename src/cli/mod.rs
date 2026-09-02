@@ -1,13 +1,17 @@
-//! Inbox-side subcommands (design §8–§9) and the helpers they share: record lookup, payload
-//! parsing, the stored draft shape, peer naming, age formatting and machine output.
+//! Subcommand implementations (inbox side, design §8–§9; install/watch/doctor) and the helpers
+//! they share: record lookup, payload parsing, the stored draft shape, peer naming, age
+//! formatting and machine output.
 
+pub mod doctor;
 pub mod draft;
 pub mod edit;
 pub mod history;
 pub mod inbox;
+pub mod install;
 pub mod reject;
 pub mod send;
 pub mod show;
+pub mod watch;
 
 use std::path::Path;
 
@@ -18,11 +22,21 @@ use owlpost::spool::{Dir, Record, Spool};
 use serde_json::{Map, Value, json};
 
 /// An error that carries its own process exit code (§9: 1 user/data, 2 offline, 3 rate
-/// limited, 4 nothing to do). `main` downcasts it; every other error exits 1.
-#[derive(Debug)]
+/// limited, 4 nothing to do, e.g. a `watch` timeout). `main` downcasts it via [`exit_code`];
+/// every other error exits 1.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExitError {
     pub code: u8,
     pub message: String,
+}
+
+impl ExitError {
+    pub fn new(code: u8, message: impl Into<String>) -> ExitError {
+        ExitError {
+            code,
+            message: message.into(),
+        }
+    }
 }
 
 impl std::fmt::Display for ExitError {
@@ -268,11 +282,7 @@ pub fn print_json(v: &Value) -> anyhow::Result<()> {
 }
 
 pub fn user_error(message: impl Into<String>) -> anyhow::Error {
-    ExitError {
-        code: 1,
-        message: message.into(),
-    }
-    .into()
+    ExitError::new(1, message).into()
 }
 
 #[cfg(test)]
@@ -344,6 +354,15 @@ mod tests {
                 .to_string();
             assert!(err.contains("record x: draft is malformed"), "{bad}: {err}");
         }
+    }
+
+    #[test]
+    fn exit_error_displays_message_and_downcasts() {
+        let e: anyhow::Error = ExitError::new(4, "timeout").into();
+        assert_eq!(e.to_string(), "timeout");
+        assert_eq!(e.downcast_ref::<ExitError>().map(|x| x.code), Some(4));
+        let plain = anyhow::anyhow!("boom");
+        assert!(plain.downcast_ref::<ExitError>().is_none());
     }
 
     #[test]
