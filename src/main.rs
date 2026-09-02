@@ -5,9 +5,9 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
-use owlpost::{config, contacts, daemon, identity};
-
 mod cli;
+
+use owlpost::{config, contacts, daemon, identity};
 
 #[derive(Parser)]
 #[command(
@@ -69,10 +69,7 @@ enum Cmd {
     /// Set policy never
     Deny { peer: String },
     /// Send a question to a peer
-    Ask {
-        #[arg(trailing_var_arg = true)]
-        args: Vec<String>,
-    },
+    Ask(cli::ask::AskArgs),
     /// List or count inbox records
     Inbox {
         #[arg(long)]
@@ -290,6 +287,7 @@ fn main() -> ExitCode {
         Cmd::History { peer, path, since } => {
             cli::history::run(&home, cli::history::Filters { peer, path, since }, cli.json)
         }
+        Cmd::Ask(args) => cli::ask::run(&home, args, cli.json, cli.quiet),
         Cmd::Watch { id, timeout } => cli::watch::run(&home, id.as_deref(), timeout),
         Cmd::Install { dry_run } => cli::install::install(&home, dry_run),
         Cmd::Uninstall => cli::install::uninstall(),
