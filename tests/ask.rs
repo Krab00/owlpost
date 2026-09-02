@@ -5,18 +5,26 @@
 
 mod common;
 
-use std::net::TcpListener;
+use std::net::{SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use axum::extract::{Path as AxPath, State};
+use axum::http::{HeaderMap, StatusCode};
+use axum::routing::{get, post};
+use axum::{Json, Router};
+use axum_server::Handle;
+use axum_server::tls_rustls::{RustlsAcceptor, RustlsConfig};
 use common::*;
 use owlpost::client::{self, SendOutcome};
 use owlpost::contacts::{ContactBook, Mode};
 use owlpost::envelope::{self, Body, Envelope, Kind, Payload, question_hash};
 use owlpost::identity::Identity;
 use owlpost::spool::{Dir, Record, Spool};
-use serde_json::Value;
+use owlpost::tls;
+use serde_json::{Value, json};
 use tempfile::TempDir;
 
 const QUESTION: &str = "Why is the refresh token rotated on every read?";
@@ -157,6 +165,157 @@ fn ask_no_project(home: &Path, cwd: &Path, question: &str) -> Output {
         .unwrap()
 }
 
+// ---- scripted fake peer ------------------------------------------------------------------
+// Speaks B's side of §7 over B's pinned mTLS, but every response is scripted: what the real
+// daemon never sends (a malformed `202`, a failing outbox, a refused ack) has to come from here.
+
+#[derive(Default)]
+struct FakeScript {
+    /// Verbatim `(status, body)` for `POST /v1/questions`; `None` = a well-formed `202`.
+    accept: Option<(u16, String)>,
+    /// `GET /v1/outbox` answers `500` until this instant.
+    outbox_fails_until: Option<Instant>,
+    /// Status of `POST /v1/outbox/{id}/ack` (`204` is what the daemon sends).
+    ack_status: u16,
+    /// When set, every accepted question is answered with this text straight into the outbox.
+    answer_with: Option<String>,
+}
+
+struct FakeState {
+    id: Identity,
+    script: FakeScript,
+    questions: Mutex<Vec<Payload>>,
+    outbox: Mutex<Vec<(Payload, Envelope)>>,
+    acked: Mutex<Vec<String>>,
+}
+
+struct FakePeer {
+    addr: SocketAddr,
+    state: Arc<FakeState>,
+    handle: Handle<SocketAddr>,
+}
+
+impl FakePeer {
+    fn questions(&self) -> Vec<Payload> {
+        self.state.questions.lock().unwrap().clone()
+    }
+    fn answers(&self) -> Vec<Payload> {
+        self.state
+            .outbox
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(p, _)| p.clone())
+            .collect()
+    }
+    fn acked(&self) -> Vec<String> {
+        self.state.acked.lock().unwrap().clone()
+    }
+    fn shutdown(&self) {
+        self.handle.shutdown();
+    }
+}
+
+async fn fake_questions(
+    State(st): State<Arc<FakeState>>,
+    body: String,
+) -> (StatusCode, HeaderMap, String) {
+    let q: Payload = serde_json::from_str(&body).expect("client sends a JSON payload");
+    st.questions.lock().unwrap().push(q.clone());
+    let mut headers = HeaderMap::new();
+    headers.insert("content-type", "application/json".parse().unwrap());
+    if let Some((status, body)) = &st.script.accept {
+        return (
+            StatusCode::from_u16(*status).unwrap(),
+            headers,
+            body.clone(),
+        );
+    }
+    if let Some(text) = &st.script.answer_with {
+        let ans = Payload::answer(&q, text, "fake", 0, false);
+        let env = Envelope::sign(&ans, &st.id);
+        st.outbox.lock().unwrap().push((ans, env));
+    }
+    (
+        StatusCode::ACCEPTED,
+        headers,
+        json!({ "status": "accepted", "id": q.id }).to_string(),
+    )
+}
+
+async fn fake_outbox(State(st): State<Arc<FakeState>>) -> (StatusCode, Json<Value>) {
+    if st
+        .script
+        .outbox_fails_until
+        .is_some_and(|until| Instant::now() < until)
+    {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "still starting" })),
+        );
+    }
+    let acked = st.acked.lock().unwrap();
+    let items: Vec<Envelope> = st
+        .outbox
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(p, _)| !acked.contains(&p.id))
+        .map(|(_, e)| e.clone())
+        .collect();
+    (StatusCode::OK, Json(serde_json::to_value(items).unwrap()))
+}
+
+async fn fake_ack(
+    State(st): State<Arc<FakeState>>,
+    AxPath(id): AxPath<String>,
+) -> (StatusCode, Json<Value>) {
+    let status = StatusCode::from_u16(st.script.ack_status).unwrap();
+    if status == StatusCode::NO_CONTENT {
+        st.acked.lock().unwrap().push(id);
+        return (status, Json(Value::Null));
+    }
+    (status, Json(json!({ "error": "ack refused by script" })))
+}
+
+/// A fake peer with B's identity (`seed`) that admits only `asker`'s key.
+async fn spawn_fake(seed: u8, asker: &Identity, script: FakeScript) -> FakePeer {
+    let id = id(seed);
+    let allowed = [key(asker)].into_iter().collect();
+    let cfg = tls::server_config(&id, allowed, false).unwrap();
+    let state = Arc::new(FakeState {
+        id,
+        script,
+        questions: Mutex::new(vec![]),
+        outbox: Mutex::new(vec![]),
+        acked: Mutex::new(vec![]),
+    });
+    let app = Router::new()
+        .route("/v1/questions", post(fake_questions))
+        .route("/v1/outbox", get(fake_outbox))
+        .route("/v1/outbox/{id}/ack", post(fake_ack))
+        .with_state(state.clone());
+    let handle = Handle::new();
+    let server = axum_server::bind("127.0.0.1:0".parse().unwrap())
+        .acceptor(RustlsAcceptor::new(RustlsConfig::from_config(cfg)))
+        .handle(handle.clone());
+    tokio::spawn(server.serve(app.into_make_service()));
+    let addr = handle.listening().await.expect("fake peer bound");
+    FakePeer {
+        addr,
+        state,
+        handle,
+    }
+}
+
+fn well_formed() -> FakeScript {
+    FakeScript {
+        ack_status: 204,
+        answer_with: Some(ANSWER.into()),
+        ..Default::default()
+    }
+}
+
 // AC1
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn ask_accepted_writes_ask_record() {
@@ -216,6 +375,94 @@ async fn ask_accepted_writes_ask_record() {
     b.running.shutdown();
 }
 
+/// Sends `QUESTION` to a fake peer whose `POST /v1/questions` reply is scripted verbatim.
+async fn ask_scripted_202(
+    a: &Identity,
+    status: u16,
+    body: &str,
+) -> (Output, FakePeer, Spool, TempDir) {
+    let peer = spawn_fake(
+        2,
+        a,
+        FakeScript {
+            accept: Some((status, body.to_string())),
+            ack_status: 204,
+            ..Default::default()
+        },
+    )
+    .await;
+    let home = asker_home(a, &peer.state.id, &[&peer.addr.to_string()]);
+    let out = ask(home.path(), &[]);
+    let spool = Spool::new(home.path()).unwrap();
+    (out, peer, spool, home)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn accepted_202_with_a_bad_body_is_a_clean_error() {
+    let a = id(1);
+    // Well-formed twin through the same fake: the id echoes the question id, ask recorded.
+    let peer = spawn_fake(
+        2,
+        &a,
+        FakeScript {
+            ack_status: 204,
+            ..Default::default()
+        },
+    )
+    .await;
+    let home = asker_home(&a, &peer.state.id, &[&peer.addr.to_string()]);
+    let qid = accepted_id(&ask(home.path(), &[]));
+    assert_eq!(peer.questions()[0].id, qid);
+    assert_eq!(ids(&Spool::new(home.path()).unwrap(), Dir::Asks), [qid]);
+    peer.shutdown();
+
+    // Every malformed 202 body: exit 1 (never a panic), the reason named, nothing recorded.
+    for (body, reason) in [
+        ("[]", "202 body has no id"),
+        ("\"accepted\"", "202 body has no id"),
+        ("null", "202 body has no id"),
+        (r#"{"status":"accepted"}"#, "202 body has no id"),
+        (r#"{"status":"accepted","id":7}"#, "202 body has no id"),
+        ("accepted", "202 body is not JSON"),
+        ("", "202 body is not JSON"),
+    ] {
+        let (out, peer, spool, _home) = ask_scripted_202(&a, 202, body).await;
+        let err = stderr(&out);
+        assert_eq!(out.status.code(), Some(1), "body {body:?}: {err}");
+        assert!(err.contains(reason), "body {body:?}: {err}");
+        assert!(!err.contains("panicked"), "body {body:?}: {err}");
+        assert!(stdout(&out).is_empty(), "body {body:?}");
+        assert_eq!(peer.questions().len(), 1, "the question was sent");
+        for dir in Dir::ALL {
+            assert!(
+                ids(&spool, dir).is_empty(),
+                "body {body:?}: {} must stay empty",
+                dir.name()
+            );
+        }
+        peer.shutdown();
+    }
+
+    // A 202 that accepts some OTHER id is refused: the asks/ record would never be answered.
+    let (out, peer, spool, _home) =
+        ask_scripted_202(&a, 202, r#"{"status":"accepted","id":"someone-elses-id"}"#).await;
+    let err = stderr(&out);
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    let sent = &peer.questions()[0].id;
+    assert!(
+        err.contains(&format!(
+            "peer accepted id someone-elses-id but the question id is {sent}"
+        )),
+        "{err}"
+    );
+    assert!(stdout(&out).is_empty());
+    assert!(
+        ids(&spool, Dir::Asks).is_empty(),
+        "no asks/ record for a mismatched id"
+    );
+    peer.shutdown();
+}
+
 // AC2
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cache_hit_skips_network() {
@@ -268,6 +515,63 @@ async fn cache_hit_skips_network() {
     assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
     assert!(stderr(&out).contains("offline"), "{}", stderr(&out));
     assert!(ids(&spool, Dir::Asks).is_empty());
+}
+
+/// A cache entry that is not a verified answer is a miss: the send is attempted (here: to a
+/// closed port, so exit 2 offline), and the corrupt entry is warned about, never printed.
+#[test]
+fn corrupt_cache_entries_fall_through() {
+    let (a, b) = (id(1), id(2));
+    let hash = question_hash(PROJECT, PATH, QUESTION);
+    let q = Payload::question(&fp(&a), &fp(&b), PROJECT, PATH, QUESTION);
+    let question_env = Envelope::sign(&q, &a);
+    let answer_env = Envelope::sign(&Payload::answer(&q, "Cached answer.", "fake", 0, true), &b);
+    let mut junk_raw = record(&answer_env, "pending");
+    junk_raw.raw = "{not json".into();
+    let mut object_not_payload = record(&answer_env, "pending");
+    object_not_payload.raw = r#"{"status":"pending"}"#.into();
+    for (what, rec) in [
+        // Positive twin's exact shape, but kind `question`: the one dimension that differs.
+        ("a question payload", record(&question_env, "pending")),
+        ("unparseable raw", junk_raw),
+        ("an object that is not a payload", object_not_payload),
+    ] {
+        let home = asker_home(&a, &b, &[&closed_port()]);
+        let spool = Spool::new(home.path()).unwrap();
+        spool.cache_put(&hash, &rec).unwrap();
+        let out = ask(home.path(), &[]);
+        let err = stderr(&out);
+        assert_eq!(out.status.code(), Some(2), "{what}: {err}");
+        assert!(
+            err.contains("ignoring corrupt cache entry"),
+            "{what}: {err}"
+        );
+        assert!(err.contains("offline"), "{what}: {err}");
+        assert!(
+            stdout(&out).is_empty(),
+            "{what}: nothing is printed from the cache"
+        );
+        assert!(!err.contains("panicked"), "{what}: {err}");
+        assert!(ids(&spool, Dir::Asks).is_empty(), "{what}");
+        // --quiet drops the warning, not the miss.
+        let out = ask(home.path(), &["--quiet"]);
+        assert_eq!(out.status.code(), Some(2), "{what}: {}", stderr(&out));
+        assert!(
+            !stderr(&out).contains("ignoring"),
+            "{what}: {}",
+            stderr(&out)
+        );
+    }
+    // The twin with kind `answer` and the same closed port is served from the cache.
+    let home = asker_home(&a, &b, &[&closed_port()]);
+    let spool = Spool::new(home.path()).unwrap();
+    spool
+        .cache_put(&hash, &record(&answer_env, "pending"))
+        .unwrap();
+    let out = ask(home.path(), &[]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(stdout(&out).trim(), "Cached answer.");
+    assert!(stderr(&out).is_empty(), "{}", stderr(&out));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -416,6 +720,11 @@ async fn wait_returns_answer() {
         "{}",
         stderr(&out)
     );
+    assert!(
+        !stderr(&out).contains("warning"),
+        "a 204 ack and a clean poll must not warn: {}",
+        stderr(&out)
+    );
 
     let spool = Spool::new(home.path()).unwrap();
     let hash = question_hash(PROJECT, PATH, QUESTION);
@@ -452,6 +761,124 @@ async fn wait_returns_answer() {
     let out = ask(home.path(), &[]);
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     assert_eq!(stdout(&out).trim(), ANSWER);
+}
+
+/// Runs `owl ask --wait 10` against a scripted fake peer and returns (output, peer, home).
+async fn ask_wait_fake(a: &Identity, script: FakeScript) -> (Output, FakePeer, TempDir) {
+    let peer = spawn_fake(2, a, script).await;
+    let home = asker_home(a, &peer.state.id, &[&peer.addr.to_string()]);
+    let out = ask(home.path(), &["--wait", "10"]);
+    (out, peer, home)
+}
+
+fn assert_answered_via_wait(out: &Output, peer: &FakePeer, home: &Path) -> (String, String) {
+    let qid = peer.questions()[0].id.clone();
+    let aid = peer.answers()[0].id.clone();
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(out));
+    assert_eq!(stdout(out).trim(), ANSWER);
+    let spool = Spool::new(home).unwrap();
+    let inbox = spool
+        .get(Dir::Inbox, &aid)
+        .unwrap()
+        .expect("answer in inbox");
+    assert_eq!(inbox.state, "pending");
+    assert_eq!(inbox.meta["in_reply_to"], qid);
+    let cached = spool
+        .cache_get(&question_hash(PROJECT, PATH, QUESTION))
+        .unwrap()
+        .expect("cached");
+    assert_eq!(cached.raw, inbox.raw);
+    assert!(
+        spool.get(Dir::Asks, &qid).unwrap().is_none(),
+        "ask left asks/"
+    );
+    assert_eq!(
+        spool.get(Dir::Done, &qid).unwrap().unwrap().state,
+        "answered"
+    );
+    (qid, aid)
+}
+
+/// The peer's outbox is unreachable for the first ~1.5 s (daemon restarting, say): `--wait`
+/// warns once and keeps polling until the deadline instead of giving up on the first error.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn wait_keeps_polling_through_transient_outbox_errors() {
+    let a = id(1);
+    let started = Instant::now();
+    let (out, peer, home) = ask_wait_fake(
+        &a,
+        FakeScript {
+            outbox_fails_until: Some(Instant::now() + Duration::from_millis(1500)),
+            ..well_formed()
+        },
+    )
+    .await;
+    assert!(
+        started.elapsed() < Duration::from_secs(8),
+        "answered once the outbox recovered, not at the deadline"
+    );
+    let (_qid, aid) = assert_answered_via_wait(&out, &peer, home.path());
+    let err = stderr(&out);
+    assert_eq!(
+        err.matches("warning: polling Bea").count(),
+        1,
+        "one warning for the failing polls, not one per poll: {err}"
+    );
+    assert!(err.contains("500"), "names the peer's status: {err}");
+    assert_eq!(peer.acked(), [aid], "acked once the answer was stored");
+    peer.shutdown();
+
+    // --quiet: same outcome, no warning at all.
+    let peer = spawn_fake(
+        2,
+        &a,
+        FakeScript {
+            outbox_fails_until: Some(Instant::now() + Duration::from_millis(1500)),
+            ..well_formed()
+        },
+    )
+    .await;
+    let home = asker_home(&a, &peer.state.id, &[&peer.addr.to_string()]);
+    let out = ask(home.path(), &["--wait", "10", "--quiet"]);
+    assert_answered_via_wait(&out, &peer, home.path());
+    assert!(stderr(&out).is_empty(), "{}", stderr(&out));
+    peer.shutdown();
+}
+
+/// The answer is stored, cached and the ask filed before the ack; a refused ack (anything but
+/// `204`) is surfaced as a warning naming the answer, and the exchange still succeeds — the
+/// unacked outbox entry is the responder's to expire (§3.5).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn wait_warns_when_the_ack_is_refused() {
+    let a = id(1);
+    for status in [500u16, 404, 200] {
+        let (out, peer, home) = ask_wait_fake(
+            &a,
+            FakeScript {
+                ack_status: status,
+                ..well_formed()
+            },
+        )
+        .await;
+        let (_qid, aid) = assert_answered_via_wait(&out, &peer, home.path());
+        let err = stderr(&out);
+        assert!(
+            err.contains(&format!("warning: ack of {aid} failed")),
+            "{status}: {err}"
+        );
+        assert!(err.contains("ack refused by script"), "{status}: {err}");
+        assert!(
+            peer.acked().is_empty(),
+            "{status}: the fake never recorded an ack"
+        );
+        peer.shutdown();
+    }
+    // The 204 twin: identical flow, acked, silent.
+    let (out, peer, home) = ask_wait_fake(&a, well_formed()).await;
+    let (_qid, aid) = assert_answered_via_wait(&out, &peer, home.path());
+    assert!(!stderr(&out).contains("warning"), "{}", stderr(&out));
+    assert_eq!(peer.acked(), [aid]);
+    peer.shutdown();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -698,10 +1125,12 @@ async fn project_comes_from_origin_remote_unless_overridden() {
 #[test]
 fn blame_candidates() {
     let (a, bea, ana) = (id(1), id(2), id(3));
+    // 20 blamed lines; the unmatched author owns 11 of them, so a share over matched lines
+    // only (6/9, 3/9) is nowhere near a share over all blamed lines (6/20, 3/20).
     let repo = fixture_repo(&[
         ("ana@example.org", 6),
         ("bea@example.org", 3),
-        ("nobody@example.org", 1),
+        ("nobody@example.org", 11),
     ]);
     let home = tempfile::tempdir().unwrap();
     prepare_home(
@@ -731,10 +1160,12 @@ fn blame_candidates() {
         .iter()
         .map(|c| c.get("share").and_then(Value::as_f64).unwrap())
         .collect();
-    assert!(
-        (shares[0] - 0.6).abs() < 1e-9 && (shares[1] - 0.3).abs() < 1e-9,
-        "{shares:?}"
+    assert_eq!(
+        shares,
+        [6.0 / 20.0, 3.0 / 20.0],
+        "share of ALL blamed lines"
     );
+    assert_eq!(shares, [0.3, 0.15]);
     assert_eq!(
         list[0].get("fingerprint").and_then(Value::as_str),
         Some(fp(&ana).as_str())
@@ -779,6 +1210,8 @@ fn blame_candidates() {
     let err = stderr(&out);
     assert!(err.contains("1) Ana"), "{err}");
     assert!(err.contains("2) Bea"), "{err}");
+    assert!(err.contains("6 lines (30%)"), "{err}");
+    assert!(err.contains("3 lines (15%)"), "{err}");
     assert!(err.contains("--peer"), "{err}");
     assert!(stdout(&out).is_empty());
 

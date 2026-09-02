@@ -695,8 +695,10 @@ filename f.txt
 
     #[test]
     fn candidates_are_matched_ranked_and_capped() {
+        // 20 blamed lines but only 10 carry a known mail: the share denominator is the
+        // header count, not the sum of matched (or mailed) lines.
         let mut stats = BlameStats {
-            total: 10,
+            total: 20,
             ..Default::default()
         };
         for (m, n) in [
@@ -725,15 +727,16 @@ filename f.txt
         assert_eq!(got[0].lines, 4);
         assert_eq!(got[1].lines, 4);
         assert_eq!(got[1].fingerprint, "owl:bea");
-        assert!((got[1].share - 0.4).abs() < 1e-9);
-        assert!((got[2].share - 0.1).abs() < 1e-9);
+        assert_eq!(got[0].share, 0.2, "4 of 20 blamed lines");
+        assert_eq!(got[1].share, 0.2);
+        assert_eq!(got[2].share, 0.05);
         assert!(candidates(&BlameStats::default(), &contacts).is_empty());
         let unmatched = [contact("Eve", &["eve@example.org"])];
         assert!(candidates(&stats, &unmatched).is_empty());
         let json = serde_json::to_value(&got).unwrap();
         assert_eq!(json[1]["name"], "Bea");
         assert_eq!(json[1]["lines"], 4);
-        assert_eq!(json[1]["share"], 0.4);
+        assert_eq!(json[1]["share"], 0.2);
     }
 
     #[test]
