@@ -290,6 +290,10 @@ fn main() -> ExitCode {
         Cmd::History { peer, path, since } => {
             cli::history::run(&home, cli::history::Filters { peer, path, since }, cli.json)
         }
+        Cmd::Watch { id, timeout } => cli::watch::run(&home, id.as_deref(), timeout),
+        Cmd::Install { dry_run } => cli::install::install(&home, dry_run),
+        Cmd::Uninstall => cli::install::uninstall(),
+        Cmd::Doctor => cli::doctor::run(&home, cli.json),
         _ => Err(anyhow::anyhow!("not implemented yet")),
     };
     match result {

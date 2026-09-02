@@ -1547,7 +1547,6 @@ fn send_with_unremovable_inbox_exits_1_and_retries_with_same_answer() {
     assert_eq!(outbox.len(), 1, "{outbox:?}");
     let (aid, arec) = &outbox[0];
     assert_eq!(done.meta["answer_id"], *aid);
-    let first_done_at = done.meta["done_at"].clone();
     no_tmp_files(&h, Dir::Done);
 
     lock.unlock();
@@ -1567,7 +1566,6 @@ fn send_with_unremovable_inbox_exits_1_and_retries_with_same_answer() {
     assert!(done.meta["done_at"].is_string());
     assert_eq!(done.raw, before.raw);
     assert_eq!(done.draft, before.draft);
-    let _ = first_done_at; // rewritten in place: same shape, timestamp may or may not differ
     let outbox = h.outbox();
     assert_eq!(outbox.len(), 1, "exactly one envelope: {outbox:?}");
     assert_eq!(outbox[0].1, *arec);
@@ -1665,7 +1663,9 @@ fn edit_after_failed_send_is_refused_because_the_answer_is_spooled() {
     assert!(!text.contains("EDITED"));
     assert_eq!(text, before.draft.unwrap()["text"]);
 
-    // Negative twin: an ordinary drafted record (no envelope) is still editable.
+    // Negative twin: a drafted record whose answer has not been spooled yet (no outbox
+    // envelope carries its question_id) is still editable, so the guard fires only on the
+    // filtered dimension.
     let other = h.put(&h.maciek, "editable?", "pending");
     h.ok(&["draft", &other]);
     let out = h
