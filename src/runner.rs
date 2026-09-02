@@ -156,7 +156,7 @@ pub fn draft(
     let redactors = compile_redactors(&config.responder.redact)?;
     let cwd = project_dir(config, project)?;
     let prompt = build_prompt(config, home, project, path, question);
-    let (program, args, prompt_file) = render_cmd(&harness.cmd, &prompt)?;
+    let (program, args, prompt_file) = render_cmd(&harness.cmd, &prompt, &prompt_dir(home))?;
 
     let mut command = Command::new(&program);
     command
@@ -184,10 +184,7 @@ pub fn draft(
                 outcome.stderr.trim()
             );
         }
-        match extract(&harness.answer_path, &outcome.stdout) {
-            Ok(t) => (t, DraftStatus::Ok),
-            Err(_) => (outcome.stdout, DraftStatus::ExtractFailed),
-        }
+        finish_extract(&harness.answer_path, outcome.stdout)
     };
     let (text, redactions) = redact_with(&redactors, &text);
     Ok(Draft {
@@ -196,6 +193,19 @@ pub fn draft(
         redactions,
         status,
     })
+}
+
+/// Applies `answer_path`; on failure the draft keeps the raw stdout and is marked `extract_failed`.
+pub fn finish_extract(answer_path: &str, stdout: String) -> (String, DraftStatus) {
+    match extract(answer_path, &stdout) {
+        Ok(t) => (t, DraftStatus::Ok),
+        Err(_) => (stdout, DraftStatus::ExtractFailed),
+    }
+}
+
+/// Where `{prompt_file}` prompts are written: `<home>/tmp` (per daemon home, never the global tmp).
+pub fn prompt_dir(home: &Path) -> PathBuf {
+    home.join("tmp")
 }
 
 /// Compiles `responder.redact`; an invalid pattern is an error naming it.
@@ -300,7 +310,7 @@ fn codex_message(v: &Value) -> Option<String> {
 }
 
 fn opencode_text(v: &Value) -> Option<String> {
-    if str_at(v, &["type"]) != Some("text") && str_at(v, &["part", "type"]) != Some("text") {
+    if str_at(v, &["type"]) != Some("text") || str_at(v, &["part", "type"]) != Some("text") {
         return None;
     }
     str_at(v, &["part", "text"]).map(str::to_string)
@@ -330,6 +340,7 @@ fn kimi_text(v: &Value) -> Option<String> {
 fn render_cmd(
     cmd: &[String],
     prompt: &str,
+    prompt_dir: &Path,
 ) -> anyhow::Result<(PathBuf, Vec<String>, Option<PathBuf>)> {
     let Some((first, rest)) = cmd.split_first() else {
         bail!("harness cmd is empty");
@@ -341,8 +352,10 @@ fn render_cmd(
         let mut a = arg.replace("{prompt}", prompt);
         if a.contains("{prompt_file}") {
             let file = prompt_file.get_or_insert_with(|| {
-                std::env::temp_dir().join(format!("owlpost-prompt-{}.txt", uuid::Uuid::now_v7()))
+                prompt_dir.join(format!("owlpost-prompt-{}.txt", uuid::Uuid::now_v7()))
             });
+            std::fs::create_dir_all(prompt_dir)
+                .with_context(|| format!("creating {}", prompt_dir.display()))?;
             std::fs::write(&*file, prompt)
                 .with_context(|| format!("writing prompt file {}", file.display()))?;
             a = a.replace("{prompt_file}", &file.to_string_lossy());
@@ -356,19 +369,28 @@ fn render_cmd(
 /// checkout (so `tests/fixtures/fake-harness.sh` works from the repo root). A bare name is left to
 /// PATH lookup, except `kimi`, which falls back to `~/.kimi-code/bin/kimi` (§12).
 fn resolve_program(first: &str) -> anyhow::Result<PathBuf> {
+    resolve_program_in(
+        first,
+        std::env::var_os("PATH").as_deref(),
+        &PathBuf::from(std::env::var_os("HOME").unwrap_or_default()),
+    )
+}
+
+fn resolve_program_in(
+    first: &str,
+    path_var: Option<&std::ffi::OsStr>,
+    home: &Path,
+) -> anyhow::Result<PathBuf> {
     let p = Path::new(first);
     if p.components().count() > 1 || p.is_absolute() {
         return std::fs::canonicalize(p)
             .with_context(|| format!("harness executable {first} not found"));
     }
-    if find_on_path(first).is_some() {
+    if find_on_path(first, path_var).is_some() {
         return Ok(PathBuf::from(first));
     }
     if first == "kimi" {
-        let fallback = PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
-            .join(".kimi-code")
-            .join("bin")
-            .join("kimi");
+        let fallback = home.join(".kimi-code").join("bin").join("kimi");
         if fallback.is_file() {
             return Ok(fallback);
         }
@@ -376,9 +398,9 @@ fn resolve_program(first: &str) -> anyhow::Result<PathBuf> {
     bail!("harness executable {first} not found on PATH")
 }
 
-fn find_on_path(name: &str) -> Option<PathBuf> {
-    std::env::var_os("PATH").and_then(|paths| {
-        std::env::split_paths(&paths)
+fn find_on_path(name: &str, path_var: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
+    path_var.and_then(|paths| {
+        std::env::split_paths(paths)
             .map(|d| d.join(name))
             .find(|p| p.is_file())
     })
@@ -482,6 +504,12 @@ mod tests {
     }
 
     #[test]
+    fn extract_result_from_pretty_printed_json() {
+        let pretty = "{\n  \"type\": \"result\",\n  \"result\": \"multi\\nline answer\",\n  \"usage\": {\n    \"input_tokens\": 1\n  }\n}\n";
+        assert_eq!(extract("result", pretty).unwrap(), "multi\nline answer");
+    }
+
+    #[test]
     fn extract_result_rejects_bad_shapes() {
         assert!(matches!(
             extract("result", r#"{"type":"result","is_error":true}"#),
@@ -581,8 +609,11 @@ mod tests {
             extract("last_text", &kimi_no_text),
             Err(ExtractError::NoAnswer)
         );
-        // Wrong shapes: `text` type without part text; assistant without content array; number text.
+        // Wrong shapes: event type `text` needs a text part AND vice versa; assistant without a
+        // content array; number text.
         let wrong = r#"{"type":"text","part":{"type":"text"}}
+{"type":"tool_use","part":{"type":"text","text":"not an answer"}}
+{"type":"text","part":{"type":"tool","text":"not an answer either"}}
 {"type":"assistant","message":{"content":"plain"}}
 {"type":"assistant","message":{"content":[{"type":"text","text":5}]}}
 {"type":"user","message":{"content":[{"type":"text","text":"from user"}]}}"#;
@@ -599,26 +630,64 @@ mod tests {
         );
     }
 
-    /// AC7 at the `draft` level is exercised in `tests/runner.rs`; here the extraction contract.
+    /// AC7: an unparsable output keeps the raw stdout and is marked `extract_failed`. Exercises
+    /// the production fallback (`finish_extract`) directly and through `draft()` with the fake
+    /// harness printing the garbage fixture.
     #[test]
     fn extract_failure_keeps_raw() {
-        let err = extract("result", GARBAGE).unwrap_err();
-        assert!(matches!(err, ExtractError::NotJson(_)));
-        // What `draft` does with it: status extract_failed, text = raw stdout, redaction still runs.
-        let cfg = Config::default();
-        let (text, status) = match extract("result", GARBAGE) {
-            Ok(t) => (t, DraftStatus::Ok),
-            Err(_) => (GARBAGE.to_string(), DraftStatus::ExtractFailed),
-        };
+        assert!(matches!(
+            extract("result", GARBAGE),
+            Err(ExtractError::NotJson(_))
+        ));
+        let (text, status) = finish_extract("result", GARBAGE.to_string());
         assert_eq!(status, DraftStatus::ExtractFailed);
         assert_eq!(status.as_str(), "extract_failed");
         assert_eq!(
             serde_json::to_string(&status).unwrap(),
             "\"extract_failed\""
         );
-        let (out, n) = redact(&cfg.responder.redact, &text).unwrap();
-        assert_eq!(out, GARBAGE);
-        assert_eq!(n, 0);
+        assert_eq!(text, GARBAGE, "raw stdout preserved");
+        for path in ["last_message", "last_text"] {
+            let (text, status) = finish_extract(path, GARBAGE.to_string());
+            assert_eq!(
+                (text.as_str(), status),
+                (GARBAGE, DraftStatus::ExtractFailed),
+                "{path}"
+            );
+        }
+        // The success path of the same function is not affected.
+        let (text, status) = finish_extract("raw", "fine\n".to_string());
+        assert_eq!((text.as_str(), status), ("fine", DraftStatus::Ok));
+
+        // End to end: the fake harness prints garbage.txt, `result` cannot be extracted.
+        let home = tempfile::tempdir().unwrap();
+        let checkout = tempfile::tempdir().unwrap();
+        let mut cfg = cfg();
+        let fake = cfg.harnesses.get_mut("fake").unwrap();
+        fake.cmd = vec![
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/fake-harness.sh"
+            )
+            .into(),
+            "{prompt}".into(),
+        ];
+        fake.answer_path = "result".into();
+        fake.env.insert(
+            "FAKE_OUTPUT_FILE".into(),
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/harness-output/garbage.txt"
+            )
+            .into(),
+        );
+        cfg.responder.harness = "fake".into();
+        cfg.projects
+            .insert("p".into(), checkout.path().to_string_lossy().into_owned());
+        let d = draft(&cfg, home.path(), None, "p", "f", "q").unwrap();
+        assert_eq!(d.status, DraftStatus::ExtractFailed);
+        assert_eq!(d.text, GARBAGE, "raw stdout preserved through draft()");
+        assert_eq!(d.redactions, 0);
     }
 
     #[test]
@@ -764,22 +833,27 @@ mod tests {
     #[test]
     fn render_cmd_substitutes_prompt_and_prompt_file() {
         let cmd = |s: &[&str]| s.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("nested");
         let (prog, args, file) =
-            render_cmd(&cmd(&["sh", "-c", "{prompt}", "x{prompt}"]), "P").unwrap();
+            render_cmd(&cmd(&["sh", "-c", "{prompt}", "x{prompt}"]), "P", &dir).unwrap();
         assert_eq!(prog, PathBuf::from("sh"));
         assert_eq!(args, ["-c", "P", "xP"]);
         assert!(file.is_none());
-        let (_, args, file) = render_cmd(&cmd(&["sh", "--file={prompt_file}"]), "P2").unwrap();
+        assert!(!dir.exists(), "no prompt dir without {{prompt_file}}");
+        let (_, args, file) =
+            render_cmd(&cmd(&["sh", "--file={prompt_file}"]), "P2", &dir).unwrap();
         let file = file.expect("prompt file written");
+        assert_eq!(file.parent(), Some(dir.as_path()));
         assert_eq!(args, [format!("--file={}", file.display())]);
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "P2");
         std::fs::remove_file(file).unwrap();
-        assert!(render_cmd(&[], "P").is_err());
-        let e = render_cmd(&cmd(&["./no/such/binary"]), "P")
+        assert!(render_cmd(&[], "P", &dir).is_err());
+        let e = render_cmd(&cmd(&["./no/such/binary"]), "P", &dir)
             .unwrap_err()
             .to_string();
         assert!(e.contains("not found"), "{e}");
-        let e = render_cmd(&cmd(&["owlpost-definitely-missing-bin"]), "P")
+        let e = render_cmd(&cmd(&["owlpost-definitely-missing-bin"]), "P", &dir)
             .unwrap_err()
             .to_string();
         assert!(e.contains("not found on PATH"), "{e}");
@@ -794,5 +868,43 @@ mod tests {
         assert!(got.is_absolute());
         assert_eq!(got, manifest.join(rel).canonicalize().unwrap());
         assert_eq!(resolve_program("sh").unwrap(), PathBuf::from("sh"));
+    }
+
+    #[test]
+    fn kimi_falls_back_to_home_bin_when_not_on_path() {
+        let home = tempfile::tempdir().unwrap();
+        let empty_path = tempfile::tempdir().unwrap();
+        let path_var = Some(empty_path.path().as_os_str());
+        // Neither on PATH nor under ~/.kimi-code/bin: clean error.
+        let e = resolve_program_in("kimi", path_var, home.path())
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("kimi") && e.contains("not found on PATH"), "{e}");
+        // Fallback exists: it is used.
+        let bin = home.path().join(".kimi-code").join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let fallback = bin.join("kimi");
+        std::fs::write(&fallback, "#!/bin/sh\n").unwrap();
+        assert_eq!(
+            resolve_program_in("kimi", path_var, home.path()).unwrap(),
+            fallback
+        );
+        // On PATH: PATH wins over the fallback.
+        std::fs::write(empty_path.path().join("kimi"), "#!/bin/sh\n").unwrap();
+        assert_eq!(
+            resolve_program_in("kimi", path_var, home.path()).unwrap(),
+            PathBuf::from("kimi")
+        );
+        // The fallback is kimi-specific: another missing bare name still errors.
+        std::fs::write(bin.join("claude"), "#!/bin/sh\n").unwrap();
+        let e = resolve_program_in("claude", path_var, home.path())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("claude") && e.contains("not found on PATH"),
+            "{e}"
+        );
+        // No PATH at all behaves like an empty PATH.
+        assert!(resolve_program_in("claude", None, home.path()).is_err());
     }
 }

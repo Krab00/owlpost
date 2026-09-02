@@ -338,11 +338,17 @@ fn nonzero_exit_without_output_is_error_with_output_is_extracted() {
     let mut env = Env::new();
     env.fake_env("FAKE_EXIT", "3");
     env.fake_env("FAKE_OUTPUT_FILE", "/dev/null");
+    env.fake_env("FAKE_STDERR", "model quota exhausted (fake)");
     let err = env
         .draft(None, "github.com/acme/widgets")
         .unwrap_err()
         .to_string();
     assert!(err.contains("exited with"), "{err}");
+    assert!(
+        err.contains("model quota exhausted (fake)"),
+        "stderr in error: {err}"
+    );
+    assert!(err.contains('3'), "exit code in error: {err}");
     assert!(err.contains("no output"), "{err}");
 
     let mut env = Env::new();
@@ -364,17 +370,77 @@ fn prompt_file_placeholder_writes_prompt_to_a_file() {
     let mut env = Env::new();
     let h = env.cfg.harnesses.get_mut("fake").unwrap();
     h.cmd = vec![FAKE.into(), "--prompt-file".into(), "{prompt_file}".into()];
-    // The fake harness logs argv, so the path shows up there; verify it was a real file with the
-    // prompt by making the harness cat it as its output.
+    // The fake harness logs its argv, so the substituted path shows up there. The file itself is
+    // deleted after the run, so its content is checked by the unit test
+    // `runner::tests::render_cmd_substitutes_prompt_and_prompt_file`; here: it lived under
+    // `<home>/tmp`, was passed as the argument, and is gone afterwards.
     let d = env.draft(None, "github.com/acme/widgets").unwrap();
     assert_eq!(d.status, DraftStatus::Ok);
     let argv = log_line(&env.log(), "argv: ");
     let path = argv.strip_prefix("--prompt-file ").expect(&argv);
     assert!(path.contains("owlpost-prompt-"), "{path}");
     assert!(
+        Path::new(path).starts_with(env.home.path().join("tmp")),
+        "{path}"
+    );
+    assert!(
         !Path::new(path).exists(),
         "prompt file cleaned up after the run"
     );
+    assert!(prompt_files(env.home.path()).is_empty());
+}
+
+fn prompt_files(home: &Path) -> Vec<PathBuf> {
+    std::fs::read_dir(home.join("tmp"))
+        .map(|rd| rd.map(|e| e.unwrap().path()).collect())
+        .unwrap_or_default()
+}
+
+#[test]
+fn prompt_file_is_cleaned_up_when_spawn_fails() {
+    let mut env = Env::new();
+    // Exists on disk but is not executable: resolves, then the spawn itself fails.
+    let not_exec = env.home.path().join("not-a-harness");
+    std::fs::write(&not_exec, "plain text").unwrap();
+    env.cfg.harnesses.get_mut("fake").unwrap().cmd = vec![
+        not_exec.to_string_lossy().into_owned(),
+        "{prompt_file}".into(),
+    ];
+    let err = env
+        .draft(None, "github.com/acme/widgets")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("spawning harness fake"), "{err}");
+    assert!(
+        env.home.path().join("tmp").is_dir(),
+        "prompt file was written before the spawn"
+    );
+    assert!(
+        prompt_files(env.home.path()).is_empty(),
+        "prompt file removed after failed spawn"
+    );
+}
+
+#[test]
+fn timeout_with_partial_output_keeps_and_redacts_captured_text() {
+    let mut env = Env::new();
+    env.fake_env("FAKE_PRINT_THEN_SLEEP", "5");
+    env.cfg.responder.timeout_secs = 1;
+    let start = Instant::now();
+    let d = env.draft(None, "github.com/acme/widgets").unwrap();
+    assert!(start.elapsed() < Duration::from_secs(3));
+    assert_eq!(d.status, DraftStatus::Timeout);
+    assert!(
+        d.text
+            .contains("The retry policy is defined in src/client.rs"),
+        "{}",
+        d.text
+    );
+    assert!(d.text.contains("[redacted]"), "{}", d.text);
+    assert!(!d.text.contains("sk-test-123456"), "{}", d.text);
+    assert_eq!(d.redactions, 1);
+    let pid = log_line(&env.log(), "pid: ");
+    assert!(!alive(pid.trim()), "child {pid} still alive after timeout");
 }
 
 #[test]
