@@ -15,7 +15,7 @@ use anyhow::Context;
 use owlpost::contacts::ContactBook;
 use owlpost::envelope::{self, Body, Kind, Payload};
 use owlpost::spool::{Dir, Record, Spool};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 /// An error that carries its own process exit code (§9: 1 user/data, 2 offline, 3 rate
 /// limited, 4 nothing to do). `main` downcasts it; every other error exits 1.
@@ -32,6 +32,11 @@ impl std::fmt::Display for ExitError {
 }
 
 impl std::error::Error for ExitError {}
+
+/// Process exit code for a command error: an `ExitError` carries its own, anything else is 1.
+pub fn exit_code(e: &anyhow::Error) -> u8 {
+    e.downcast_ref::<ExitError>().map_or(1, |x| x.code)
+}
 
 /// Draft as stored on an inbox record (`record.draft`), §3.4 step 4.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,6 +104,40 @@ pub fn inbox_record(spool: &Spool, id: &str) -> anyhow::Result<Record> {
     spool
         .get(Dir::Inbox, id)?
         .with_context(|| format!("no inbox record {id}"))
+}
+
+/// `rec.meta` as an object. Records carry an object there (`{peer, hash}` from the daemon), but
+/// the value is stored JSON, so a stray scalar or array is replaced by an empty object rather
+/// than indexed into (OWL-004 lesson: never `IndexMut` a parsed `Value`).
+pub fn meta_object(rec: &mut Record) -> &mut Map<String, Value> {
+    if !rec.meta.is_object() {
+        rec.meta = Value::Object(Map::new());
+    }
+    match &mut rec.meta {
+        Value::Object(m) => m,
+        _ => unreachable!("meta was just set to an object"),
+    }
+}
+
+/// Finishes an inbox record: `state`, `meta.done_at` and the `extra` meta keys are written to
+/// the record while it is still in `inbox/`, and only then is it renamed into `done/`. Both
+/// steps are atomic on their own, so no failure leaves `done/` holding a record with its old
+/// state; the worst case is a finished record still sitting in `inbox/`, which a retry redoes.
+pub fn finish(
+    spool: &Spool,
+    id: &str,
+    mut rec: Record,
+    state: &str,
+    extra: &[(&str, Value)],
+) -> anyhow::Result<()> {
+    rec.state = state.to_string();
+    let meta = meta_object(&mut rec);
+    meta.insert("done_at".into(), json!(envelope::rfc3339_now()));
+    for (k, v) in extra {
+        meta.insert((*k).to_string(), v.clone());
+    }
+    spool.put(Dir::Inbox, id, &rec)?;
+    spool.move_to(Dir::Inbox, id, Dir::Done)
 }
 
 /// Loads the merged contact book for the current directory; a missing git root is fine.
@@ -291,5 +330,47 @@ mod tests {
         assert_eq!(e.to_string(), "nothing");
         let any: anyhow::Error = e.into();
         assert_eq!(any.downcast_ref::<ExitError>().unwrap().code, 4);
+    }
+
+    /// `main` exits with the code an `ExitError` carries (§9: 2 offline, 3 rate limited,
+    /// 4 nothing to do) and with 1 for every other error, including a wrapped one.
+    #[test]
+    fn exit_code_comes_from_exit_error_else_1() {
+        for code in [1u8, 2, 3, 4] {
+            let e: anyhow::Error = ExitError {
+                code,
+                message: "x".into(),
+            }
+            .into();
+            assert_eq!(exit_code(&e), code);
+            assert_eq!(
+                exit_code(&e.context("wrapped")),
+                code,
+                "context keeps the code"
+            );
+        }
+        assert_eq!(exit_code(&anyhow::anyhow!("plain")), 1);
+        assert_eq!(exit_code(&user_error("user")), 1);
+    }
+
+    /// Every non-object `meta` shape becomes an empty object; an object is kept as is.
+    #[test]
+    fn meta_object_repairs_non_objects_and_keeps_objects() {
+        for bad in [
+            Value::Null,
+            json!("oops"),
+            json!([1]),
+            json!(7),
+            json!(true),
+        ] {
+            let mut r = rec(Value::Null);
+            r.meta = bad.clone();
+            meta_object(&mut r).insert("k".into(), json!(1));
+            assert_eq!(r.meta, json!({ "k": 1 }), "{bad}");
+        }
+        let mut r = rec(Value::Null);
+        r.meta = json!({ "peer": "p", "hash": "h" });
+        meta_object(&mut r).insert("k".into(), json!(1));
+        assert_eq!(r.meta, json!({ "peer": "p", "hash": "h", "k": 1 }));
     }
 }

@@ -176,6 +176,30 @@ impl Home {
         spool.put(dir, id, &r).unwrap();
     }
 
+    fn set_meta(&self, id: &str, meta: Value) {
+        let spool = self.spool();
+        let mut r = spool.get(Dir::Inbox, id).unwrap().unwrap();
+        r.meta = meta;
+        spool.put(Dir::Inbox, id, &r).unwrap();
+    }
+
+    /// Spools an envelope straight into `done/` in `state`, the way the daemon's ack path
+    /// (outbox → done, `acked`) or a finished exchange leaves it; returns the id.
+    fn put_done(&self, env: &Envelope, state: &str) -> String {
+        let p: Payload = serde_json::from_str(&env.raw).unwrap();
+        let rec = Record {
+            raw: env.raw.clone(),
+            sig: env.sig.clone(),
+            state: state.into(),
+            seen: true,
+            received_at: envelope::rfc3339_now(),
+            draft: None,
+            meta: json!({}),
+        };
+        self.spool().put(Dir::Done, &p.id, &rec).unwrap();
+        p.id
+    }
+
     fn editor_script(&self, body: &str) -> String {
         let p = self.path().join("editor.sh");
         std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
@@ -536,6 +560,59 @@ fn draft_send_moves_records() {
     assert_eq!(v["redactions"], 1);
 }
 
+/// A stored record whose `meta` is not an object (a scalar, an array, null) must not panic
+/// `send`/`reject` half-way through the move: the command exits 0 and `done/` holds the record
+/// with its final state and the new meta keys. An object `meta` keeps its existing keys.
+#[test]
+fn reject_and_send_survive_non_object_meta() {
+    let h = Home::new();
+    let shapes = [json!("oops"), json!([1]), Value::Null, json!(7)];
+    for bad in &shapes {
+        let r = h.put(&h.maciek, &format!("reject with meta {bad}?"), "pending");
+        h.set_meta(&r, bad.clone());
+        let (code, out, err) = h.run(&["reject", &r]);
+        assert_eq!(
+            (code, out.as_str()),
+            (0, format!("rejected {r}\n").as_str()),
+            "{bad}: {err}"
+        );
+        assert!(h.inbox(&r).is_none(), "{bad}: left the inbox");
+        let done = h.done(&r).unwrap();
+        assert_eq!(done.state, "rejected", "{bad}");
+        assert_eq!(done.meta["previous_state"], "pending", "{bad}");
+        assert!(done.meta["done_at"].is_string(), "{bad}: {}", done.meta);
+
+        let s = h.put(&h.maciek, &format!("send with meta {bad}?"), "pending");
+        h.ok(&["draft", &s]);
+        h.set_meta(&s, bad.clone());
+        let before = h.outbox().len();
+        let (code, _, err) = h.run(&["send", &s]);
+        assert_eq!(code, 0, "{bad}: {err}");
+        let outbox = h.outbox();
+        assert_eq!(outbox.len(), before + 1, "{bad}");
+        let (aid, _) = outbox
+            .iter()
+            .find(|(_, a)| a.meta["question_id"] == s)
+            .unwrap();
+        assert!(h.inbox(&s).is_none(), "{bad}: left the inbox");
+        let done = h.done(&s).unwrap();
+        assert_eq!(done.state, "answered", "{bad}");
+        assert_eq!(done.meta["answer_id"], *aid, "{bad}");
+        assert!(done.meta["done_at"].is_string(), "{bad}: {}", done.meta);
+    }
+    // The positive twin: an object meta keeps what the daemon stored on it.
+    let r = h.put(&h.ana, "object meta?", "pending");
+    let peer = h.inbox(&r).unwrap().meta;
+    assert_eq!(peer["peer"], fp(&h.ana));
+    h.ok(&["reject", &r]);
+    let done = h.done(&r).unwrap();
+    assert_eq!(done.meta["peer"], peer["peer"]);
+    assert_eq!(done.meta["hash"], peer["hash"]);
+    assert_eq!(done.meta["previous_state"], "pending");
+    // Nothing is left behind in the inbox in any state.
+    assert!(h.spool().list(Dir::Inbox, |_| true).unwrap().is_empty());
+}
+
 #[tokio::test]
 async fn sent_answer_is_served_from_the_daemon_cache() {
     let h = Home::new();
@@ -849,6 +926,75 @@ fn reject_and_history() {
     );
 }
 
+/// `peer` is the *other* party: for a record this identity sent (an acked answer moved to
+/// `done/` by the daemon) it is the recipient, not `from`; for a received one it is the sender.
+#[test]
+fn history_names_the_other_party_for_records_this_identity_sent() {
+    let h = Home::new();
+    let q = question(&h.maciek, &h.me, "asked by maciek?");
+    let mine = h.put_done(
+        &Envelope::sign(
+            &Payload::answer(&q, "Because of Y.", "fake", 0, false),
+            &h.me,
+        ),
+        "acked",
+    );
+    let theirs = h.put(&h.ana, "asked by ana?", "pending");
+    h.ok(&["reject", &theirs]);
+
+    let rows = h.json(&["history", "--json"]);
+    let row = |id: &str| -> Value {
+        rows.as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["id"] == id)
+            .cloned()
+            .unwrap_or_else(|| panic!("{id} missing from {rows}"))
+    };
+    let sent = row(&mine);
+    assert_eq!(sent["from"], fp(&h.me));
+    assert_eq!(sent["to"], fp(&h.maciek));
+    assert_eq!(sent["peer"], fp(&h.maciek), "peer is the recipient");
+    assert_eq!(sent["peer_name"], "Maciek");
+    assert_eq!(sent["type"], "answer");
+    assert_eq!(sent["state"], "acked");
+    assert_eq!(sent["path"], "-");
+    assert_eq!(sent["text"], "Because of Y.");
+    let got = row(&theirs);
+    assert_eq!(got["peer"], fp(&h.ana), "peer is the sender");
+    assert_eq!(got["peer_name"], "Ana");
+
+    // `--peer` follows the same rule: the sent answer is Maciek's exchange, never "mine".
+    let ids = |v: Value| -> Vec<String> {
+        v.as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["id"].as_str().unwrap().to_string())
+            .collect()
+    };
+    assert_eq!(
+        ids(h.json(&["history", "--json", "--peer", "Maciek"])),
+        vec![mine.clone()]
+    );
+    assert_eq!(
+        ids(h.json(&["history", "--json", "--peer", &fp(&h.maciek)])),
+        vec![mine.clone()]
+    );
+    assert_eq!(
+        h.json(&["history", "--json", "--peer", &fp(&h.me)]),
+        json!([])
+    );
+    assert_eq!(
+        ids(h.json(&["history", "--json", "--peer", "Ana"])),
+        vec![theirs]
+    );
+    let plain = h.ok(&["history", "--peer", "Maciek"]);
+    assert!(
+        plain.contains(&mine) && plain.contains("Maciek") && plain.contains("answer"),
+        "{plain}"
+    );
+}
+
 // ---------------------------------------------------------------- AC6
 
 #[test]
@@ -928,6 +1074,67 @@ fn draft_timeout_is_stored_but_exits_1() {
     // The unreviewed timeout draft can still be sent deliberately: it is the human's call.
     h.ok(&["send", &p]);
     assert_eq!(h.done(&p).unwrap().state, "answered");
+}
+
+/// The runner's `extract_failed` outcome (§10, OWL-009): the harness printed something that
+/// `answer_path` cannot read. The raw (redacted) stdout is stored as the draft, the command
+/// prints it and exits 1 with a pointer to `owl edit`, exactly like `timeout`. The positive
+/// twin differs only in the harness output: valid `result` JSON drafts with status `ok`, exit 0.
+#[test]
+fn draft_extract_failed_is_stored_but_exits_1() {
+    let with_result_path = |output_file: Option<String>| {
+        Home::with(|cfg| {
+            let fake = cfg.harnesses.get_mut("fake").unwrap();
+            fake.answer_path = "result".into();
+            if let Some(f) = output_file {
+                fake.env.insert("FAKE_OUTPUT_FILE".into(), f);
+            }
+        })
+    };
+    // Plain text through `answer_path = result`: not JSON, so extraction fails.
+    let h = with_result_path(None);
+    let p = h.put(&h.maciek, "unparsable?", "pending");
+    let (code, out, err) = h.run(&["draft", &p]);
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("status extract_failed"), "{err}");
+    assert!(err.contains(&format!("owl edit {p}")), "{err}");
+    assert!(
+        out.contains("[redacted]"),
+        "raw stdout is still redacted: {out}"
+    );
+    assert!(!out.contains("sk-test-123456"), "secret leaked: {out}");
+    let rec = h.inbox(&p).unwrap();
+    assert_eq!(rec.state, "drafted");
+    let d = rec.draft.unwrap();
+    assert_eq!(d["status"], "extract_failed");
+    assert!(
+        d["text"].as_str().unwrap().contains("src/client.rs"),
+        "raw stdout kept: {d}"
+    );
+    let v = h.json(&["show", &p, "--json"]);
+    assert_eq!(v["draft"]["status"], "extract_failed");
+    // `--json` reports the status too, still exit 1.
+    let (code, out, _) = h.run(&["draft", "--json", &p]);
+    assert_eq!(code, 1);
+    let v: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["status"], "extract_failed");
+    assert_eq!(v["state"], "drafted");
+
+    // Same harness, valid `{"type":"result","result":...}` output: status ok, exit 0.
+    let good = with_result_path(None);
+    let file = good.path().join("claude.json");
+    std::fs::write(
+        &file,
+        r#"{"type":"result","is_error":false,"result":"The policy lives in src/client.rs."}"#,
+    )
+    .unwrap();
+    let good = with_result_path(Some(file.to_string_lossy().into_owned()));
+    let p = good.put(&good.maciek, "parsable?", "pending");
+    let out = good.ok(&["draft", &p]);
+    assert!(out.contains("The policy lives in src/client.rs."), "{out}");
+    let d = good.inbox(&p).unwrap().draft.unwrap();
+    assert_eq!(d["status"], "ok");
+    assert_eq!(d["text"], "The policy lives in src/client.rs.");
 }
 
 // ---------------------------------------------------------------- AC7

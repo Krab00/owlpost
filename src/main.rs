@@ -296,8 +296,7 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("owl: {e:#}");
-            let code = e.downcast_ref::<cli::ExitError>().map_or(1, |x| x.code);
-            ExitCode::from(code)
+            ExitCode::from(cli::exit_code(&e))
         }
     }
 }
