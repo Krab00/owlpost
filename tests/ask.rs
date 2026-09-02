@@ -173,6 +173,9 @@ fn ask_no_project(home: &Path, cwd: &Path, question: &str) -> Output {
 struct FakeScript {
     /// Verbatim `(status, body)` for `POST /v1/questions`; `None` = a well-formed `202`.
     accept: Option<(u16, String)>,
+    /// Extra response headers sent with the scripted `accept` row (`Retry-After`,
+    /// `X-Owl-Signature`); the daemon never omits either, so their absence is scripted here.
+    accept_headers: Vec<(String, String)>,
     /// `GET /v1/outbox` answers `500` until this instant.
     outbox_fails_until: Option<Instant>,
     /// Status of `POST /v1/outbox/{id}/ack` (`204` is what the daemon sends).
@@ -225,6 +228,12 @@ async fn fake_questions(
     let mut headers = HeaderMap::new();
     headers.insert("content-type", "application/json".parse().unwrap());
     if let Some((status, body)) = &st.script.accept {
+        for (k, v) in &st.script.accept_headers {
+            headers.insert(
+                axum::http::HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                v.parse().unwrap(),
+            );
+        }
         return (
             StatusCode::from_u16(*status).unwrap(),
             headers,
@@ -574,6 +583,54 @@ fn corrupt_cache_entries_fall_through() {
     assert!(stderr(&out).is_empty(), "{}", stderr(&out));
 }
 
+/// A cache record that cannot be read at all — not a record with bad contents, but a file the
+/// spool fails to load (a directory in its place, or bytes that are not a record) — is also a
+/// miss: warned as `unreadable`, then the send is attempted (closed port → exit 2 offline).
+/// Twin of `corrupt_cache_entries_fall_through`, which reaches the loadable-but-wrong arm.
+#[test]
+fn unreadable_cache_entries_fall_through() {
+    let (a, b) = (id(1), id(2));
+    let hash = question_hash(PROJECT, PATH, QUESTION);
+    for what in ["a directory", "bytes that are not a record"] {
+        let home = asker_home(&a, &b, &[&closed_port()]);
+        let spool = Spool::new(home.path()).unwrap();
+        let path = spool.path(Dir::Cache, &hash);
+        if what == "a directory" {
+            std::fs::create_dir(&path).unwrap();
+        } else {
+            std::fs::write(&path, b"{\"raw\": \"tru").unwrap();
+        }
+        assert!(
+            spool.cache_get(&hash).is_err(),
+            "{what}: the spool itself fails to read the entry"
+        );
+        let out = ask(home.path(), &[]);
+        let err = stderr(&out);
+        assert_eq!(out.status.code(), Some(2), "{what}: {err}");
+        assert!(
+            err.contains("ignoring unreadable cache entry"),
+            "{what}: {err}"
+        );
+        assert!(!err.contains("corrupt"), "{what}: the other arm: {err}");
+        assert!(err.contains("offline"), "{what}: {err}");
+        assert!(
+            stdout(&out).is_empty(),
+            "{what}: nothing printed from the cache"
+        );
+        assert!(!err.contains("panicked"), "{what}: {err}");
+        assert!(ids(&spool, Dir::Asks).is_empty(), "{what}");
+        // --quiet drops the warning, not the miss.
+        let out = ask(home.path(), &["--quiet"]);
+        assert_eq!(out.status.code(), Some(2), "{what}: {}", stderr(&out));
+        assert!(
+            !stderr(&out).contains("ignoring"),
+            "{what}: {}",
+            stderr(&out)
+        );
+        assert!(ids(&spool, Dir::Asks).is_empty(), "{what}");
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn no_cache_sends_to_a_live_peer_despite_a_hit() {
     let a = id(1);
@@ -799,8 +856,9 @@ fn assert_answered_via_wait(out: &Output, peer: &FakePeer, home: &Path) -> (Stri
     (qid, aid)
 }
 
-/// The peer's outbox is unreachable for the first ~1.5 s (daemon restarting, say): `--wait`
-/// warns once and keeps polling until the deadline instead of giving up on the first error.
+/// The peer's outbox is unreachable for the first ~3.5 s (daemon restarting, say), so the polls
+/// at t=0 and t=2 s both fail: `--wait` warns exactly once and keeps polling until the deadline
+/// instead of giving up on the first error.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn wait_keeps_polling_through_transient_outbox_errors() {
     let a = id(1);
@@ -808,7 +866,7 @@ async fn wait_keeps_polling_through_transient_outbox_errors() {
     let (out, peer, home) = ask_wait_fake(
         &a,
         FakeScript {
-            outbox_fails_until: Some(Instant::now() + Duration::from_millis(1500)),
+            outbox_fails_until: Some(Instant::now() + Duration::from_millis(3500)),
             ..well_formed()
         },
     )
@@ -822,7 +880,11 @@ async fn wait_keeps_polling_through_transient_outbox_errors() {
     assert_eq!(
         err.matches("warning: polling Bea").count(),
         1,
-        "one warning for the failing polls, not one per poll: {err}"
+        "one warning for two failing polls, not one per poll: {err}"
+    );
+    assert!(
+        started.elapsed() >= Duration::from_millis(3500),
+        "the answer cannot arrive before the outbox recovers"
     );
     assert!(err.contains("500"), "names the peer's status: {err}");
     assert_eq!(peer.acked(), [aid], "acked once the answer was stored");
@@ -833,7 +895,7 @@ async fn wait_keeps_polling_through_transient_outbox_errors() {
         2,
         &a,
         FakeScript {
-            outbox_fails_until: Some(Instant::now() + Duration::from_millis(1500)),
+            outbox_fails_until: Some(Instant::now() + Duration::from_millis(3500)),
             ..well_formed()
         },
     )
@@ -982,6 +1044,137 @@ async fn unavailable_and_rate_limited_exit_codes() {
     limited.running.shutdown();
 }
 
+/// `429` with and without `Retry-After`: the daemon always sends the header, so the bare arm
+/// (exit 3, plain `rate limited`) and an unparseable header come from the scripted fake. Each
+/// row differs from the next in the header only; nothing is spooled for any of them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rate_limited_429_with_and_without_retry_after() {
+    let a = id(1);
+    let body = json!({ "error": "rate limited" }).to_string();
+    for (what, headers, expect_msg) in [
+        ("no Retry-After", vec![], "rate limited"),
+        (
+            "Retry-After: 42",
+            vec![("retry-after".to_string(), "42".to_string())],
+            "rate limited, retry after 42s",
+        ),
+        (
+            "Retry-After: 0",
+            vec![("retry-after".to_string(), "0".to_string())],
+            "rate limited, retry after 0s",
+        ),
+        (
+            "Retry-After as an HTTP date (not seconds)",
+            vec![(
+                "retry-after".to_string(),
+                "Wed, 21 Oct 2026 07:28:00 GMT".to_string(),
+            )],
+            "rate limited",
+        ),
+    ] {
+        let peer = spawn_fake(
+            2,
+            &a,
+            FakeScript {
+                accept: Some((429, body.clone())),
+                accept_headers: headers,
+                ..well_formed()
+            },
+        )
+        .await;
+        let home = asker_home(&a, &peer.state.id, &[&peer.addr.to_string()]);
+        let out = ask(home.path(), &[]);
+        let err = stderr(&out);
+        assert_eq!(out.status.code(), Some(3), "{what}: {err}");
+        assert_eq!(err.trim(), format!("owl: {expect_msg}"), "{what}");
+        assert!(stdout(&out).is_empty(), "{what}");
+        assert!(!err.contains("panicked"), "{what}: {err}");
+        assert_eq!(peer.questions().len(), 1, "{what}: the question was sent");
+        let spool = Spool::new(home.path()).unwrap();
+        for dir in Dir::ALL {
+            assert!(
+                ids(&spool, dir).is_empty(),
+                "{what}: {} must stay empty",
+                dir.name()
+            );
+        }
+        peer.shutdown();
+    }
+}
+
+/// A `200` is an answer only with its `X-Owl-Signature` header: the same signed body without
+/// the header is a clean exit 1 naming the header, and nothing is spooled; with it, the answer
+/// is verified, printed, stored and cached like `answer_200_is_verified_stored_and_cached`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn answer_200_without_signature_header_is_a_clean_error() {
+    let a = id(1);
+    let b = id(2);
+    let hash = question_hash(PROJECT, PATH, QUESTION);
+    // The responder cache is shared across peers (§7): the 200 body may answer C's question.
+    let c = id(3);
+    let earlier = Payload::question(&fp(&c), &fp(&b), PROJECT, PATH, QUESTION);
+    let ans = Payload::answer(&earlier, "From the responder cache.", "fake", 1, false);
+    let env = Envelope::sign(&ans, &b);
+
+    let peer = spawn_fake(
+        2,
+        &a,
+        FakeScript {
+            accept: Some((200, env.raw.clone())),
+            accept_headers: vec![],
+            ..well_formed()
+        },
+    )
+    .await;
+    let home = asker_home(&a, &peer.state.id, &[&peer.addr.to_string()]);
+    let out = ask(home.path(), &[]);
+    let err = stderr(&out);
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert!(
+        err.contains("200 answer without X-Owl-Signature header"),
+        "{err}"
+    );
+    assert!(!err.contains("panicked"), "{err}");
+    assert!(stdout(&out).is_empty());
+    assert_eq!(peer.questions().len(), 1, "the question was sent");
+    let spool = Spool::new(home.path()).unwrap();
+    for dir in Dir::ALL {
+        assert!(
+            ids(&spool, dir).is_empty(),
+            "{} must stay empty",
+            dir.name()
+        );
+    }
+    peer.shutdown();
+
+    // Twin: the same body with its signature header is the verified answer.
+    let peer = spawn_fake(
+        2,
+        &a,
+        FakeScript {
+            accept: Some((200, env.raw.clone())),
+            accept_headers: vec![("x-owl-signature".to_string(), env.sig.clone())],
+            ..well_formed()
+        },
+    )
+    .await;
+    let home = asker_home(&a, &peer.state.id, &[&peer.addr.to_string()]);
+    let out = ask(home.path(), &[]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(stdout(&out).trim(), "From the responder cache.");
+    let spool = Spool::new(home.path()).unwrap();
+    let inbox = spool
+        .get(Dir::Inbox, &ans.id)
+        .unwrap()
+        .expect("answer in inbox");
+    assert_eq!(inbox.raw, env.raw);
+    assert_eq!(inbox.sig, env.sig);
+    assert_eq!(spool.cache_get(&hash).unwrap().unwrap().raw, env.raw);
+    assert!(ids(&spool, Dir::Asks).is_empty(), "answered: nothing waits");
+    assert_eq!(ids(&spool, Dir::Done).len(), 1, "the question is filed");
+    peer.shutdown();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn answer_200_is_verified_stored_and_cached() {
     let a = id(1);
@@ -1124,20 +1317,24 @@ async fn project_comes_from_origin_remote_unless_overridden() {
 // AC7
 #[test]
 fn blame_candidates() {
-    let (a, bea, ana) = (id(1), id(2), id(3));
+    let (a, zed, ana) = (id(1), id(2), id(3));
     // 20 blamed lines; the unmatched author owns 11 of them, so a share over matched lines
     // only (6/9, 3/9) is nowhere near a share over all blamed lines (6/20, 3/20).
+    // Zed owns more lines than Ana but sorts after her by name, and Ana is committed first:
+    // the expected order [Zed, Ana] is the line-share order and neither the name order nor
+    // the commit order.
     let repo = fixture_repo(&[
-        ("ana@example.org", 6),
-        ("bea@example.org", 3),
+        ("ana@example.org", 3),
+        ("zed@example.org", 6),
         ("nobody@example.org", 11),
     ]);
     let home = tempfile::tempdir().unwrap();
+    // Ana's contact is written before Zed's, so contact order is not the expected order either.
     prepare_home(
         home.path(),
         &a,
         true,
-        &[Peer::new(&bea, "Bea", None), Peer::new(&ana, "Ana", None)],
+        &[Peer::new(&ana, "Ana", None), Peer::new(&zed, "Zed", None)],
     );
     let out = owl(home.path(), repo.path())
         .args(["ask", "--file", "f.txt", "Who owns this?", "--json"])
@@ -1146,11 +1343,16 @@ fn blame_candidates() {
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     let v: Value = serde_json::from_str(&stdout(&out)).unwrap();
     let list = v.as_array().expect("JSON list");
+    assert_eq!(list.len(), 2, "{v}");
     let names: Vec<&str> = list
         .iter()
         .map(|c| c.get("name").and_then(Value::as_str).unwrap())
         .collect();
-    assert_eq!(names, ["Ana", "Bea"], "{v}");
+    assert_eq!(
+        names,
+        ["Zed", "Ana"],
+        "ordered by line share, not by name: {v}"
+    );
     let lines: Vec<u64> = list
         .iter()
         .map(|c| c.get("lines").and_then(Value::as_u64).unwrap())
@@ -1168,24 +1370,24 @@ fn blame_candidates() {
     assert_eq!(shares, [0.3, 0.15]);
     assert_eq!(
         list[0].get("fingerprint").and_then(Value::as_str),
-        Some(fp(&ana).as_str())
+        Some(fp(&zed).as_str())
     );
     assert_eq!(
         list[1].get("fingerprint").and_then(Value::as_str),
-        Some(fp(&bea).as_str())
+        Some(fp(&ana).as_str())
     );
     assert!(!stdout(&out).contains("nobody"));
     // Listing candidates sends nothing.
     assert!(ids(&Spool::new(home.path()).unwrap(), Dir::Asks).is_empty());
 
-    // Same repo, but Bea's contact carries an email git blame never saw: only Ana is listed.
+    // Same repo, but Zed's contact carries an email git blame never saw: only Ana is listed.
     let home2 = tempfile::tempdir().unwrap();
     prepare_home(home2.path(), &a, true, &[Peer::new(&ana, "Ana", None)]);
     write_contact_full(
         home2.path(),
-        &Peer::new(&bea, "Bea", None),
+        &Peer::new(&zed, "Zed", None),
         &[],
-        &["bea@elsewhere.example"],
+        &["zed@elsewhere.example"],
     );
     let out = owl(home2.path(), repo.path())
         .args(["ask", "--file", "f.txt", "Who owns this?", "--json"])
@@ -1201,17 +1403,25 @@ fn blame_candidates() {
         .collect();
     assert_eq!(names, ["Ana"], "{v}");
 
-    // Without --json and without a terminal: the list goes to stderr with a hint, exit 1.
+    // Without --json and without a terminal: the list goes to stderr with a hint, exit 1,
+    // numbered in line-share order.
     let out = owl(home.path(), repo.path())
         .args(["ask", "--file", "f.txt", "Who owns this?"])
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
     let err = stderr(&out);
-    assert!(err.contains("1) Ana"), "{err}");
-    assert!(err.contains("2) Bea"), "{err}");
-    assert!(err.contains("6 lines (30%)"), "{err}");
-    assert!(err.contains("3 lines (15%)"), "{err}");
+    let zed_line = err
+        .lines()
+        .find(|l| l.starts_with("1) Zed"))
+        .unwrap_or_else(|| panic!("Zed is candidate 1: {err}"));
+    assert!(zed_line.contains("6 lines (30%)"), "{zed_line}");
+    let ana_line = err
+        .lines()
+        .find(|l| l.starts_with("2) Ana"))
+        .unwrap_or_else(|| panic!("Ana is candidate 2: {err}"));
+    assert!(ana_line.contains("3 lines (15%)"), "{ana_line}");
+    assert!(!err.contains("3)"), "exactly two candidates: {err}");
     assert!(err.contains("--peer"), "{err}");
     assert!(stdout(&out).is_empty());
 
@@ -1226,7 +1436,7 @@ fn blame_candidates() {
 
     // No contact matches any author: a clear error, exit 1.
     let home3 = tempfile::tempdir().unwrap();
-    prepare_home(home3.path(), &a, true, &[Peer::new(&bea, "Zed", None)]);
+    prepare_home(home3.path(), &a, true, &[Peer::new(&zed, "Yul", None)]);
     let out = owl(home3.path(), repo.path())
         .args(["ask", "--file", "f.txt", "Who owns this?"])
         .output()

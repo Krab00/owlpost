@@ -695,18 +695,22 @@ filename f.txt
 
     #[test]
     fn candidates_are_matched_ranked_and_capped() {
-        // 20 blamed lines but only 10 carry a known mail: the share denominator is the
-        // header count, not the sum of matched (or mailed) lines.
+        // 20 blamed lines but only 12 carry a known mail: the share denominator is the
+        // header count, not the sum of matched (or mailed) lines. Zed owns as many lines as
+        // Bea and more than Ana, so the expected order [Bea, Zed, Ana] is the line-count
+        // order (ties by name) and neither the name order (Ana, Bea, Cat) nor the contact
+        // order (Cat, Bea, Eve, Ana, Dan, Zed).
         let mut stats = BlameStats {
             total: 20,
             ..Default::default()
         };
         for (m, n) in [
-            ("ana@example.org", 4),
+            ("ana@example.org", 2),
             ("bea@example.org", 3),
             ("bea@work.example", 1),
             ("cat@example.org", 1),
             ("dan@example.org", 1),
+            ("zed@example.org", 4),
         ] {
             stats.by_email.insert(m.into(), n);
         }
@@ -716,25 +720,39 @@ filename f.txt
             contact("Eve", &["eve@example.org"]),
             contact("Ana", &["ana@example.org"]),
             contact("Dan", &["dan@example.org"]),
+            contact("Zed", &["zed@example.org"]),
         ];
         let got = candidates(&stats, &contacts);
         let names: Vec<&str> = got.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(
             names,
-            ["Ana", "Bea", "Cat"],
-            "Ana 4 ties Bea 4 (two emails, case-folded) and wins by name; Cat 1 beats Dan 1 by name; Eve absent; capped at 3"
+            ["Bea", "Zed", "Ana"],
+            "Bea 4 (two emails, case-folded) ties Zed 4 and wins by name; Ana 2 beats Cat 1 and Dan 1; Eve absent; capped at 3"
         );
         assert_eq!(got[0].lines, 4);
+        assert_eq!(got[0].fingerprint, "owl:bea");
         assert_eq!(got[1].lines, 4);
-        assert_eq!(got[1].fingerprint, "owl:bea");
+        assert_eq!(got[1].fingerprint, "owl:zed");
+        assert_eq!(got[2].lines, 2);
         assert_eq!(got[0].share, 0.2, "4 of 20 blamed lines");
         assert_eq!(got[1].share, 0.2);
-        assert_eq!(got[2].share, 0.05);
+        assert_eq!(got[2].share, 0.1);
         assert!(candidates(&BlameStats::default(), &contacts).is_empty());
         let unmatched = [contact("Eve", &["eve@example.org"])];
         assert!(candidates(&stats, &unmatched).is_empty());
+        // Cat 1 and Dan 1 tie and would be ranked by name were the cap wider: with the
+        // top three removed, Cat comes before Dan.
+        let tail = [
+            contact("Dan", &["dan@example.org"]),
+            contact("Cat", &["cat@example.org"]),
+        ];
+        let tail_names: Vec<String> = candidates(&stats, &tail)
+            .into_iter()
+            .map(|c| c.name)
+            .collect();
+        assert_eq!(tail_names, ["Cat", "Dan"], "equal counts rank by name");
         let json = serde_json::to_value(&got).unwrap();
-        assert_eq!(json[1]["name"], "Bea");
+        assert_eq!(json[1]["name"], "Zed");
         assert_eq!(json[1]["lines"], 4);
         assert_eq!(json[1]["share"], 0.2);
     }
