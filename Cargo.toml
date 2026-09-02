@@ -29,7 +29,7 @@ axum-server = { version = "0.8", default-features = false, features = ["tls-rust
 # tower: only for the `Layer` trait, to attach the peer fingerprint to each TLS connection's service.
 tower = "0.5"
 # rustls-no-provider: same reason as above; the client always gets a preconfigured ring ClientConfig.
-reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "json"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "json", "blocking"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
