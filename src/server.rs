@@ -56,6 +56,25 @@ pub struct Spooled {
     pub auto: bool,
 }
 
+/// Emitted after the pull loop has stored a peer's answer under `asks/` (OWL-008 calls
+/// `on_answer_ingested`); the daemon turns it into an "answer from <peer>" notification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnswerIngested {
+    /// Id of the answered ask record.
+    pub id: String,
+    /// Fingerprint of the answering peer.
+    pub peer: String,
+    /// Path the original question was about.
+    pub path: String,
+}
+
+/// Everything the request handlers (and the pull loop) report to the daemon loop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DaemonEvent {
+    Question(Spooled),
+    Answer(AnswerIngested),
+}
+
 pub struct AppState {
     pub home: PathBuf,
     /// Working directory used for the repo contact provider.
@@ -67,8 +86,9 @@ pub struct AppState {
     pub buckets: Mutex<HashMap<String, Bucket>>,
     /// Set by the daemon once the listener is bound; used for the card `url`.
     pub bound: OnceLock<SocketAddr>,
-    /// ponytail: auto-accept scheduler hook (OWL-008) — the daemon currently only logs these.
-    pub on_spooled: Option<tokio::sync::mpsc::UnboundedSender<Spooled>>,
+    /// Daemon event channel: notifications today; the auto-accept scheduler (OWL-008)
+    /// consumes the same `Question` events.
+    pub on_spooled: Option<tokio::sync::mpsc::UnboundedSender<DaemonEvent>>,
     started: Instant,
 }
 
@@ -78,7 +98,7 @@ impl AppState {
         cwd: PathBuf,
         config: Config,
         identity: Identity,
-        on_spooled: Option<tokio::sync::mpsc::UnboundedSender<Spooled>>,
+        on_spooled: Option<tokio::sync::mpsc::UnboundedSender<DaemonEvent>>,
     ) -> anyhow::Result<AppState> {
         let spool = Spool::new(&home)?;
         let seen = SeenIds::load(&home, envelope::now_unix())?;
@@ -469,11 +489,18 @@ fn remember(state: &AppState, id: &str, now: u64) -> ApiResult<()> {
     seen.save(&state.home).map_err(ApiError::storage)
 }
 
-/// Hook for the auto-accept scheduler; today it only forwards to the daemon's channel.
-// ponytail: OWL-008 replaces the channel consumer with the draft + send scheduler.
+/// Question arrival hook: forwards to the daemon loop (notification now, scheduler in OWL-008).
+// ponytail: OWL-008 extends the daemon's channel consumer with the draft + send scheduler.
 pub fn on_question_spooled(state: &AppState, event: Spooled) {
     if let Some(tx) = &state.on_spooled {
-        let _ = tx.send(event);
+        let _ = tx.send(DaemonEvent::Question(event));
+    }
+}
+
+/// Answer ingestion hook for the pull loop (OWL-008): the daemon notifies "answer from <peer>".
+pub fn on_answer_ingested(state: &AppState, event: AnswerIngested) {
+    if let Some(tx) = &state.on_spooled {
+        let _ = tx.send(DaemonEvent::Answer(event));
     }
 }
 
