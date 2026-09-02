@@ -7,6 +7,8 @@ use clap::{Parser, Subcommand};
 
 use owlpost::{config, contacts, daemon, identity};
 
+mod cli;
+
 #[derive(Parser)]
 #[command(
     name = "owl",
@@ -265,13 +267,37 @@ fn main() -> ExitCode {
         Cmd::Whoami => whoami(&home, cli.json),
         Cmd::Contact { cmd } => contact(&home, cmd, cli.json),
         Cmd::Daemon { foreground } => daemon_cmd(&home, foreground),
+        Cmd::Inbox {
+            count,
+            new,
+            all,
+            format,
+        } => cli::inbox::run(
+            &home,
+            cli::inbox::Opts {
+                count,
+                new,
+                all,
+                format,
+                json: cli.json,
+            },
+        ),
+        Cmd::Show { id } => cli::show::run(&home, &id, cli.json),
+        Cmd::Draft { id, harness } => cli::draft::run(&home, &id, harness.as_deref(), cli.json),
+        Cmd::Edit { id } => cli::edit::run(&home, &id, cli.json),
+        Cmd::Send { id } => cli::send::run(&home, &id, cli.json),
+        Cmd::Reject { id } => cli::reject::run(&home, &id, cli.json),
+        Cmd::History { peer, path, since } => {
+            cli::history::run(&home, cli::history::Filters { peer, path, since }, cli.json)
+        }
         _ => Err(anyhow::anyhow!("not implemented yet")),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("owl: {e:#}");
-            ExitCode::from(1)
+            let code = e.downcast_ref::<cli::ExitError>().map_or(1, |x| x.code);
+            ExitCode::from(code)
         }
     }
 }

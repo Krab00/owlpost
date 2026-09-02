@@ -1,0 +1,983 @@
+//! OWL-010 inbox CLI tests: every test drives the `owl` binary against its own temp home,
+//! writes inbox records straight into the spool (signed by a peer identity) and uses
+//! `tests/fixtures/fake-harness.sh` as the responder (design §8, §9, §12).
+
+mod common;
+
+use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
+use std::process::Command;
+
+use common::{
+    PATH, PROJECT, Peer, client, fp, id, policy, post_envelope, prepare_home_with, question,
+    respawn, signed,
+};
+use owlpost::config::Harness;
+use owlpost::contacts::Mode;
+use owlpost::envelope::{self, Body, Envelope, Kind, Payload};
+use owlpost::identity::Identity;
+use owlpost::spool::{Dir, Record, Spool};
+use serde_json::{Value, json};
+use tempfile::TempDir;
+
+const OWL: &str = env!("CARGO_BIN_EXE_owl");
+const FAKE_HARNESS: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/fake-harness.sh"
+);
+const CLAUDE_TWO: &str = r#"{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"owlpost: 2 new questions (Maciek 2). Say \"show owlpost inbox\" or run `owl inbox`."}}"#;
+const SENTENCE_TWO: &str =
+    "owlpost: 2 new questions (Maciek 2). Say \"show owlpost inbox\" or run `owl inbox`.";
+const FORMATS: [&str; 4] = ["plain", "claude", "codex", "kimi"];
+
+struct Home {
+    dir: TempDir,
+    _checkout: TempDir,
+    me: Identity,
+    maciek: Identity,
+    ana: Identity,
+    maciej: Identity,
+}
+
+impl Home {
+    fn new() -> Home {
+        Self::with(|_| {})
+    }
+
+    fn with(tweak: impl FnOnce(&mut owlpost::config::Config)) -> Home {
+        let dir = tempfile::tempdir().unwrap();
+        let checkout = tempfile::tempdir().unwrap();
+        let (me, maciek, ana, maciej) = (id(2), id(1), id(3), id(5));
+        let peers = [
+            Peer::new(&maciek, "Maciek", Some(policy(Mode::Manual, None))),
+            Peer::new(&ana, "Ana", Some(policy(Mode::Manual, None))),
+            // Differs from Maciek in one character: the `--peer` negative twin.
+            Peer::new(&maciej, "Maciej", None),
+        ];
+        let checkout_path = checkout.path().to_string_lossy().into_owned();
+        prepare_home_with(dir.path(), &me, &peers, |cfg| {
+            cfg.harnesses.insert(
+                "fake".into(),
+                Harness {
+                    cmd: vec![FAKE_HARNESS.into(), "{prompt}".into()],
+                    answer_path: "raw".into(),
+                    enabled: true,
+                    disabled_reason: None,
+                    env: Default::default(),
+                },
+            );
+            cfg.responder.harness = "fake".into();
+            cfg.projects.insert(PROJECT.into(), checkout_path);
+            tweak(cfg);
+        });
+        Home {
+            dir,
+            _checkout: checkout,
+            me,
+            maciek,
+            ana,
+            maciej,
+        }
+    }
+
+    fn path(&self) -> &Path {
+        self.dir.path()
+    }
+
+    fn spool(&self) -> Spool {
+        Spool::new(self.path()).unwrap()
+    }
+
+    fn owl(&self) -> Command {
+        let mut c = Command::new(OWL);
+        c.env_remove("OWLPOST_HOME")
+            .env_remove("EDITOR")
+            .arg("--home")
+            .arg(self.path());
+        c
+    }
+
+    /// Runs `owl <args>` and returns (exit code, stdout, stderr).
+    fn run(&self, args: &[&str]) -> (i32, String, String) {
+        let out = self.owl().args(args).output().unwrap();
+        (
+            out.status.code().unwrap_or(-1),
+            String::from_utf8(out.stdout).unwrap(),
+            String::from_utf8(out.stderr).unwrap(),
+        )
+    }
+
+    fn ok(&self, args: &[&str]) -> String {
+        let (code, out, err) = self.run(args);
+        assert_eq!(code, 0, "owl {args:?} failed: {err}");
+        out
+    }
+
+    fn json(&self, args: &[&str]) -> Value {
+        serde_json::from_str(&self.ok(args)).expect("valid JSON output")
+    }
+
+    /// Exit 1 with `needle` on stderr.
+    fn fails(&self, args: &[&str], needle: &str) -> String {
+        let (code, out, err) = self.run(args);
+        assert_eq!(code, 1, "owl {args:?}: stdout {out:?} stderr {err:?}");
+        assert!(
+            err.contains(needle),
+            "owl {args:?}: stderr {err:?} lacks {needle:?}"
+        );
+        err
+    }
+
+    /// Spools a question from `from` to me in `state` the way the daemon does (§3.2); returns the id.
+    fn put(&self, from: &Identity, text: &str, state: &str) -> String {
+        let env = signed(from, &self.me, text);
+        self.put_env(&env, state)
+    }
+
+    fn put_env(&self, env: &Envelope, state: &str) -> String {
+        let p: Payload = serde_json::from_str(&env.raw).unwrap();
+        let hash = match &p.body {
+            Body::Question {
+                project,
+                path,
+                question,
+            } => envelope::question_hash(project, path, question),
+            Body::Answer { .. } => String::new(),
+        };
+        let rec = Record {
+            raw: env.raw.clone(),
+            sig: env.sig.clone(),
+            state: state.into(),
+            seen: false,
+            received_at: envelope::rfc3339_now(),
+            draft: None,
+            meta: json!({ "peer": p.from, "hash": hash }),
+        };
+        self.spool().put(Dir::Inbox, &p.id, &rec).unwrap();
+        p.id
+    }
+
+    fn inbox(&self, id: &str) -> Option<Record> {
+        self.spool().get(Dir::Inbox, id).unwrap()
+    }
+
+    fn done(&self, id: &str) -> Option<Record> {
+        self.spool().get(Dir::Done, id).unwrap()
+    }
+
+    fn outbox(&self) -> Vec<(String, Record)> {
+        self.spool().list(Dir::Outbox, |_| true).unwrap()
+    }
+
+    fn set_received(&self, id: &str, dir: Dir, at: &str) {
+        let spool = self.spool();
+        let mut r = spool.get(dir, id).unwrap().unwrap();
+        r.received_at = at.into();
+        spool.put(dir, id, &r).unwrap();
+    }
+
+    fn editor_script(&self, body: &str) -> String {
+        let p = self.path().join("editor.sh");
+        std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p.to_string_lossy().into_owned()
+    }
+}
+
+fn payload(rec: &Record) -> Payload {
+    serde_json::from_str(&rec.raw).unwrap()
+}
+
+fn answer_body(p: &Payload) -> (String, String, u32, bool) {
+    match &p.body {
+        Body::Answer {
+            answer,
+            harness,
+            redactions,
+            cached,
+        } => (answer.clone(), harness.clone(), *redactions, *cached),
+        Body::Question { .. } => panic!("expected an answer payload"),
+    }
+}
+
+// ---------------------------------------------------------------- AC1
+
+#[test]
+fn count_and_formats() {
+    let h = Home::new();
+    h.put(&h.maciek, "Why is the refresh token rotated?", "pending");
+    h.put(&h.maciek, "Where is the retry policy?", "consent");
+
+    assert_eq!(h.ok(&["inbox", "--count"]), "2\n");
+    let claude = h.ok(&["inbox", "--count", "--format", "claude"]);
+    assert_eq!(claude.lines().count(), 1, "one line: {claude:?}");
+    assert_eq!(claude, format!("{CLAUDE_TWO}\n"));
+    let v: Value = serde_json::from_str(claude.trim()).unwrap();
+    let hook = &v["hookSpecificOutput"];
+    assert_eq!(hook["hookEventName"], "UserPromptSubmit");
+    assert!(
+        hook["additionalContext"]
+            .as_str()
+            .unwrap()
+            .starts_with("owlpost: 2 new questions"),
+        "{hook}"
+    );
+    assert_eq!(h.ok(&["inbox", "--count", "--format", "codex"]), claude);
+    assert_eq!(
+        h.ok(&["inbox", "--count", "--format", "kimi"]),
+        format!("{SENTENCE_TWO}\n")
+    );
+    assert_eq!(
+        h.ok(&["inbox", "--count", "--format", "plain"]),
+        format!("{SENTENCE_TWO}\n")
+    );
+    // Counting never marks anything seen.
+    assert_eq!(h.ok(&["inbox", "--count"]), "2\n");
+    let (code, out, err) = h.run(&["inbox", "--count", "--format", "vim"]);
+    assert_eq!((code, out.as_str()), (1, ""));
+    assert!(err.contains("unknown --format vim"), "{err}");
+
+    // Zero unseen: nothing at all on stdout, exit 0, for every format.
+    h.ok(&["inbox"]);
+    assert_eq!(h.ok(&["inbox", "--count"]), "0\n");
+    for f in FORMATS {
+        let (code, out, err) = h.run(&["inbox", "--count", "--format", f]);
+        assert_eq!(
+            (code, out.as_str(), err.as_str()),
+            (0, "", ""),
+            "format {f}"
+        );
+    }
+    // `--count --all` keeps the total visible after everything was seen (§3.3).
+    assert_eq!(h.ok(&["inbox", "--count", "--all"]), "2\n");
+    assert_eq!(
+        h.ok(&["inbox", "--count", "--all", "--format", "plain"]),
+        format!("{SENTENCE_TWO}\n")
+    );
+    let v = h.json(&["inbox", "--count", "--json"]);
+    assert_eq!(v["count"], 0);
+    let v = h.json(&["inbox", "--count", "--all", "--json"]);
+    assert_eq!(v["count"], 2);
+    assert_eq!(v["questions"], 2);
+    assert_eq!(v["peers"], json!([{ "name": "Maciek", "count": 2 }]));
+
+    // An empty home (no spool yet) counts 0 and injects nothing.
+    let empty = Home::new();
+    assert_eq!(empty.ok(&["inbox", "--count"]), "0\n");
+    for f in FORMATS {
+        assert_eq!(empty.ok(&["inbox", "--count", "--format", f]), "", "{f}");
+    }
+}
+
+#[test]
+fn hook_line_singular_and_per_peer_counts() {
+    let h = Home::new();
+    h.put(&h.maciek, "one?", "pending");
+    for f in FORMATS {
+        let out = h.ok(&["inbox", "--count", "--format", f]);
+        let expected =
+            "owlpost: 1 new question (Maciek 1). Say \"show owlpost inbox\" or run `owl inbox`.";
+        match f {
+            "claude" | "codex" => assert_eq!(
+                out,
+                format!(
+                    "{{\"hookSpecificOutput\":{{\"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":{}}}}}\n",
+                    serde_json::to_string(expected).unwrap()
+                ),
+                "{f}"
+            ),
+            _ => assert_eq!(out, format!("{expected}\n"), "{f}"),
+        }
+    }
+    // Two peers: ordered by count descending, then name; an unknown peer shows its fingerprint.
+    h.put(&h.ana, "two?", "pending");
+    h.put(&h.ana, "three?", "pending");
+    assert_eq!(
+        h.ok(&["inbox", "--count", "--format", "plain"]),
+        "owlpost: 3 new questions (Ana 2, Maciek 1). Say \"show owlpost inbox\" or run `owl inbox`.\n"
+    );
+    let stranger = id(9);
+    h.put(&stranger, "four?", "consent");
+    assert_eq!(
+        h.ok(&["inbox", "--count", "--format", "kimi"]),
+        format!(
+            "owlpost: 4 new questions (Ana 2, Maciek 1, {} 1). Say \"show owlpost inbox\" or run `owl inbox`.\n",
+            fp(&stranger)
+        )
+    );
+}
+
+// ---------------------------------------------------------------- AC2
+
+#[test]
+fn listing_marks_seen() {
+    let h = Home::new();
+    let a = h.put(&h.maciek, "first?", "pending");
+    let b = h.put(&h.ana, "second?", "consent");
+    h.set_received(
+        &a,
+        Dir::Inbox,
+        &envelope::unix_to_rfc3339(envelope::now_unix() - 7_200),
+    );
+
+    let out = h.ok(&["inbox"]);
+    assert!(out.contains(&a) && out.contains(&b), "{out}");
+    assert!(out.contains("Maciek") && out.contains("Ana"), "{out}");
+    assert!(out.contains("pending") && out.contains("consent"), "{out}");
+    assert!(out.contains(PATH), "{out}");
+    assert!(
+        out.lines().any(|l| l.contains(&a) && l.ends_with("2h")),
+        "{out}"
+    );
+    assert_eq!(h.ok(&["inbox", "--count"]), "0\n");
+    assert!(h.inbox(&a).unwrap().seen && h.inbox(&b).unwrap().seen);
+
+    let (code, out, err) = h.run(&["inbox", "--new"]);
+    assert_eq!((code, out.as_str(), err.as_str()), (0, "", ""));
+    let all = h.ok(&["inbox", "--all"]);
+    assert!(all.contains(&a) && all.contains(&b), "{all}");
+    // The default listing keeps showing seen records too (§3.3 "lists everything").
+    let again = h.ok(&["inbox"]);
+    assert!(again.contains(&a) && again.contains(&b), "{again}");
+
+    // A third, unseen record: `--new` lists exactly that one and marks it.
+    let c = h.put(&h.maciek, "third?", "pending");
+    let new = h.ok(&["inbox", "--new"]);
+    assert!(
+        new.contains(&c) && !new.contains(&a) && !new.contains(&b),
+        "{new}"
+    );
+    assert!(h.inbox(&c).unwrap().seen);
+    assert_eq!(h.ok(&["inbox", "--new"]), "");
+
+    let rows = h.json(&["inbox", "--json"]);
+    let rows = rows.as_array().unwrap();
+    assert_eq!(rows.len(), 3);
+    let row = rows.iter().find(|r| r["id"] == a).unwrap();
+    assert_eq!(row["from_name"], "Maciek");
+    assert_eq!(row["from"], fp(&h.maciek));
+    assert_eq!(row["type"], "question");
+    assert_eq!(row["state"], "pending");
+    assert_eq!(row["path"], PATH);
+    assert_eq!(row["project"], PROJECT);
+    assert_eq!(row["seen"], true);
+    assert_eq!(row["age"], "2h");
+    assert!(row["age_secs"].as_u64().unwrap() >= 7_200);
+    assert_eq!(h.json(&["inbox", "--new", "--json"]), json!([]));
+}
+
+#[test]
+fn show_prints_content_and_marks_seen() {
+    let h = Home::new();
+    let a = h.put(
+        &h.maciek,
+        "Why is the refresh token rotated on every read?",
+        "pending",
+    );
+    let b = h.put(&h.ana, "second?", "consent");
+    assert_eq!(h.ok(&["inbox", "--count"]), "2\n");
+
+    let out = h.ok(&["show", &a]);
+    assert!(
+        out.contains("Why is the refresh token rotated on every read?"),
+        "{out}"
+    );
+    assert!(
+        out.contains("Maciek") && out.contains(&fp(&h.maciek)),
+        "{out}"
+    );
+    assert!(out.contains(PROJECT) && out.contains(PATH), "{out}");
+    assert!(out.contains("state:    pending"), "{out}");
+    assert!(!out.contains("draft"), "no draft yet: {out}");
+    assert_eq!(h.ok(&["inbox", "--count"]), "1\n");
+    assert!(h.inbox(&a).unwrap().seen && !h.inbox(&b).unwrap().seen);
+
+    let all = h.ok(&["show", "all"]);
+    assert!(
+        all.contains(&a) && all.contains(&b) && all.contains("second?"),
+        "{all}"
+    );
+    assert_eq!(h.ok(&["inbox", "--count"]), "0\n");
+
+    h.ok(&["draft", &a]);
+    let out = h.ok(&["show", &a]);
+    assert!(out.contains("draft (ok via fake, redactions: 1"), "{out}");
+    assert!(out.contains("[redacted]"), "{out}");
+    let v = h.json(&["show", &a, "--json"]);
+    assert_eq!(v["id"], a);
+    assert_eq!(v["state"], "drafted");
+    assert_eq!(
+        v["payload"]["body"]["question"],
+        "Why is the refresh token rotated on every read?"
+    );
+    assert_eq!(v["draft"]["redactions"], 1);
+    assert!(v["draft"]["text"].as_str().unwrap().contains("[redacted]"));
+    assert!(h.json(&["show", "all", "--json"]).is_array());
+
+    // An answer record shows the answer text.
+    let q = question(&h.me, &h.ana, "asked earlier?");
+    let ans = Envelope::sign(
+        &Payload::answer(&q, "Because of X.", "claude", 0, false),
+        &h.ana,
+    );
+    let c = h.put_env(&ans, "pending");
+    let out = h.ok(&["show", &c]);
+    assert!(
+        out.contains("type:     answer") && out.contains("Because of X."),
+        "{out}"
+    );
+    assert!(out.contains(&format!("reply to: {}", q.id)), "{out}");
+
+    h.fails(&["show", "nope"], "no inbox record nope");
+    let (code, out, err) = h.run(&["show", "nope", "--json"]);
+    assert_eq!((code, out.as_str()), (1, ""));
+    assert!(err.contains("nope"), "{err}");
+}
+
+// ---------------------------------------------------------------- AC3
+
+#[test]
+fn draft_send_moves_records() {
+    let h = Home::new();
+    let qid = h.put(&h.maciek, "Where is the retry policy defined?", "pending");
+    let q = payload(&h.inbox(&qid).unwrap());
+
+    let out = h.ok(&["draft", &qid]);
+    assert!(out.contains("[redacted]"), "{out}");
+    assert!(!out.contains("sk-test-123456"), "secret leaked: {out}");
+    assert!(out.contains("redactions: 1"), "{out}");
+    assert!(out.contains("harness: fake"), "{out}");
+    let rec = h.inbox(&qid).unwrap();
+    assert_eq!(rec.state, "drafted");
+    let d = rec.draft.as_ref().unwrap();
+    assert!(d["text"].as_str().unwrap().contains("[redacted]"));
+    assert_eq!(d["harness"], "fake");
+    assert_eq!(d["redactions"], 1);
+    assert_eq!(d["status"], "ok");
+    assert!(envelope::parse_rfc3339_to_unix(d["drafted_at"].as_str().unwrap()).is_some());
+    assert!(h.outbox().is_empty(), "draft must not touch outbox");
+
+    let out = h.ok(&["send", &qid]);
+    let outbox = h.outbox();
+    assert_eq!(outbox.len(), 1, "{outbox:?}");
+    let (aid, arec) = &outbox[0];
+    assert!(out.contains(&format!("sent {aid}")), "{out}");
+    assert_eq!(arec.state, "unacked");
+    assert!(!arec.seen && arec.draft.is_none());
+    assert_eq!(arec.meta["question_id"], qid);
+    assert_eq!(arec.meta["peer"], fp(&h.maciek));
+    let env = Envelope {
+        raw: arec.raw.clone(),
+        sig: arec.sig.clone(),
+    };
+    let a = env
+        .verify(&h.me.verifying_key())
+        .expect("signature verifies against the responder key");
+    assert!(
+        env.verify(&h.maciek.verifying_key()).is_err(),
+        "not signed by the asker"
+    );
+    assert_eq!(a.id, *aid);
+    assert_eq!(a.kind, Kind::Answer);
+    assert_eq!(a.in_reply_to.as_deref(), Some(qid.as_str()));
+    assert_eq!(a.from, fp(&h.me));
+    assert_eq!(a.to, fp(&h.maciek));
+    let (text, harness, redactions, cached) = answer_body(&a);
+    assert!(
+        text.contains("[redacted]") && text.contains("src/client.rs"),
+        "{text}"
+    );
+    assert_eq!((harness.as_str(), redactions, cached), ("fake", 1, false));
+    // Raw JSON keeps the §6 answer body shape.
+    let raw: Value = serde_json::from_str(&arec.raw).unwrap();
+    assert_eq!(raw["type"], "answer");
+    assert_eq!(raw["body"]["redactions"], 1);
+    assert_eq!(raw["body"]["cached"], false);
+    assert_eq!(raw["body"]["harness"], "fake");
+
+    assert!(h.inbox(&qid).is_none(), "question left the inbox");
+    let done = h.done(&qid).unwrap();
+    assert_eq!(done.state, "answered");
+    assert_eq!(done.raw, rec.raw, "the question record itself moved");
+    assert_eq!(done.meta["answer_id"], *aid);
+    assert!(envelope::parse_rfc3339_to_unix(done.meta["done_at"].as_str().unwrap()).is_some());
+
+    let hash = match &q.body {
+        Body::Question {
+            project,
+            path,
+            question,
+        } => envelope::question_hash(project, path, question),
+        Body::Answer { .. } => unreachable!(),
+    };
+    let cached = h
+        .spool()
+        .cache_get(&hash)
+        .unwrap()
+        .expect("cache holds the answer");
+    assert_eq!(
+        (cached.raw.as_str(), cached.sig.as_str()),
+        (arec.raw.as_str(), arec.sig.as_str())
+    );
+    // The same question with different whitespace/case normalises to the same hash.
+    let same = envelope::question_hash(PROJECT, PATH, "  where IS the retry   policy defined? ");
+    assert!(h.spool().cache_get(&same).unwrap().is_some());
+    assert_eq!(h.ok(&["inbox", "--count", "--all"]), "0\n");
+    let hist = h.json(&["history", "--json"]);
+    assert_eq!(hist[0]["id"], qid);
+    assert_eq!(hist[0]["state"], "answered");
+    assert_eq!(hist[0]["peer_name"], "Maciek");
+
+    // Re-sending is refused: the record is gone from the inbox and the outbox stays single.
+    h.fails(&["send", &qid], &format!("no inbox record {qid}"));
+    assert_eq!(h.outbox().len(), 1);
+    let v = h.json(&["draft", "--json", &h.put(&h.ana, "json draft?", "pending")]);
+    assert_eq!(v["state"], "drafted");
+    assert_eq!(v["redactions"], 1);
+}
+
+#[tokio::test]
+async fn sent_answer_is_served_from_the_daemon_cache() {
+    let h = Home::new();
+    let qid = h.put(&h.maciek, "Where is the retry policy defined?", "pending");
+    h.ok(&["draft", &qid]);
+    h.ok(&["send", &qid]);
+    let sent = h.outbox().remove(0).1;
+
+    let Home {
+        dir, me, maciek, ..
+    } = h;
+    let daemon = respawn(dir, me).await;
+    let cl = client(Some(&maciek), &daemon.id);
+    // A fresh question with the same text and path: the daemon answers 200 from the cache
+    // with exactly the envelope `owl send` wrote.
+    let again = signed(&maciek, &daemon.id, "where is the RETRY policy defined?");
+    let resp = post_envelope(&cl, &daemon, &again).await;
+    assert_eq!(resp.status(), 200);
+    let sig = resp
+        .headers()
+        .get("X-Owl-Signature")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    let body = resp.text().await.unwrap();
+    assert_eq!(
+        (body.as_str(), sig.as_str()),
+        (sent.raw.as_str(), sent.sig.as_str())
+    );
+    // And the outbox listing for Maciek carries the same envelope.
+    let list: Vec<Value> = cl
+        .get(daemon.url("/v1/outbox"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(list, vec![json!({ "raw": sent.raw, "sig": sent.sig })]);
+    daemon.running.shutdown();
+}
+
+// ---------------------------------------------------------------- AC4
+
+#[test]
+fn edit_replaces_draft() {
+    let h = Home::new();
+    let qid = h.put(&h.maciek, "edit me?", "pending");
+    h.fails(&["edit", &qid], &format!("owl draft {qid}"));
+    h.ok(&["draft", &qid]);
+    let before = h.inbox(&qid).unwrap().draft.unwrap()["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // No EDITOR: refused, draft unchanged.
+    h.fails(&["edit", &qid], "EDITOR is not set");
+    assert_eq!(h.inbox(&qid).unwrap().draft.unwrap()["text"], before);
+
+    // A failing editor: refused, draft unchanged.
+    let bad = h.editor_script("exit 3");
+    let out = h
+        .owl()
+        .env("EDITOR", &bad)
+        .args(["edit", &qid])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("exited with"));
+    assert_eq!(h.inbox(&qid).unwrap().draft.unwrap()["text"], before);
+
+    // The real edit appends EDITED; the editor receives the current draft text.
+    let log = h.path().join("editor-saw.txt");
+    let script = h.editor_script(&format!(
+        "cp \"$1\" {}\necho EDITED >> \"$1\"",
+        log.display()
+    ));
+    let out = h
+        .owl()
+        .env("EDITOR", &script)
+        .args(["edit", &qid])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(std::fs::read_to_string(&log).unwrap(), before);
+    let d = h.inbox(&qid).unwrap().draft.unwrap();
+    let text = d["text"].as_str().unwrap();
+    assert!(text.ends_with("EDITED"), "{text:?}");
+    assert!(text.starts_with(&before), "{text:?}");
+    assert_eq!(d["status"], "edited");
+    assert_eq!(d["redactions"], 1);
+    assert!(d["edited_at"].is_string());
+    assert!(
+        h.path().join("tmp").read_dir().unwrap().next().is_none(),
+        "temp file cleaned up"
+    );
+    assert_eq!(h.inbox(&qid).unwrap().state, "drafted");
+
+    h.ok(&["send", &qid]);
+    let (_, arec) = h.outbox().remove(0);
+    let a = Envelope {
+        raw: arec.raw,
+        sig: arec.sig,
+    }
+    .verify(&h.me.verifying_key())
+    .unwrap();
+    let (sent, _, redactions, _) = answer_body(&a);
+    assert!(sent.ends_with("EDITED"), "{sent:?}");
+    assert!(sent.contains("[redacted]"));
+    assert_eq!(redactions, 1);
+
+    // An editor that empties the file: refused, draft unchanged.
+    let qid = h.put(&h.ana, "empty edit?", "pending");
+    h.ok(&["draft", &qid]);
+    let wipe = h.editor_script(": > \"$1\"");
+    let out = h
+        .owl()
+        .env("EDITOR", &wipe)
+        .args(["edit", &qid])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("is empty"));
+    assert!(
+        h.inbox(&qid).unwrap().draft.unwrap()["text"]
+            .as_str()
+            .unwrap()
+            .contains("[redacted]")
+    );
+}
+
+// ---------------------------------------------------------------- AC5
+
+#[test]
+fn reject_and_history() {
+    let h = Home::new();
+    let rejected = h.put(&h.maciek, "reject me?", "pending");
+    let kept = h.put(&h.ana, "keep me?", "pending");
+    let twin = h.put(&h.maciej, "twin?", "consent");
+
+    assert_eq!(
+        h.ok(&["reject", &rejected]),
+        format!("rejected {rejected}\n")
+    );
+    assert!(h.inbox(&rejected).is_none());
+    let done = h.done(&rejected).unwrap();
+    assert_eq!(done.state, "rejected");
+    assert_eq!(done.meta["previous_state"], "pending");
+    assert!(h.inbox(&kept).is_some(), "other records untouched");
+    assert!(h.outbox().is_empty());
+    assert_eq!(
+        h.json(&["reject", &twin, "--json"]),
+        json!({ "id": twin, "state": "rejected" })
+    );
+
+    let hist = h.json(&["history", "--json"]);
+    let ids = |v: &Value| -> Vec<String> {
+        v.as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["id"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let mut expected = vec![rejected.clone(), twin.clone()];
+    expected.sort();
+    assert_eq!(
+        ids(&hist),
+        expected,
+        "history lists exactly the two rejected records, sorted"
+    );
+    let mine = hist
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == rejected)
+        .unwrap();
+    assert_eq!(mine["state"], "rejected");
+    assert_eq!(mine["peer_name"], "Maciek");
+    assert_eq!(mine["peer"], fp(&h.maciek));
+    assert_eq!(mine["path"], PATH);
+    assert_eq!(mine["type"], "question");
+    assert_eq!(mine["text"], "reject me?");
+    assert!(mine["done_at"].is_string());
+    assert!(!ids(&hist).contains(&kept), "still in the inbox");
+
+    // --peer: exact name, case-insensitive name, fingerprint; the one-letter twin is excluded.
+    assert_eq!(
+        ids(&h.json(&["history", "--json", "--peer", "Maciek"])),
+        vec![rejected.clone()]
+    );
+    assert_eq!(
+        ids(&h.json(&["history", "--json", "--peer", "maciek"])),
+        vec![rejected.clone()]
+    );
+    assert_eq!(
+        ids(&h.json(&["history", "--json", "--peer", &fp(&h.maciek)])),
+        vec![rejected.clone()]
+    );
+    assert_eq!(
+        ids(&h.json(&["history", "--json", "--peer", "Maciej"])),
+        vec![twin.clone()]
+    );
+    assert_eq!(h.json(&["history", "--json", "--peer", "Ana"]), json!([]));
+    assert_eq!(
+        h.json(&["history", "--json", "--peer", "Mac"]),
+        json!([]),
+        "no prefix matching"
+    );
+
+    // --since: relative and absolute, boundary inclusive.
+    assert_eq!(
+        ids(&h.json(&["history", "--json", "--since", "1d"])).len(),
+        2
+    );
+    assert_eq!(
+        ids(&h.json(&["history", "--json", "--since", "1h"])).len(),
+        2
+    );
+    h.set_received(&rejected, Dir::Done, "2026-09-01T10:00:00Z");
+    assert_eq!(
+        h.json(&["history", "--json", "--since", "1d", "--peer", "Maciek"]),
+        json!([])
+    );
+    assert_eq!(
+        ids(&h.json(&[
+            "history",
+            "--json",
+            "--since",
+            "2026-09-01T10:00:00Z",
+            "--peer",
+            "Maciek"
+        ])),
+        vec![rejected.clone()]
+    );
+    assert_eq!(
+        h.json(&[
+            "history",
+            "--json",
+            "--since",
+            "2026-09-01T10:00:01Z",
+            "--peer",
+            "Maciek"
+        ]),
+        json!([])
+    );
+    let (code, _, err) = h.run(&["history", "--since", "yesterday"]);
+    assert_eq!(code, 1);
+    assert!(err.contains("bad --since"), "{err}");
+
+    // --path glob: one character apart between the positive and the negative pattern.
+    assert_eq!(
+        ids(&h.json(&["history", "--json", "--path", "src/auth/*.rs"])).len(),
+        2
+    );
+    assert_eq!(
+        h.json(&["history", "--json", "--path", "src/auth/*.ts"]),
+        json!([])
+    );
+    assert_eq!(
+        ids(&h.json(&["history", "--json", "--path", "src/auth/session.r?"])).len(),
+        2
+    );
+    assert_eq!(
+        h.json(&["history", "--json", "--path", "src/auth/session.?"]),
+        json!([])
+    );
+    assert_eq!(
+        ids(&h.json(&["history", "--json", "--path", PATH])).len(),
+        2
+    );
+    assert_eq!(
+        h.json(&["history", "--json", "--path", "src/auth"]),
+        json!([])
+    );
+
+    // Plain output and the filters combined.
+    let plain = h.ok(&["history"]);
+    assert!(
+        plain.contains(&rejected) && plain.contains("Maciek") && plain.contains("rejected"),
+        "{plain}"
+    );
+    assert_eq!(h.ok(&["history", "--peer", "Ana"]), "");
+    assert_eq!(
+        ids(&h.json(&[
+            "history", "--json", "--peer", "Maciej", "--path", "*.rs", "--since", "1d"
+        ])),
+        vec![twin.clone()]
+    );
+
+    // Reject works from every inbox state, and refuses unknown ids.
+    let c = h.put(&h.maciek, "consent reject?", "consent");
+    let d = h.put(&h.maciek, "drafted reject?", "pending");
+    h.ok(&["draft", &d]);
+    h.ok(&["reject", &c]);
+    h.ok(&["reject", &d]);
+    assert_eq!(h.done(&c).unwrap().state, "rejected");
+    assert_eq!(h.done(&d).unwrap().state, "rejected");
+    assert!(
+        h.done(&d).unwrap().draft.is_some(),
+        "the draft stays on the rejected record"
+    );
+    h.fails(&["reject", "nope"], "no inbox record nope");
+    h.fails(
+        &["reject", &rejected],
+        &format!("no inbox record {rejected}"),
+    );
+}
+
+// ---------------------------------------------------------------- AC6
+
+#[test]
+fn draft_on_consent_points_to_allow() {
+    let h = Home::new();
+    let c = h.put(&h.maciek, "consent?", "consent");
+    let err = h.fails(&["draft", &c], "owl allow");
+    assert!(
+        err.contains(&fp(&h.maciek)),
+        "names the peer to allow: {err}"
+    );
+    let rec = h.inbox(&c).unwrap();
+    assert_eq!(rec.state, "consent");
+    assert!(rec.draft.is_none());
+    assert!(
+        h.path()
+            .join("tmp")
+            .read_dir()
+            .map(|mut d| d.next().is_none())
+            .unwrap_or(true),
+        "runner never ran"
+    );
+
+    // Other states: denied is refused, an answer record is refused, unknown id is refused.
+    let denied = h.put(&h.ana, "denied?", "denied");
+    h.fails(&["draft", &denied], "state denied");
+    assert!(h.inbox(&denied).unwrap().draft.is_none());
+    let q = question(&h.me, &h.ana, "asked earlier?");
+    let ans = h.put_env(
+        &Envelope::sign(&Payload::answer(&q, "Because.", "claude", 0, false), &h.ana),
+        "pending",
+    );
+    h.fails(&["draft", &ans], "is an answer");
+    h.fails(&["draft", "nope"], "no inbox record nope");
+    // Unknown harness and unknown project surface the runner's error, nothing stored.
+    let p = h.put(&h.ana, "bad harness?", "pending");
+    h.fails(&["draft", &p, "--harness", "nope"], "unknown harness nope");
+    assert_eq!(h.inbox(&p).unwrap().state, "pending");
+
+    // pending → drafted, and a re-draft on drafted is allowed (new drafted_at).
+    let p = h.put(&h.maciek, "pending?", "pending");
+    h.ok(&["draft", &p]);
+    let first = h.inbox(&p).unwrap();
+    assert_eq!(first.state, "drafted");
+    let mut edited = first.clone();
+    edited.draft.as_mut().unwrap()["text"] = json!("hand written");
+    h.spool().put(Dir::Inbox, &p, &edited).unwrap();
+    h.ok(&["draft", &p]);
+    let second = h.inbox(&p).unwrap();
+    assert_eq!(second.state, "drafted");
+    assert!(
+        second.draft.unwrap()["text"]
+            .as_str()
+            .unwrap()
+            .contains("[redacted]"),
+        "re-drafted"
+    );
+}
+
+#[test]
+fn draft_timeout_is_stored_but_exits_1() {
+    let h = Home::with(|cfg| {
+        cfg.responder.timeout_secs = 1;
+        cfg.harnesses
+            .get_mut("fake")
+            .unwrap()
+            .env
+            .insert("FAKE_SLEEP".into(), "3".into());
+    });
+    let p = h.put(&h.maciek, "slow?", "pending");
+    let (code, _, err) = h.run(&["draft", &p]);
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("status timeout"), "{err}");
+    let rec = h.inbox(&p).unwrap();
+    assert_eq!(rec.state, "drafted");
+    assert_eq!(rec.draft.unwrap()["status"], "timeout");
+    // The unreviewed timeout draft can still be sent deliberately: it is the human's call.
+    h.ok(&["send", &p]);
+    assert_eq!(h.done(&p).unwrap().state, "answered");
+}
+
+// ---------------------------------------------------------------- AC7
+
+#[test]
+fn send_without_draft_points_to_draft() {
+    let h = Home::new();
+    let p = h.put(&h.maciek, "no draft?", "pending");
+    h.fails(&["send", &p], &format!("owl draft {p}"));
+    assert_eq!(h.inbox(&p).unwrap().state, "pending", "record untouched");
+    assert!(h.done(&p).is_none());
+    assert!(h.outbox().is_empty());
+    assert!(h.spool().list(Dir::Cache, |_| true).unwrap().is_empty());
+
+    // consent without a draft, and pending WITH a stale draft, are both refused.
+    let c = h.put(&h.maciek, "consent?", "consent");
+    h.fails(&["send", &c], "owl draft");
+    let mut stale = h.inbox(&p).unwrap();
+    stale.draft = Some(json!({
+        "text": "t", "harness": "fake", "redactions": 0, "status": "ok",
+        "drafted_at": "2026-09-01T10:00:00Z"
+    }));
+    h.spool().put(Dir::Inbox, &p, &stale).unwrap();
+    h.fails(&["send", &p], "state pending, not drafted");
+    assert!(h.outbox().is_empty());
+
+    // A malformed draft object is a clean error, not a panic.
+    let m = h.put(&h.ana, "malformed?", "pending");
+    let mut rec = h.inbox(&m).unwrap();
+    rec.state = "drafted".into();
+    rec.draft = Some(json!({ "text": 42 }));
+    h.spool().put(Dir::Inbox, &m, &rec).unwrap();
+    h.fails(&["send", &m], "draft is malformed");
+    h.fails(&["edit", &m], "draft is malformed");
+    h.fails(&["show", &m], "draft is malformed");
+    assert!(h.outbox().is_empty());
+
+    // An answer record cannot be sent; a question addressed to someone else cannot either.
+    let q = question(&h.me, &h.ana, "asked earlier?");
+    let ans = h.put_env(
+        &Envelope::sign(&Payload::answer(&q, "Because.", "claude", 0, false), &h.ana),
+        "pending",
+    );
+    h.fails(&["send", &ans], "is an answer");
+    let foreign = signed(&h.maciek, &h.ana, "for ana?");
+    let f = h.put_env(&foreign, "drafted");
+    let mut rec = h.inbox(&f).unwrap();
+    rec.draft = stale.draft.clone();
+    h.spool().put(Dir::Inbox, &f, &rec).unwrap();
+    h.fails(&["send", &f], "not to this identity");
+    assert!(h.outbox().is_empty());
+    h.fails(&["send", "nope"], "no inbox record nope");
+}
