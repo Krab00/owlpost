@@ -5,9 +5,9 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
-use owlpost::{config, contacts, daemon, identity};
-
 mod cli;
+
+use owlpost::{config, contacts, daemon, identity};
 
 #[derive(Parser)]
 #[command(
@@ -69,10 +69,7 @@ enum Cmd {
     /// Set policy never
     Deny { peer: String },
     /// Send a question to a peer
-    Ask {
-        #[arg(trailing_var_arg = true)]
-        args: Vec<String>,
-    },
+    Ask(cli::ask::AskArgs),
     /// List or count inbox records
     Inbox {
         #[arg(long)]
@@ -267,6 +264,7 @@ fn main() -> ExitCode {
         Cmd::Whoami => whoami(&home, cli.json),
         Cmd::Contact { cmd } => contact(&home, cmd, cli.json),
         Cmd::Daemon { foreground } => daemon_cmd(&home, foreground),
+        Cmd::Ask(args) => cli::ask::run(&home, args, cli.json, cli.quiet),
         Cmd::Watch { id, timeout } => cli::watch::run(&home, id.as_deref(), timeout),
         Cmd::Install { dry_run } => cli::install::install(&home, dry_run),
         Cmd::Uninstall => cli::install::uninstall(),
@@ -277,8 +275,7 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("owl: {e:#}");
-            let code = e.downcast_ref::<cli::ExitError>().map_or(1, |x| x.code);
-            ExitCode::from(code)
+            ExitCode::from(cli::exit_code(&e))
         }
     }
 }
