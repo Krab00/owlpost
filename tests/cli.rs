@@ -315,7 +315,7 @@ fn unimplemented_subcommand_exits_1() {
     let out = owl()
         .args(["--home"])
         .arg(home.path())
-        .args(["deny", "someone"])
+        .args(["card", "someone"])
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(1));

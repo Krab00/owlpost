@@ -1,5 +1,5 @@
-//! Daemon run loop: the mTLS listener (this task), plus hooks where the auto-accept scheduler
-//! and the pull loop plug in later.
+//! Daemon run loop: the mTLS listener, the pull loop (`crate::pull`) and the auto-accept scan
+//! (`crate::auto`) as sibling tasks; the event consumer notifies and triggers auto-accept.
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -26,6 +26,10 @@ pub struct Running {
     pub state: Arc<AppState>,
     handle: Handle<SocketAddr>,
     task: JoinHandle<std::io::Result<()>>,
+    /// The pull loop; aborted on `shutdown` / `wait`.
+    pull: JoinHandle<()>,
+    /// The auto-accept scan; aborted with the pull loop.
+    auto: JoinHandle<()>,
 }
 
 impl std::fmt::Debug for Running {
@@ -35,15 +39,26 @@ impl std::fmt::Debug for Running {
 }
 
 impl Running {
-    /// Stops accepting and drops open connections.
+    /// Stops accepting, drops open connections and stops the pull loop.
     pub fn shutdown(&self) {
         self.handle.shutdown();
+        self.pull.abort();
+        self.auto.abort();
     }
 
-    /// Waits for the listener task to end (after `shutdown`, or on a listener error).
+    /// Waits for the listener task to end (after `shutdown`, or on a listener error); the pull
+    /// loop is stopped with it.
     pub async fn wait(self) -> anyhow::Result<()> {
-        self.task.await.context("listener task")??;
+        let result = self.task.await.context("listener task");
+        self.pull.abort();
+        self.auto.abort();
+        result??;
         Ok(())
+    }
+
+    /// True while the pull loop task is alive.
+    pub fn pull_running(&self) -> bool {
+        !self.pull.is_finished()
     }
 }
 
@@ -67,8 +82,8 @@ pub async fn spawn(home: &Path, config: Config) -> anyhow::Result<Running> {
         .with_context(|| format!("config.listen {:?} is not host:port", config.listen))?;
     let tls_config = tls::server_config(&identity, allowed_keys(&book), true)?;
 
-    // ponytail: auto-accept scheduler (OWL-008) joins this consumer; today it notifies only.
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<DaemonEvent>();
+    let scheduler = crate::auto::Scheduler::new();
     let state = Arc::new(AppState::new(
         home.to_path_buf(),
         cwd,
@@ -77,8 +92,14 @@ pub async fn spawn(home: &Path, config: Config) -> anyhow::Result<Running> {
         Some(tx),
     )?);
     let events_state = state.clone();
+    let events_scheduler = scheduler.clone();
     tokio::spawn(async move {
         while let Some(ev) = rx.recv().await {
+            if let DaemonEvent::Question(q) = &ev
+                && q.auto
+            {
+                events_scheduler.spawn(events_state.clone(), q.id.clone());
+            }
             handle_event(&events_state, ev);
         }
     });
@@ -99,11 +120,15 @@ pub async fn spawn(home: &Path, config: Config) -> anyhow::Result<Running> {
     };
     let _ = state.bound.set(addr);
     tracing::info!(%addr, fingerprint = %state.fingerprint(), "listening");
+    let pull = tokio::spawn(crate::pull::run_loop(state.clone()));
+    let auto = tokio::spawn(scheduler.run_scan(state.clone()));
     Ok(Running {
         addr,
         state,
         handle,
         task,
+        pull,
+        auto,
     })
 }
 
@@ -161,12 +186,12 @@ fn question_path(state: &AppState, id: &str) -> String {
     }
 }
 
-/// Atomically writes `<home>/daemon.addr` (`host:port\n`): temp file + rename, like the spool.
-pub fn write_addr_file(home: &Path, addr: SocketAddr) -> anyhow::Result<()> {
-    let path = home.join(ADDR_FILE);
-    let tmp = home.join(format!("{ADDR_FILE}.tmp"));
-    std::fs::write(&tmp, format!("{addr}\n"))
-        .with_context(|| format!("writing {}", tmp.display()))?;
+/// Atomically writes `<home>/<name>`: `<name>.tmp` + rename, like the spool; a failed rename
+/// removes the temp file.
+pub fn write_atomic(home: &Path, name: &str, bytes: &[u8]) -> anyhow::Result<()> {
+    let path = home.join(name);
+    let tmp = home.join(format!("{name}.tmp"));
+    std::fs::write(&tmp, bytes).with_context(|| format!("writing {}", tmp.display()))?;
     if let Err(e) = std::fs::rename(&tmp, &path) {
         let _ = std::fs::remove_file(&tmp);
         return Err(e).with_context(|| format!("renaming to {}", path.display()));
@@ -174,12 +199,16 @@ pub fn write_addr_file(home: &Path, addr: SocketAddr) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Atomically writes `<home>/daemon.addr` (`host:port\n`).
+pub fn write_addr_file(home: &Path, addr: SocketAddr) -> anyhow::Result<()> {
+    write_atomic(home, ADDR_FILE, format!("{addr}\n").as_bytes())
+}
+
 /// `owl daemon --foreground`: serve until the listener stops (or the process is killed).
 pub async fn run_foreground(home: &Path, config: Config) -> anyhow::Result<()> {
     let running = spawn(home, config).await?;
     write_addr_file(home, running.addr)?;
     tracing::info!(path = %home.join(ADDR_FILE).display(), "wrote daemon.addr");
-    // ponytail: pull loop (OWL-011) and spool scan join here as sibling tasks.
     running.wait().await
 }
 
