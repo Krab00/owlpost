@@ -1,5 +1,6 @@
 //! `owl ask` (§9, architecture §3.1): peer resolution or `git blame` candidates, project
-//! detection, asker-side cache, send, `asks/` record, `--wait` polling of the peer's outbox.
+//! detection, asker-side cache, send, `asks/` record, `--wait` polling of the peer's outbox
+//! through the daemon's ingestion path (`owlpost::pull`).
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, IsTerminal, Write};
@@ -13,6 +14,7 @@ use owlpost::client::{self, SendOutcome};
 use owlpost::contacts::{Contact, ContactBook};
 use owlpost::envelope::{self, Body, Envelope, Payload};
 use owlpost::identity;
+use owlpost::pull::{self, OpenAsk, Verdict};
 use owlpost::spool::{Dir, Record, Spool};
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -134,7 +136,14 @@ pub fn run(home: &Path, args: AskArgs, json: bool, quiet: bool) -> anyhow::Resul
     match client::send_question(&identity, &contact, &envelope)? {
         SendOutcome::Answer(hit) => {
             let (answer, answer_env) = (hit.payload, hit.envelope);
-            store_answer(&spool, &answer_env, &answer, &contact, &hash, &payload.id)?;
+            pull::store_answer(
+                &spool,
+                &answer_env,
+                &answer,
+                &contact.fingerprint,
+                &hash,
+                &payload.id,
+            )?;
             let mut done_meta = meta.clone();
             done_meta["answer"] = json!(answer.id);
             spool.put(
@@ -159,7 +168,13 @@ pub fn run(home: &Path, args: AskArgs, json: bool, quiet: bool) -> anyhow::Resul
                     if !quiet {
                         eprintln!("accepted {id}; waiting up to {secs}s for an answer");
                     }
-                    wait_for_answer(&identity, &contact, &spool, &id, &hash, secs, json, quiet)
+                    let ask = OpenAsk {
+                        id,
+                        peer: contact.fingerprint.clone(),
+                        hash,
+                        path: parsed.path.clone(),
+                    };
+                    wait_for_answer(&identity, &contact, &spool, &ask, secs, json, quiet)
                 }
             }
         }
@@ -222,24 +237,6 @@ fn record(env: &Envelope, state: &str, meta: Value) -> Record {
     }
 }
 
-/// Verified answer → `inbox/<answer id>` (type answer, state pending) and the asker cache.
-fn store_answer(
-    spool: &Spool,
-    env: &Envelope,
-    answer: &Payload,
-    contact: &Contact,
-    hash: &str,
-    question_id: &str,
-) -> anyhow::Result<()> {
-    let rec = record(
-        env,
-        "pending",
-        json!({ "peer": contact.fingerprint, "hash": hash, "in_reply_to": question_id }),
-    );
-    spool.put(Dir::Inbox, &answer.id, &rec)?;
-    spool.cache_put(hash, &rec)
-}
-
 fn print_answer(answer: &Payload, json: bool) -> anyhow::Result<()> {
     if json {
         println!("{}", serde_json::to_string_pretty(answer)?);
@@ -252,37 +249,37 @@ fn print_answer(answer: &Payload, json: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Poll `GET /v1/outbox` every `POLL_INTERVAL` until an answer to `question_id` shows up or
-/// `secs` have passed (exit 4; the `asks/` record stays `waiting` for the daemon's pull loop).
-#[allow(clippy::too_many_arguments)]
+/// Poll `GET /v1/outbox` every `POLL_INTERVAL` until an answer to `ask` shows up or `secs`
+/// have passed (exit 4; the `asks/` record stays `waiting` for the daemon's pull loop). Each
+/// envelope goes through the daemon's `pull::ingest_envelope`, so a forged or unrelated entry
+/// is skipped and left unacked exactly as the pull loop would.
 fn wait_for_answer(
     identity: &identity::Identity,
     contact: &Contact,
     spool: &Spool,
-    question_id: &str,
-    hash: &str,
+    ask: &OpenAsk,
     secs: u64,
     json: bool,
     quiet: bool,
 ) -> anyhow::Result<()> {
     let deadline = Instant::now() + Duration::from_secs(secs);
+    let open = BTreeMap::from([(ask.id.clone(), ask.clone())]);
     let mut warned = false;
     loop {
         match client::fetch_outbox(identity, contact) {
             Ok(items) => {
                 for env in &items {
-                    let Ok(answer) = client::verify_answer(contact, env, Some(question_id)) else {
-                        continue;
-                    };
-                    store_answer(spool, env, &answer, contact, hash, question_id)?;
-                    spool.move_to(Dir::Asks, question_id, Dir::Done)?;
-                    spool.set_state(Dir::Done, question_id, "answered")?;
-                    if let Err(e) = client::ack(identity, contact, &answer.id)
-                        && !quiet
-                    {
-                        eprintln!("owl: warning: ack of {} failed: {e:#}", answer.id);
+                    match pull::ingest_envelope(identity, contact, spool, &open, env)? {
+                        Verdict::Ingested(ing) => {
+                            if let Some(e) = &ing.ack_error
+                                && !quiet
+                            {
+                                eprintln!("owl: warning: ack of {} failed: {e:#}", ing.answer.id);
+                            }
+                            return print_answer(&ing.answer, json);
+                        }
+                        Verdict::Forged | Verdict::Unrelated => {}
                     }
-                    return print_answer(&answer, json);
                 }
             }
             Err(e) => {
@@ -297,7 +294,8 @@ fn wait_for_answer(
             return Err(ExitError::error(
                 4,
                 format!(
-                    "timeout: no answer within {secs}s; ask {question_id} stays waiting for the daemon"
+                    "timeout: no answer within {secs}s; ask {} stays waiting for the daemon",
+                    ask.id
                 ),
             ));
         }
