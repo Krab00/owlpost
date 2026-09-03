@@ -1,12 +1,12 @@
 //! `owl doctor` (§9): one line per check — `ok|warn|fail  <name>: <detail>` — for the key,
 //! the config, every endpoint's host, the configured harness binaries, the daemon at
-//! `daemon.addr` (card fetch, pinned to our own key) and the age of the last pull. Exit 1 when
-//! any check fails; `--json` prints `[{check, status, detail}]`.
+//! `daemon.addr` (card fetch, pinned to our own key) and the age of the last pull recorded in
+//! `daemon.status`. Exit 1 when any check fails; `--json` prints `[{check, status, detail}]`.
 
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::path::Path;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use anyhow::Context;
 use serde::Serialize;
@@ -15,14 +15,12 @@ use serde_json::Value;
 use crate::cli::ExitError;
 use owlpost::config::Config;
 use owlpost::daemon::ADDR_FILE;
+use owlpost::envelope;
 use owlpost::identity::{self, Identity};
+use owlpost::pull::{self, STATUS_FILE};
 use owlpost::runner;
 use owlpost::tls;
 
-/// Written by the pull loop (OWL-008) after every successful pull; its mtime is the age source.
-// ponytail: mtime, not content — works whatever OWL-008 writes into the file; parse a timestamp
-// from it once the pull loop records one.
-pub const LAST_PULL_FILE: &str = "last-pull";
 /// How long the card fetch may take before the daemon counts as unreachable.
 pub const DAEMON_TIMEOUT: Duration = Duration::from_secs(3);
 
@@ -277,23 +275,43 @@ fn human_age(age: Duration) -> String {
     }
 }
 
-/// `pull`: age of `last-pull` (mtime). Absent → `warn`; older than twice the pull interval →
-/// `warn` (the pull loop is not keeping up); else `ok`.
-pub fn pull_check(home: &Path, config: &Config, now: SystemTime) -> Check {
-    let path = home.join(LAST_PULL_FILE);
-    let modified = match std::fs::metadata(&path).and_then(|m| m.modified()) {
-        Ok(m) => m,
-        Err(_) => return Check::warn("pull", "never pulled (no last-pull file)"),
+/// `pull`: age of `last_pull_at` in `daemon.status`. Absent → `warn` (no loop has run);
+/// unreadable, or a timestamp that does not parse → `fail`; older than twice the pull
+/// interval → `warn` (the pull loop is not keeping up); else `ok`. The detail carries the
+/// loop's own counters (`open_asks`, `peers_probed`).
+pub fn pull_check(home: &Path, config: &Config, now_unix: u64) -> Check {
+    let status = match pull::read_status(home) {
+        Ok(Some(s)) => s,
+        Ok(None) => {
+            return Check::warn("pull", format!("never pulled (no {STATUS_FILE})"));
+        }
+        Err(e) => return Check::fail("pull", format!("{e:#}")),
     };
-    let age = now.duration_since(modified).unwrap_or(Duration::ZERO);
+    let Some(at) = envelope::parse_rfc3339_to_unix(&status.last_pull_at) else {
+        return Check::fail(
+            "pull",
+            format!(
+                "{STATUS_FILE} last_pull_at {:?} is not an RFC 3339 UTC time",
+                status.last_pull_at
+            ),
+        );
+    };
+    let age = Duration::from_secs(now_unix.saturating_sub(at));
+    let counters = format!(
+        "{} open ask(s), {} peer(s) probed",
+        status.open_asks, status.peers_probed
+    );
     let detail = format!("last pull {} ago", human_age(age));
     if age.as_secs() > config.pull_interval_secs.saturating_mul(2) {
         Check::warn(
             "pull",
-            format!("{detail} (interval {}s)", config.pull_interval_secs),
+            format!(
+                "{detail} (interval {}s), {counters}",
+                config.pull_interval_secs
+            ),
         )
     } else {
-        Check::ok("pull", detail)
+        Check::ok("pull", format!("{detail}, {counters}"))
     }
 }
 
@@ -310,7 +328,7 @@ pub fn run_checks(home: &Path) -> Vec<Check> {
         &user_home,
     ));
     out.push(daemon_check(home, id.as_ref()));
-    out.push(pull_check(home, &config, SystemTime::now()));
+    out.push(pull_check(home, &config, envelope::now_unix()));
     out
 }
 
@@ -554,53 +572,93 @@ mod tests {
         assert!(c.detail.starts_with(&addr.to_string()), "{c:?}");
     }
 
+    fn status_at(home: &Path, last_pull_at: &str) {
+        pull::write_status(
+            home,
+            &pull::PullStatus {
+                last_pull_at: last_pull_at.into(),
+                open_asks: 2,
+                peers_probed: 1,
+            },
+        )
+        .unwrap();
+    }
+
     #[test]
     fn pull_check_ages() {
         let home = tempfile::tempdir().unwrap();
         let cfg = Config::default();
-        let now = SystemTime::now();
+        let now = envelope::parse_rfc3339_to_unix("2026-09-02T10:00:00Z").unwrap();
         let c = pull_check(home.path(), &cfg, now);
         assert_eq!(
             (c.status, c.detail.as_str()),
-            (Status::Warn, "never pulled (no last-pull file)")
+            (Status::Warn, "never pulled (no daemon.status)")
         );
-        std::fs::write(home.path().join(LAST_PULL_FILE), "").unwrap();
-        // Age is measured from the file's mtime, so anchor "now" there.
-        let now = std::fs::metadata(home.path().join(LAST_PULL_FILE))
-            .unwrap()
-            .modified()
-            .unwrap();
-        let c = pull_check(home.path(), &cfg, now + Duration::from_secs(5));
-        assert_eq!(c.status, Status::Ok);
-        assert!(c.detail.starts_with("last pull 5s ago"), "{c:?}");
-        // Older than 2 × pull_interval_secs (60 s default): warn.
-        let c = pull_check(home.path(), &cfg, now + Duration::from_secs(121));
-        assert_eq!(c.status, Status::Warn);
-        assert!(
-            c.detail.contains("last pull 2m ago (interval 60s)"),
-            "{c:?}"
-        );
-        let c = pull_check(home.path(), &cfg, now + Duration::from_secs(120));
-        assert_eq!(c.status, Status::Ok, "{c:?}");
-        // A file from the future is age 0, never negative.
-        let c = pull_check(home.path(), &cfg, now - Duration::from_secs(3600));
+        status_at(home.path(), "2026-09-02T09:59:55Z");
+        let c = pull_check(home.path(), &cfg, now);
         assert_eq!(
             (c.status, c.detail.as_str()),
-            (Status::Ok, "last pull 0s ago")
+            (
+                Status::Ok,
+                "last pull 5s ago, 2 open ask(s), 1 peer(s) probed"
+            )
+        );
+        // Older than 2 × pull_interval_secs (60 s default): warn.
+        status_at(home.path(), "2026-09-02T09:57:59Z");
+        let c = pull_check(home.path(), &cfg, now);
+        assert_eq!(c.status, Status::Warn);
+        assert_eq!(
+            c.detail,
+            "last pull 2m ago (interval 60s), 2 open ask(s), 1 peer(s) probed"
+        );
+        status_at(home.path(), "2026-09-02T09:58:00Z");
+        let c = pull_check(home.path(), &cfg, now);
+        assert_eq!(c.status, Status::Ok, "exactly 2 × interval: {c:?}");
+        // A pull from the future is age 0, never negative.
+        status_at(home.path(), "2026-09-02T11:00:00Z");
+        let c = pull_check(home.path(), &cfg, now);
+        assert_eq!(
+            (c.status, c.detail.as_str()),
+            (
+                Status::Ok,
+                "last pull 0s ago, 2 open ask(s), 1 peer(s) probed"
+            )
         );
         assert_eq!(human_age(Duration::from_secs(7200)), "2h");
         assert_eq!(human_age(Duration::from_secs(3 * 86_400)), "3d");
     }
 
     #[test]
+    fn pull_check_fails_on_a_broken_status_file() {
+        let home = tempfile::tempdir().unwrap();
+        let cfg = Config::default();
+        let now = envelope::now_unix();
+        std::fs::write(home.path().join(STATUS_FILE), "{").unwrap();
+        let c = pull_check(home.path(), &cfg, now);
+        assert_eq!(c.status, Status::Fail);
+        assert!(c.detail.contains("parsing"), "{c:?}");
+        // Well-formed JSON, unparseable timestamp.
+        status_at(home.path(), "yesterday");
+        let c = pull_check(home.path(), &cfg, now);
+        assert_eq!(c.status, Status::Fail);
+        assert!(
+            c.detail
+                .contains("last_pull_at \"yesterday\" is not an RFC 3339"),
+            "{c:?}"
+        );
+        // Unreadable (a directory in place of the file).
+        std::fs::remove_file(home.path().join(STATUS_FILE)).unwrap();
+        std::fs::create_dir(home.path().join(STATUS_FILE)).unwrap();
+        let c = pull_check(home.path(), &cfg, now);
+        assert_eq!(c.status, Status::Fail);
+        assert!(c.detail.contains("reading"), "{c:?}");
+    }
+
+    #[test]
     fn pull_warn_threshold_follows_pull_interval() {
         let home = tempfile::tempdir().unwrap();
-        let path = home.path().join(LAST_PULL_FILE);
-        let now = SystemTime::now();
-        let set_age = |secs: u64| {
-            let f = std::fs::File::create(&path).unwrap();
-            f.set_modified(now - Duration::from_secs(secs)).unwrap();
-        };
+        let now = envelope::parse_rfc3339_to_unix("2026-09-02T10:00:00Z").unwrap();
+        let set_age = |secs: u64| status_at(home.path(), &envelope::unix_to_rfc3339(now - secs));
         let short = Config {
             pull_interval_secs: 5,
             ..Default::default()
@@ -612,26 +670,16 @@ mod tests {
         let c = pull_check(home.path(), &short, now);
         assert_eq!(c.status, Status::Warn, "{c:?}");
         assert!(
-            c.detail.contains("last pull 11s ago (interval 5s)"),
+            c.detail.starts_with("last pull 11s ago (interval 5s)"),
             "{c:?}"
         );
         let c = pull_check(home.path(), &long, now);
-        assert_eq!(
-            (c.status, c.detail.as_str()),
-            (Status::Ok, "last pull 11s ago")
-        );
+        assert_eq!(c.status, Status::Ok, "{c:?}");
+        assert!(c.detail.starts_with("last pull 11s ago,"), "{c:?}");
         // 9 s old: within both.
         set_age(9);
-        let c = pull_check(home.path(), &short, now);
-        assert_eq!(
-            (c.status, c.detail.as_str()),
-            (Status::Ok, "last pull 9s ago")
-        );
-        let c = pull_check(home.path(), &long, now);
-        assert_eq!(
-            (c.status, c.detail.as_str()),
-            (Status::Ok, "last pull 9s ago")
-        );
+        assert_eq!(pull_check(home.path(), &short, now).status, Status::Ok);
+        assert_eq!(pull_check(home.path(), &long, now).status, Status::Ok);
         // Exactly 2 × interval is still ok; one second more warns.
         set_age(10);
         assert_eq!(pull_check(home.path(), &short, now).status, Status::Ok);

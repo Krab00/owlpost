@@ -539,35 +539,9 @@ async fn get_outbox(
     Ok(Json(Value::Array(items)))
 }
 
-/// Like `Spool::list`, but a corrupt record is skipped with a warning instead of failing
-/// the whole listing (one bad file must not take the outbox offline for every peer).
+/// `Spool::list_lenient` with the storage error mapped for the handler.
 fn list_lenient(spool: &Spool, dir: Dir) -> ApiResult<Vec<(String, Record)>> {
-    let dir_path = spool
-        .path(dir, "x")
-        .parent()
-        .map(std::path::Path::to_path_buf)
-        .ok_or_else(|| ApiError::storage(anyhow::anyhow!("spool dir has no parent")))?;
-    let entries = std::fs::read_dir(&dir_path)
-        .map_err(|e| ApiError::storage(anyhow::Error::from(e).context("listing spool dir")))?;
-    let mut out = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("json") {
-            continue;
-        }
-        let Some(id) = path.file_stem().and_then(|s| s.to_str()) else {
-            continue;
-        };
-        match spool.get(dir, id) {
-            Ok(Some(rec)) => out.push((id.to_string(), rec)),
-            Ok(None) => {}
-            Err(e) => {
-                tracing::warn!(path = %path.display(), error = %format!("{e:#}"), "skipping corrupt record")
-            }
-        }
-    }
-    out.sort_by(|a, b| a.0.cmp(&b.0));
-    Ok(out)
+    spool.list_lenient(dir).map_err(ApiError::storage)
 }
 
 /// `POST /v1/outbox/{id}/ack` — `204` and the record moves to `done/` (state `acked`);

@@ -1,5 +1,6 @@
 //! AC5: `owl doctor` prints one line per check and exits 0 with a running daemon, exits 1 with
-//! `fail` on the daemon line once the daemon is stopped.
+//! `fail` on the daemon line once the daemon is stopped. The pull line reads the pull loop's
+//! `daemon.status` (OWL-008).
 
 mod common;
 
@@ -7,8 +8,22 @@ use std::path::Path;
 use std::process::{Command, Output};
 
 use owlpost::daemon;
+use owlpost::envelope::{now_unix, unix_to_rfc3339};
+use owlpost::pull::{self, PullStatus, STATUS_FILE};
 
 use common::{spawn_daemon_with, write_contact};
+
+/// The pull loop's first tick runs right after spawn; bounded wait (≤ 5 s) for its status file.
+fn wait_for_status(home: &Path) {
+    let start = std::time::Instant::now();
+    while !home.join(STATUS_FILE).exists() {
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "pull loop never wrote {STATUS_FILE}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
 
 fn owl(home: &Path) -> Command {
     let mut c = Command::new(env!("CARGO_BIN_EXE_owl"));
@@ -53,6 +68,7 @@ fn config_for_doctor(cfg: &mut owlpost::config::Config) {
 async fn doctor_reports_each_check() {
     let d = spawn_daemon_with(1, &[], config_for_doctor).await;
     daemon::write_addr_file(d.home(), d.addr).unwrap();
+    wait_for_status(d.home());
 
     let out = owl(d.home()).arg("doctor").output().unwrap();
     let (stdout, stderr) = text(&out);
@@ -69,7 +85,7 @@ async fn doctor_reports_each_check() {
             ("ok", "endpoints"),
             ("ok", "harness"),
             ("ok", "daemon"),
-            ("warn", "pull"),
+            ("ok", "pull"),
         ]
         .map(|(s, n)| (s.to_string(), n.to_string())),
         "{stdout}"
@@ -90,28 +106,43 @@ async fn doctor_reports_each_check() {
         "{stdout}"
     );
     assert!(line(&stdout, "daemon").contains(&d.fp()), "{stdout}");
-    assert!(line(&stdout, "pull").contains("never pulled"), "{stdout}");
-    assert!(stderr.is_empty(), "{stderr}");
-
-    // A recorded pull turns the last line ok.
-    std::fs::write(d.home().join("last-pull"), "").unwrap();
-    let out = owl(d.home()).arg("doctor").output().unwrap();
-    let (stdout, _) = text(&out);
-    assert_eq!(out.status.code(), Some(0));
+    // The daemon's pull loop ran on start-up and wrote `daemon.status`, so the pull line is
+    // already `ok`; the first assertion above waited for that file.
     assert!(
         line(&stdout, "pull").starts_with("ok   pull: last pull "),
         "{stdout}"
     );
+    assert!(
+        line(&stdout, "pull").ends_with("0 open ask(s), 0 peer(s) probed"),
+        "{stdout}"
+    );
+    assert!(stderr.is_empty(), "{stderr}");
+
+    // Without the status file the last line is a warning, not a failure (exit 0).
+    std::fs::remove_file(d.home().join(STATUS_FILE)).unwrap();
+    let out = owl(d.home()).arg("doctor").output().unwrap();
+    let (stdout, _) = text(&out);
+    assert_eq!(out.status.code(), Some(0));
+    assert!(
+        line(&stdout, "pull").starts_with("warn pull: never pulled (no daemon.status)"),
+        "{stdout}"
+    );
     // The stale threshold is 2 × pull_interval_secs: an 11 s old pull is fine at the default
     // 60 s interval, stale at 5 s.
-    let eleven_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(11);
-    std::fs::File::create(d.home().join("last-pull"))
-        .unwrap()
-        .set_modified(eleven_ago)
-        .unwrap();
+    let eleven_ago = unix_to_rfc3339(now_unix() - 11);
+    pull::write_status(
+        d.home(),
+        &PullStatus {
+            last_pull_at: eleven_ago,
+            open_asks: 3,
+            peers_probed: 2,
+        },
+    )
+    .unwrap();
     let out = owl(d.home()).arg("doctor").output().unwrap();
     assert!(
-        line(&text(&out).0, "pull").starts_with("ok   pull: last pull 11s ago"),
+        line(&text(&out).0, "pull")
+            .starts_with("ok   pull: last pull 11s ago, 3 open ask(s), 2 peer(s) probed"),
         "{}",
         text(&out).0
     );
