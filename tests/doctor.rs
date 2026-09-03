@@ -57,6 +57,17 @@ fn line<'a>(stdout: &'a str, name: &str) -> &'a str {
         .unwrap_or_else(|| panic!("no {name} line in:\n{stdout}"))
 }
 
+/// Splits `ok   pull: last pull <N>s ago, <rest>` into (`N`, `rest`).
+fn pull_age(pull_line: &str) -> (u64, &str) {
+    let tail = pull_line
+        .strip_prefix("ok   pull: last pull ")
+        .unwrap_or_else(|| panic!("pull line {pull_line:?}"));
+    let (age, rest) = tail
+        .split_once("s ago, ")
+        .unwrap_or_else(|| panic!("pull line {pull_line:?}"));
+    (age.parse().unwrap(), rest)
+}
+
 /// Only the `fake` harness is configured, so the check passes offline on any machine.
 fn config_for_doctor(cfg: &mut owlpost::config::Config) {
     cfg.harnesses.retain(|k, _| k == "fake");
@@ -140,12 +151,11 @@ async fn doctor_reports_each_check() {
     )
     .unwrap();
     let out = owl(d.home()).arg("doctor").output().unwrap();
-    assert!(
-        line(&text(&out).0, "pull")
-            .starts_with("ok   pull: last pull 11s ago, 3 open ask(s), 2 peer(s) probed"),
-        "{}",
-        text(&out).0
-    );
+    // The age is measured at print time, so a slow runner may read 12s or more: pin the
+    // prefix, the counters and a tolerant age window instead of the exact second.
+    let (age, rest) = pull_age(line(&text(&out).0, "pull"));
+    assert!((11..=30).contains(&age), "age {age}s:\n{}", text(&out).0);
+    assert_eq!(rest, "3 open ask(s), 2 peer(s) probed", "{}", text(&out).0);
     let mut cfg = owlpost::config::Config::load(d.home()).unwrap();
     cfg.pull_interval_secs = 5;
     cfg.save(d.home()).unwrap();
