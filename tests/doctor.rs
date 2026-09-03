@@ -153,9 +153,10 @@ async fn doctor_reports_each_check() {
     let out = owl(d.home()).arg("doctor").output().unwrap();
     // The age is measured at print time, so a slow runner may read 12s or more: pin the
     // prefix, the counters and a tolerant age window instead of the exact second.
-    let (age, rest) = pull_age(line(&text(&out).0, "pull"));
-    assert!((11..=30).contains(&age), "age {age}s:\n{}", text(&out).0);
-    assert_eq!(rest, "3 open ask(s), 2 peer(s) probed", "{}", text(&out).0);
+    let (stdout, _) = text(&out);
+    let (age, rest) = pull_age(line(&stdout, "pull"));
+    assert!((11..=30).contains(&age), "age {age}s:\n{stdout}");
+    assert_eq!(rest, "3 open ask(s), 2 peer(s) probed", "{stdout}");
     let mut cfg = owlpost::config::Config::load(d.home()).unwrap();
     cfg.pull_interval_secs = 5;
     cfg.save(d.home()).unwrap();

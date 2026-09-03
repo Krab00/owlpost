@@ -144,6 +144,7 @@ wait_for 10 "Ana's daemon.addr" test -s "$A/daemon.addr"
 # ---- the manual loop ---------------------------------------------------------------------
 step "Ana asks Bea"
 ASK_OUT=$(run ana "$A" ask Bea "$FILE" "$QUESTION" --project "$PROJECT")
+printf '%s\n' "$ASK_OUT"
 QID=${ASK_OUT##*accepted }
 QID=${QID%%[[:space:]]*}
 [ -n "$QID" ] || { echo "e2e-real: no 'accepted <id>' in: $ASK_OUT" >&2; exit 1; }
@@ -160,6 +161,7 @@ run bea "$B" draft "$QID"
 
 step "Bea sends"
 SEND_OUT=$(run bea "$B" send "$QID")
+printf '%s\n' "$SEND_OUT"
 AID=${SEND_OUT##*sent }
 AID=${AID%%[[:space:]]*}
 [ -n "$AID" ] || { echo "e2e-real: no 'sent <id>' in: $SEND_OUT" >&2; exit 1; }

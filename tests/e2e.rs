@@ -646,7 +646,7 @@ async fn security() {
     assert_eq!(error, "rate limited");
     let retry: u64 = headers["retry-after"].to_str().unwrap().parse().unwrap();
     assert!(
-        retry >= 1 && retry <= 180,
+        (1..=180).contains(&retry),
         "20/h bucket: one token per 180 s, got {retry}"
     );
     assert_eq!(
