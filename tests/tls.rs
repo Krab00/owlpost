@@ -265,3 +265,135 @@ fn tofu_client_accepts_any_server_key() {
     assert_eq!(got, fingerprint(&a.verifying_key()));
     srv.join().unwrap().unwrap();
 }
+
+// ---- OWL-016: a victim's key planted in the serial / CN must not identify the peer ----
+
+/// SubjectPublicKeyInfo header for Ed25519: SEQ(42) { SEQ(5) { OID 1.3.101.112 }, BIT STRING(33) 0x00 }.
+const ED25519_SPKI_PREFIX: [u8; 12] = [
+    0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
+];
+
+/// The pre-OWL-016 scanner (first SPKI header anywhere in the DER), kept to prove the
+/// forged fixtures really carry the victim's key ahead of the attacker's SPKI.
+fn old_scan(der: &[u8]) -> Option<[u8; 32]> {
+    let at = der
+        .windows(ED25519_SPKI_PREFIX.len())
+        .position(|w| w == ED25519_SPKI_PREFIX)?;
+    der.get(at + 12..at + 44)?.try_into().ok()
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Forge {
+    Serial,
+    CommonName,
+}
+
+/// Attacker-signed certificate carrying `<SPKI header><victim pubkey>` in the serial number or
+/// the CommonName (as a BMPString, whose DER content is the raw pattern), plus the attacker's key.
+fn forged(
+    attacker: &Identity,
+    victim: &Identity,
+    how: Forge,
+) -> (
+    rustls::pki_types::CertificateDer<'static>,
+    rustls::pki_types::PrivateKeyDer<'static>,
+) {
+    let (_, key) = cert_from_identity(attacker).unwrap();
+    let rustls::pki_types::PrivateKeyDer::Pkcs8(pkcs8) = &key else {
+        panic!("cert_from_identity returns PKCS#8")
+    };
+    let kp = rcgen::KeyPair::from_pkcs8_der_and_sign_algo(pkcs8, &rcgen::PKCS_ED25519).unwrap();
+    let mut pattern = ED25519_SPKI_PREFIX.to_vec();
+    pattern.extend_from_slice(&key_of(victim));
+    let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+    match how {
+        Forge::Serial => params.serial_number = Some(rcgen::SerialNumber::from(pattern)),
+        Forge::CommonName => {
+            let cn = rcgen::string::BmpString::from_utf16be(pattern).unwrap();
+            params
+                .distinguished_name
+                .push(rcgen::DnType::CommonName, rcgen::DnValue::BmpString(cn));
+        }
+    }
+    let cert = params.self_signed(&kp).unwrap().der().clone();
+    assert_eq!(
+        old_scan(cert.as_ref()),
+        Some(key_of(victim)),
+        "{how:?}: fixture must carry the victim pattern before the real SPKI"
+    );
+    (cert, key)
+}
+
+fn key_of(id: &Identity) -> [u8; 32] {
+    key(id)
+}
+
+/// Victim seed whose key bytes are valid UTF-16BE (no surrogates), so the CN variant encodes.
+fn victim() -> Identity {
+    id(7)
+}
+
+#[test]
+fn forged_spki_certificate_fails_handshake() {
+    let (attacker, victim, daemon) = (id(3), victim(), id(2));
+    for how in [Forge::Serial, Forge::CommonName] {
+        let (cert, key) = forged(&attacker, &victim, how);
+        let cfg = rustls::ClientConfig::builder_with_provider(ring())
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(AcceptAnyServer))
+            .with_client_auth_cert(vec![cert], key)
+            .unwrap();
+        // Daemon lists only the victim; pinned mode.
+        let (port, srv) = spawn_server(server_config(&daemon, book(&[&victim]), false).unwrap());
+        let res = connect(port, Arc::new(cfg));
+        let server_err = srv.join().unwrap().unwrap_err();
+        assert!(
+            res.is_err(),
+            "{how:?}: forged client must get no data: {res:?}"
+        );
+        assert_eq!(server_err, REJECTED, "{how:?}");
+    }
+    // The genuine victim still connects and is identified as itself.
+    let (port, srv) = spawn_server(server_config(&daemon, book(&[&victim]), false).unwrap());
+    let got = connect(
+        port,
+        client_config(Some(&victim), Some(key(&daemon))).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(got, fingerprint(&victim.verifying_key()));
+    srv.join().unwrap().unwrap();
+}
+
+/// Server side of the same forgery: a client pinned to the victim's key must refuse a server
+/// presenting the attacker-signed certificate with the victim pattern planted.
+#[test]
+fn forged_spki_server_certificate_fails_handshake() {
+    let (attacker, victim, client) = (id(3), victim(), id(1));
+    for how in [Forge::Serial, Forge::CommonName] {
+        let (cert, key) = forged(&attacker, &victim, how);
+        let cfg = rustls::ServerConfig::builder_with_provider(ring())
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert], key)
+            .unwrap();
+        let (port, srv) = spawn_server(Arc::new(cfg));
+        let err = connect(
+            port,
+            client_config(Some(&client), Some(key_of(&victim))).unwrap(),
+        )
+        .unwrap_err();
+        assert_eq!(err, REJECTED, "{how:?}");
+        assert!(srv.join().unwrap().is_err(), "{how:?}");
+    }
+    let (port, srv) = spawn_server(server_config(&victim, book(&[&client]), false).unwrap());
+    let got = connect(
+        port,
+        client_config(Some(&client), Some(key_of(&victim))).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(got, fingerprint(&client.verifying_key()));
+    srv.join().unwrap().unwrap();
+}
