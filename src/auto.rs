@@ -102,7 +102,8 @@ pub fn attempt(
     let (_, path, _) = answer::question_body(id, &payload)?;
     let (peer, path) = (payload.from.clone(), path.to_string());
     let original = rec.clone();
-    let mut drafted = match answer::draft(config, home, id, rec, None) {
+    // `answer::draft` drops any stale `auto_error` from an earlier failed attempt.
+    let drafted = match answer::draft(config, home, id, rec, None) {
         Ok((drafted, d)) if d.status == DraftStatus::Ok => drafted,
         Ok((_, d)) => {
             return fail(
@@ -114,7 +115,6 @@ pub fn attempt(
         }
         Err(e) => return fail(spool, id, original, format!("{e:#}")),
     };
-    answer::meta_object(&mut drafted).remove(AUTO_ERROR);
     spool.put(Dir::Inbox, id, &drafted)?;
     match answer::send(home, spool, id, drafted, SendMode::Auto) {
         Ok(answer) => Ok(Outcome::Sent { answer, peer, path }),
