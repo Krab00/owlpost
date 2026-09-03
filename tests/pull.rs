@@ -3,8 +3,10 @@
 //! send` does) and A's loop is expected to verify, ingest, ack and report them.
 //!
 //! AC1 `answer_is_pulled_and_acked`, AC2 `forged_answer_is_dropped`, AC3
-//! `unrelated_answer_is_ignored`, AC4 `offline_responder_is_skipped_then_retried`, AC5
-//! `outbox_ttl_expires`, AC6 `status_file_is_written_each_loop`.
+//! `unrelated_answer_is_ignored` + `answer_for_another_peers_ask_is_ignored`, AC4
+//! `offline_responder_is_skipped_then_retried`, AC5 `outbox_ttl_expires`, AC6
+//! `status_file_is_written_each_loop`; `asks_are_grouped_by_responder` pins one probe per
+//! responder.
 
 mod common;
 
@@ -16,7 +18,7 @@ use std::time::{Duration, Instant};
 use owlpost::contacts::Mode;
 use owlpost::envelope::{self, Envelope, Kind, Payload};
 use owlpost::identity::Identity;
-use owlpost::pull::{PullStatus, STATUS_FILE, read_status};
+use owlpost::pull::{self, PullStatus, STATUS_FILE, read_status};
 use owlpost::spool::{Dir, Record, Spool};
 use tracing_subscriber::fmt::MakeWriter;
 
@@ -321,28 +323,66 @@ async fn unrelated_answer_is_ignored() {
 async fn offline_responder_is_skipped_then_retried() {
     logs();
     let a = spawn_a().await;
-    let b = spawn_b(&a.id).await;
-    let dead = closed_port();
-    point_at(&a, &b.id, &dead);
-    let q = open_ask(&a, &b.id, "are you there?");
-    let ans = outbox_answer(&b, &b.id, &q, ANSWER, None);
+    // B's home is prepared on a fixed, currently closed port; B itself is not started yet.
+    // Seed 22, not 2: the log filters below key on B's fingerprint, which must not collide
+    // with the B of the other tests in this binary.
+    let b_id = id(22);
+    let b_dir = tempfile::tempdir().unwrap();
+    let port = closed_port();
+    common::prepare_home_with(
+        b_dir.path(),
+        &b_id,
+        &[Peer::new(&a.id, "Ana", Some(policy(Mode::Manual, None)))],
+        |cfg| {
+            cfg.responder.enabled = true;
+            cfg.listen = port.clone();
+        },
+    );
+    point_at(&a, &b_id, &port);
+    let q = open_ask(&a, &b_id, "are you there?");
+    let ans = Payload::answer(&q, ANSWER, "fake", 0, false);
+    Spool::new(b_dir.path())
+        .unwrap()
+        .put(
+            Dir::Outbox,
+            &ans.id,
+            &record(&Envelope::sign(&ans, &b_id), "unacked"),
+        )
+        .unwrap();
     let started = Instant::now();
 
-    // For the first 3 s the endpoint is closed: the probe fails and is recorded as such.
-    wait_for_log(Duration::from_secs(3), "outbox fetch failed");
-    wait_until(
-        Duration::from_secs(3),
-        "status with the peer probed",
-        || status(a.home()).is_some_and(|s| s.open_asks == 1 && s.peers_probed == 1),
-    );
+    let failed_probes = || {
+        log_text()
+            .lines()
+            .filter(|l| l.contains("outbox fetch failed") && l.contains(&port))
+            .count()
+    };
+    let b_fp = fp(&b_id);
+    let fetched = || {
+        log_text()
+            .lines()
+            .filter(|l| l.contains("outbox fetched") && l.contains(&b_fp))
+            .count()
+    };
+    // While B is down the same endpoint is probed again and again (≥ 2 failures, so the
+    // liveness cache did not park it), and nothing is ingested.
+    wait_until(Duration::from_secs(5), "two failed probes", || {
+        failed_probes() >= 2
+    });
+    assert_eq!(fetched(), 0);
     assert!(
         a.spool().get(Dir::Inbox, &ans.id).unwrap().is_none(),
         "nothing ingested while offline"
     );
-    std::thread::sleep(Duration::from_secs(3).saturating_sub(started.elapsed()));
+    assert!(
+        started.elapsed() >= Duration::from_secs(1),
+        "at least two loops apart"
+    );
+    let failures_before = failed_probes();
 
-    // "Start B": point A's contact at the live listener; the next pull picks up the new book.
-    point_at(&a, &b.id, &b.addr.to_string());
+    // Start B on that very port; A's next probe succeeds and the answer is ingested.
+    let b = common::respawn(b_dir, b_id).await;
+    assert_eq!(b.addr.to_string(), port);
     wait_until(
         Duration::from_secs(7),
         "answer ingested after B came up",
@@ -353,14 +393,127 @@ async fn offline_responder_is_skipped_then_retried() {
         "{:?}",
         started.elapsed()
     );
+    assert!(fetched() >= 1, "a successful probe was logged");
+    assert!(failures_before >= 2);
     assert_ingested(&a, &b, &q, &ans, "are you there?");
+    a.running.shutdown();
+    b.running.shutdown();
+}
+
+/// AC3, two contacts: a B-signed answer to A's open ask to C is verified but not B's to
+/// answer — nothing is ingested, cached or acked, and the ask to C stays open.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn answer_for_another_peers_ask_is_ignored() {
+    logs();
+    let a = spawn_a().await;
+    let b = spawn_b(&a.id).await;
+    let c = id(3);
+    point_at(&a, &b.id, &b.addr.to_string());
+    common::write_contact_full(a.home(), &Peer::new(&c, "Cy", None), &[&closed_port()], &[]);
+    let to_b = open_ask(&a, &b.id, "for Bea");
+    let to_c = open_ask(&a, &c, "for Cy");
+    // B answers Cy's question, and its own.
+    let hijack = outbox_answer(&b, &b.id, &to_c, "Bea answering for Cy", None);
+    let genuine = outbox_answer(&b, &b.id, &to_b, ANSWER, None);
+
+    wait_until(Duration::from_secs(5), "genuine answer acked", || {
+        b.spool().get(Dir::Done, &genuine.id).unwrap().is_some()
+    });
+    wait_for_log(Duration::from_secs(5), &format!("id={} ", hijack.id));
+    let spool = a.spool();
+    assert!(spool.get(Dir::Inbox, &hijack.id).unwrap().is_none());
+    assert_eq!(
+        spool.list(Dir::Inbox, |_| true).unwrap().len(),
+        1,
+        "only the genuine answer"
+    );
+    assert_eq!(
+        spool.get(Dir::Asks, &to_c.id).unwrap().unwrap().state,
+        "waiting",
+        "the ask to C stays open"
+    );
+    assert!(spool.get(Dir::Done, &to_c.id).unwrap().is_none());
+    let c_hash = envelope::question_hash(common::PROJECT, common::PATH, "for Cy");
+    assert!(
+        spool.cache_get(&c_hash).unwrap().is_none(),
+        "nothing cached for C's question"
+    );
+    let bs = b.spool();
+    assert_eq!(
+        bs.get(Dir::Outbox, &hijack.id).unwrap().unwrap().state,
+        "unacked",
+        "not acked"
+    );
+    assert!(bs.get(Dir::Done, &hijack.id).unwrap().is_none());
     let log = log_text();
     assert!(
         log.lines()
-            .any(|l| l.contains("outbox fetch failed") && l.contains(&dead)),
-        "the closed port was reported:\n{log}"
+            .any(|l| l.contains("no open ask to this peer") && l.contains(&hijack.id)),
+        "{log}"
     );
     a.running.shutdown();
+    b.running.shutdown();
+}
+
+/// Two open asks to one responder are served by a single probe of that responder.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn asks_are_grouped_by_responder() {
+    logs();
+    let a_id = id(1);
+    let b = spawn_b(&a_id).await;
+    let a_dir = tempfile::tempdir().unwrap();
+    common::prepare_home_with(a_dir.path(), &a_id, &[], |_| {});
+    common::write_contact_full(
+        a_dir.path(),
+        &Peer::new(&b.id, "Bea", None),
+        &[&b.addr.to_string()],
+        &[],
+    );
+    let spool = Spool::new(a_dir.path()).unwrap();
+    let mut asks = Vec::new();
+    for text in ["first", "second"] {
+        let q = question(&a_id, &b.id, text);
+        let mut rec = record(&Envelope::sign(&q, &a_id), "waiting");
+        rec.meta = serde_json::json!({ "peer": b.fp(), "hash": text });
+        spool.put(Dir::Asks, &q.id, &rec).unwrap();
+        asks.push(outbox_answer(&b, &b.id, &q, text, None));
+    }
+    // `pull_once` uses the blocking client, so it runs off the async runtime as the loop does.
+    let home = a_dir.path().to_path_buf();
+    let (status, events) = tokio::task::spawn_blocking(move || {
+        let spool = Spool::new(&home).unwrap();
+        let mut events = Vec::new();
+        let mut liveness = pull::Liveness::new(Duration::ZERO);
+        let status = pull::pull_once(
+            &home,
+            &home,
+            &a_id,
+            &spool,
+            &mut liveness,
+            Instant::now(),
+            |ev| events.push(ev),
+        )
+        .unwrap();
+        (status, events)
+    })
+    .await
+    .unwrap();
+    assert_eq!(status.peers_probed, 1, "one probe for both asks");
+    assert_eq!(status.open_asks, 0);
+    assert_eq!(events.len(), 2);
+    assert!(events.iter().all(|e| e.peer == b.fp()));
+    assert!(spool.list(Dir::Asks, |_| true).unwrap().is_empty());
+    for (ans, text) in asks.iter().zip(["first", "second"]) {
+        assert_eq!(
+            spool.get(Dir::Inbox, &ans.id).unwrap().unwrap().state,
+            "pending"
+        );
+        assert!(spool.cache_get(text).unwrap().is_some());
+        assert_eq!(
+            b.spool().get(Dir::Done, &ans.id).unwrap().unwrap().state,
+            "acked"
+        );
+    }
     b.running.shutdown();
 }
 
