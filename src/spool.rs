@@ -116,6 +116,33 @@ impl Spool {
         Ok(out)
     }
 
+    /// Like `list`, but a corrupt record is skipped with a warning instead of failing the
+    /// whole listing (one bad file must not stall the outbox or the pull loop).
+    pub fn list_lenient(&self, dir: Dir) -> anyhow::Result<Vec<(String, Record)>> {
+        let dir_path = self.root.join(dir.name());
+        let mut out = Vec::new();
+        for entry in std::fs::read_dir(&dir_path)
+            .with_context(|| format!("listing {}", dir_path.display()))?
+        {
+            let path = entry?.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            let Some(id) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            match self.get(dir, id) {
+                Ok(Some(rec)) => out.push((id.to_string(), rec)),
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::warn!(path = %path.display(), error = %format!("{e:#}"), "skipping corrupt record")
+                }
+            }
+        }
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(out)
+    }
+
     fn update(&self, dir: Dir, id: &str, f: impl FnOnce(&mut Record)) -> anyhow::Result<()> {
         let mut rec = self
             .get(dir, id)?
