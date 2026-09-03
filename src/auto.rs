@@ -8,7 +8,10 @@
 //! stranded by a daemon restart). A failed attempt — timeout, unknown project,
 //! `extract_failed`, a send error — leaves the record `pending` with `meta.auto_error` so the
 //! human sees it in `owl inbox`; such records are not retried by the scan (the human re-drafts
-//! or rejects). The policy is re-read at attempt time: a peer flipped to `manual` or `never`
+//! or rejects). One exception: when `send` failed *after* the signed envelope reached
+//! `outbox/` (log or `done/` not writable), the record stays `drafted` with `auto_error`, so
+//! the human's `owl send` reuses that envelope instead of signing a second one (the same
+//! `existing_answer` rule `owl edit` honours). The policy is re-read at attempt time: a peer flipped to `manual` or `never`
 //! between arrival and attempt is never auto-answered.
 
 use std::collections::HashSet;
@@ -25,8 +28,7 @@ use crate::runner::DraftStatus;
 use crate::server::AppState;
 use crate::spool::{Dir, Record, Spool};
 
-/// `meta` key naming why the last automatic attempt failed.
-pub const AUTO_ERROR: &str = "auto_error";
+pub use crate::answer::AUTO_ERROR;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
@@ -68,6 +70,11 @@ fn not_a_candidate(config: &Config, book: &ContactBook, id: &str, rec: &Record) 
 fn fail(spool: &Spool, id: &str, mut rec: Record, why: String) -> anyhow::Result<Outcome> {
     rec.state = "pending".into();
     rec.draft = None;
+    fail_as_is(spool, id, rec, why)
+}
+
+/// Writes `rec` back unchanged except for `meta.auto_error = why`.
+fn fail_as_is(spool: &Spool, id: &str, mut rec: Record, why: String) -> anyhow::Result<Outcome> {
     answer::meta_object(&mut rec).insert(AUTO_ERROR.into(), json!(why));
     spool.put(Dir::Inbox, id, &rec)?;
     Ok(Outcome::Failed(why))
@@ -112,12 +119,17 @@ pub fn attempt(
     match answer::send(home, spool, id, drafted, SendMode::Auto) {
         Ok(answer) => Ok(Outcome::Sent { answer, peer, path }),
         Err(e) => {
-            // Whatever `send` left in the inbox (possibly nothing, if the question was already
-            // finished) goes back to `pending` for the human.
+            let why = format!("{e:#}");
+            // Nothing left in the inbox: `finish` wrote `done/` and only the unlink failed.
             let Some(left) = spool.get(Dir::Inbox, id)? else {
-                return Ok(Outcome::Failed(format!("{e:#}")));
+                return Ok(Outcome::Failed(why));
             };
-            fail(spool, id, left, format!("{e:#}"))
+            if answer::existing_answer(spool, id)?.is_some() {
+                // The signed envelope is already in `outbox/`: keep the record `drafted` so
+                // `owl send` reuses it rather than signing a second answer.
+                return fail_as_is(spool, id, left, why);
+            }
+            fail(spool, id, left, why)
         }
     }
 }
@@ -588,6 +600,100 @@ mod tests {
         let mut off = f.config.clone();
         off.responder.enabled = false;
         assert!(candidates(&off, &book, &f.spool()).unwrap().is_empty());
+    }
+
+    /// A stale `auto_error` (from an earlier failure) is dropped when the attempt succeeds.
+    #[test]
+    fn success_clears_stale_auto_error() {
+        let f = Fixture::new(Some(Mode::Auto), true);
+        let id = f.put(
+            "pending",
+            json!({ "peer": f.fp(&f.peer), AUTO_ERROR: "unknown project x" }),
+        );
+        assert!(matches!(f.attempt(&id), Outcome::Sent { .. }));
+        let done = f.spool().get(Dir::Done, &id).unwrap().unwrap();
+        assert!(done.meta.get(AUTO_ERROR).is_none(), "{}", done.meta);
+        assert_eq!(done.meta["peer"], f.fp(&f.peer));
+    }
+
+    /// `done/` blocked: the envelope is already in `outbox/` and logged, so the record stays
+    /// `drafted` (not `pending`) with `auto_error`; the human's `owl send` then reuses the
+    /// envelope and the log keeps exactly one line.
+    #[test]
+    fn send_failure_after_envelope_keeps_record_drafted() {
+        let f = Fixture::new(Some(Mode::Auto), true);
+        let id = f.put("pending", peer_meta(&f));
+        let blocker = f.spool().path(Dir::Done, &id);
+        std::fs::create_dir_all(blocker.join("child")).unwrap();
+        let out = f.attempt(&id);
+        let Outcome::Failed(why) = out else {
+            panic!("{out:?}");
+        };
+        assert!(why.contains("finishing record"), "{why}");
+        let rec = f.inbox(&id).unwrap();
+        assert_eq!(rec.state, "drafted");
+        assert!(rec.draft.is_some(), "draft kept for the reuse path");
+        assert_eq!(answer::auto_error(&rec), Some(why.as_str()));
+        assert_eq!(f.outbox_len(), 1);
+        assert_eq!(f.log_lines().len(), 1, "logged before finish");
+        // Still not a scan candidate; a second attempt skips (state is drafted).
+        assert!(matches!(f.attempt(&id), Outcome::Skipped(_)));
+        assert_eq!(f.outbox_len(), 1);
+
+        std::fs::remove_dir_all(&blocker).unwrap();
+        let sent = answer::send(
+            f.home.path(),
+            &f.spool(),
+            &id,
+            f.inbox(&id).unwrap(),
+            SendMode::Manual,
+        )
+        .unwrap();
+        assert!(f.inbox(&id).is_none());
+        let done = f.spool().get(Dir::Done, &id).unwrap().unwrap();
+        assert_eq!(done.state, "answered");
+        assert_eq!(done.meta["answer_id"], sent.answer_id);
+        assert_eq!(f.outbox_len(), 1, "envelope reused, not re-signed");
+        let lines = f.log_lines();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert_eq!(lines[0]["mode"], "auto", "the first (auto) line stands");
+    }
+
+    /// The log blocked (a directory where the file should be): the envelope is spooled, the
+    /// log append fails before `finish`, the record stays `drafted` with `auto_error`, nothing
+    /// is in `done/`.
+    #[test]
+    fn send_failure_on_log_keeps_record_drafted_and_unfinished() {
+        let f = Fixture::new(Some(Mode::Auto), true);
+        let id = f.put("pending", peer_meta(&f));
+        let log = f.home.path().join(answer::OUTGOING_LOG);
+        std::fs::create_dir_all(&log).unwrap();
+        let out = f.attempt(&id);
+        let Outcome::Failed(why) = out else {
+            panic!("{out:?}");
+        };
+        assert!(why.contains("outgoing.jsonl"), "{why}");
+        let rec = f.inbox(&id).unwrap();
+        assert_eq!(rec.state, "drafted");
+        assert!(answer::auto_error(&rec).is_some());
+        assert_eq!(f.outbox_len(), 1);
+        assert!(f.spool().get(Dir::Done, &id).unwrap().is_none());
+        std::fs::remove_dir(&log).unwrap();
+        answer::send(
+            f.home.path(),
+            &f.spool(),
+            &id,
+            f.inbox(&id).unwrap(),
+            SendMode::Manual,
+        )
+        .unwrap();
+        assert_eq!(f.log_lines().len(), 1);
+        assert_eq!(f.log_lines()[0]["mode"], "manual");
+        assert_eq!(f.outbox_len(), 1);
+        assert_eq!(
+            f.spool().get(Dir::Done, &id).unwrap().unwrap().state,
+            "answered"
+        );
     }
 
     #[test]

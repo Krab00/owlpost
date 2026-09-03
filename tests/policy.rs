@@ -5,7 +5,8 @@
 
 mod common;
 
-use std::path::Path;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
@@ -13,7 +14,8 @@ use common::{
     PATH, PROJECT, Peer, TestDaemon, client, fp, id, policy, post_envelope, prepare_home_with,
     signed, spawn_daemon, spawn_daemon_with,
 };
-use owlpost::answer::OUTGOING_LOG;
+use owlpost::answer::{AUTO_ERROR, OUTGOING_LOG};
+use owlpost::auto::{self, Outcome};
 use owlpost::config::{Config, Harness};
 use owlpost::contacts::{ContactBook, Mode};
 use owlpost::envelope::{self, Body, Envelope, Payload};
@@ -732,11 +734,12 @@ fn inbox_prompts_for_consent_records() {
         out.contains(&format!("owl deny {ana_fp}")),
         "deny with the fingerprint: {out}"
     );
+    let expected = format!(
+        "Ana wants to ask your agent about {PROJECT} — owl allow {ana_fp} [--once|--always] / owl deny {ana_fp}"
+    );
     assert!(
-        out.contains(&format!(
-            "Ana wants to ask your agent about {PROJECT} — owl allow {ana_fp} [--once|--always] / owl deny {ana_fp}"
-        )),
-        "{out}"
+        out.lines().any(|l| l == expected),
+        "exact prompt line missing:\n{out}"
     );
     assert!(
         !out.contains(&format!("owl allow {}", fp(&h.maciek))),
@@ -773,4 +776,349 @@ fn inbox_prompts_for_consent_records() {
     );
     assert_eq!(done(h.path(), &held).unwrap().state, "denied");
     assert!(out.contains(&pending) && out.contains(PATH), "{out}");
+}
+
+// ---------------------------------------------------------------- fixture
+
+/// The shared fixture config never maps a project and never adds a harness: a daemon spawned
+/// through `tests/common` cannot run any responder unless a test opts in.
+#[test]
+fn common_fixture_runs_no_harness_by_default() {
+    let dir = tempfile::tempdir().unwrap();
+    prepare_home_with(dir.path(), &id(2), &[], |_| {});
+    let cfg = Config::load(dir.path()).unwrap();
+    assert!(cfg.projects.is_empty(), "{:?}", cfg.projects);
+    assert_eq!(cfg.responder.harness, "claude", "not switched to the fake");
+    assert!(!cfg.notify);
+    assert_eq!(cfg.listen, "127.0.0.1:0");
+    // The default harness is the real `claude` template; with no project mapped the runner
+    // refuses before spawning anything.
+    let err = owlpost::runner::project_dir(&cfg, PROJECT)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("unknown project"), "{err}");
+}
+
+// ---------------------------------------------------------------- AC6 failure paths
+
+fn block_dir(path: &Path) {
+    std::fs::create_dir_all(path.join("child")).unwrap();
+}
+
+fn chmod(path: &Path, mode: u32) {
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+}
+
+/// `owl send` with the log unwritable: exit 1, the record stays `drafted`, the envelope is in
+/// `outbox/`, nothing in `done/`; the retry after unblocking finishes and logs exactly once.
+#[test]
+fn send_with_blocked_log_keeps_record_and_retries_once() {
+    let log_dir = |h: &Home| h.path().join("log");
+    // (1) a directory where the file should be.
+    let h = Home::new();
+    let qid = h.put(&h.maciek, "blocked log?", "pending");
+    h.ok(&["draft", &qid]);
+    let log = h.path().join(OUTGOING_LOG);
+    std::fs::create_dir_all(&log).unwrap();
+    h.fails(&["send", &qid], "outgoing.jsonl");
+    assert_eq!(inbox(h.path(), &qid).unwrap().state, "drafted");
+    assert_eq!(outbox(h.path()).len(), 1, "envelope spooled before the log");
+    assert!(done(h.path(), &qid).is_none());
+    std::fs::remove_dir(&log).unwrap();
+    h.ok(&["send", &qid]);
+    assert!(inbox(h.path(), &qid).is_none());
+    assert_eq!(done(h.path(), &qid).unwrap().state, "answered");
+    assert_eq!(outbox(h.path()).len(), 1, "envelope reused");
+    let lines = log_lines(h.path());
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert_eq!(lines[0]["question_id"], qid);
+
+    // (2) `log/` exists but is read-only.
+    let h = Home::new();
+    let qid = h.put(&h.maciek, "read-only log?", "pending");
+    h.ok(&["draft", &qid]);
+    std::fs::create_dir_all(log_dir(&h)).unwrap();
+    chmod(&log_dir(&h), 0o555);
+    let (code, _, err) = owl(h.path(), h.cwd(), &["send", &qid]);
+    chmod(&log_dir(&h), 0o755);
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("outgoing.jsonl"), "{err}");
+    assert_eq!(inbox(h.path(), &qid).unwrap().state, "drafted");
+    assert_eq!(outbox(h.path()).len(), 1);
+    assert!(done(h.path(), &qid).is_none());
+    assert!(log_lines(h.path()).is_empty());
+    h.ok(&["send", &qid]);
+    assert_eq!(done(h.path(), &qid).unwrap().state, "answered");
+    assert_eq!(log_lines(h.path()).len(), 1);
+    assert_eq!(outbox(h.path()).len(), 1);
+}
+
+/// Log written, then `finish` fails (`done/<id>.json` blocked): the retry must not log a
+/// second line.
+#[test]
+fn send_with_blocked_done_logs_exactly_once() {
+    let h = Home::new();
+    let qid = h.put(&h.maciek, "blocked done?", "pending");
+    h.ok(&["draft", &qid]);
+    let blocker = Spool::new(h.path()).unwrap().path(Dir::Done, &qid);
+    block_dir(&blocker);
+    h.fails(&["send", &qid], &format!("finishing record {qid}"));
+    assert_eq!(inbox(h.path(), &qid).unwrap().state, "drafted");
+    assert_eq!(outbox(h.path()).len(), 1);
+    assert_eq!(log_lines(h.path()).len(), 1, "logged before finish");
+    std::fs::remove_dir_all(&blocker).unwrap();
+    h.ok(&["send", &qid]);
+    assert_eq!(done(h.path(), &qid).unwrap().state, "answered");
+    assert_eq!(outbox(h.path()).len(), 1);
+    let lines = log_lines(h.path());
+    assert_eq!(lines.len(), 1, "retry logged again: {lines:?}");
+    assert_eq!(lines[0]["question_id"], qid);
+    assert_eq!(lines[0]["mode"], "manual");
+}
+
+// ---------------------------------------------------------------- AC4 failure + scheduling
+
+/// `attempt()` with `done/` blocked: the envelope exists, so the record stays `drafted` with
+/// `auto_error` (shown by `owl inbox`), and `owl send` afterwards reuses it and logs once.
+#[test]
+fn auto_attempt_with_blocked_done_leaves_drafted_for_manual_send() {
+    let h = Home::new();
+    let ana_fp = fp(&h.ana);
+    h.ok(&["allow", &ana_fp, "--always", "--i-verified-the-fingerprint"]);
+    let qid = h.put(&h.ana, "blocked done, auto?", "pending");
+    let spool = Spool::new(h.path()).unwrap();
+    let blocker = spool.path(Dir::Done, &qid);
+    block_dir(&blocker);
+    let cfg = Config::load(h.path()).unwrap();
+    let out = auto::attempt(h.path(), h.cwd(), &cfg, &spool, &qid).unwrap();
+    assert!(
+        matches!(&out, Outcome::Failed(why) if why.contains("finishing record")),
+        "{out:?}"
+    );
+    let rec = inbox(h.path(), &qid).unwrap();
+    assert_eq!(rec.state, "drafted");
+    assert!(rec.draft.is_some());
+    assert!(
+        rec.meta[AUTO_ERROR]
+            .as_str()
+            .unwrap()
+            .contains("finishing record")
+    );
+    assert_eq!(outbox(h.path()).len(), 1);
+    assert_eq!(log_lines(h.path()).len(), 1);
+    let listing = h.ok(&["inbox"]);
+    assert!(
+        listing.contains("auto-accept failed") && listing.contains("finishing record"),
+        "{listing}"
+    );
+    assert!(
+        listing
+            .lines()
+            .any(|l| l.contains(&qid) && l.contains("drafted")),
+        "{listing}"
+    );
+
+    std::fs::remove_dir_all(&blocker).unwrap();
+    h.ok(&["send", &qid]);
+    assert!(inbox(h.path(), &qid).is_none());
+    assert_eq!(done(h.path(), &qid).unwrap().state, "answered");
+    assert_eq!(outbox(h.path()).len(), 1, "envelope reused");
+    let lines = log_lines(h.path());
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert_eq!(lines[0]["mode"], "auto");
+}
+
+/// A human `owl draft` after an auto failure clears `auto_error`, so the inbox stops nagging.
+#[test]
+fn manual_draft_clears_auto_error() {
+    let h = Home::new();
+    let qid = h.put(&h.maciek, "nagging?", "pending");
+    let spool = Spool::new(h.path()).unwrap();
+    let mut rec = inbox(h.path(), &qid).unwrap();
+    rec.meta = json!({ "peer": fp(&h.maciek), AUTO_ERROR: "unknown project x" });
+    spool.put(Dir::Inbox, &qid, &rec).unwrap();
+    let before = h.ok(&["inbox"]);
+    assert!(before.contains("auto-accept failed"), "{before}");
+    h.ok(&["draft", &qid]);
+    let rec = inbox(h.path(), &qid).unwrap();
+    assert_eq!(rec.state, "drafted");
+    assert!(rec.meta.get(AUTO_ERROR).is_none(), "{}", rec.meta);
+    assert_eq!(rec.meta["peer"], fp(&h.maciek), "other meta kept");
+    let after = h.ok(&["inbox"]);
+    assert!(!after.contains("auto-accept failed"), "{after}");
+    let rows: Value = serde_json::from_str(&h.ok(&["inbox", "--json"])).unwrap();
+    assert_eq!(rows[0]["auto_error"], Value::Null);
+}
+
+/// `pull_interval_secs` (non-default: 1) drives the scan, and `owl allow --always` against a
+/// *running* daemon is picked up by that scan without a restart.
+#[tokio::test]
+async fn scan_interval_follows_pull_interval_and_sees_allow_always() {
+    let ana = id(1);
+    let checkout = tempfile::tempdir().unwrap();
+    let daemon = spawn_daemon_with(2, &[Peer::new(&ana, "Ana", None)], |cfg| {
+        responder_config(cfg, checkout.path());
+        cfg.pull_interval_secs = 1;
+    })
+    .await;
+    let home = daemon.home().to_path_buf();
+    let cl = client(Some(&ana), &daemon.id);
+    let q = signed(&ana, &daemon.id, "Where is the retry policy defined?");
+    let qid = serde_json::from_str::<Payload>(&q.raw).unwrap().id;
+    assert_eq!(post_envelope(&cl, &daemon, &q).await.status(), 202);
+    assert_eq!(inbox(&home, &qid).unwrap().state, "consent");
+    // Let the daemon sit for two intervals: a consent record is never a candidate.
+    tokio::time::sleep(Duration::from_millis(2_200)).await;
+    assert_eq!(inbox(&home, &qid).unwrap().state, "consent");
+    assert!(outbox(&home).is_empty());
+
+    let cwd = tempfile::tempdir().unwrap();
+    owl_ok(
+        &home,
+        cwd.path(),
+        &[
+            "allow",
+            &fp(&ana),
+            "--always",
+            "--i-verified-the-fingerprint",
+        ],
+    );
+    let h = home.clone();
+    tokio::task::spawn_blocking(move || {
+        wait_for(5, "the 1 s scan to answer", || !outbox(&h).is_empty());
+    })
+    .await
+    .unwrap();
+    assert_eq!(done(&home, &qid).unwrap().state, "answered");
+    let lines = log_lines(&home);
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0]["mode"], "auto");
+    assert_eq!(lines[0]["question_id"], qid);
+    daemon.running.shutdown();
+}
+
+/// The arrival event and the 1 s scan both see a `pending` auto record while the (slow) harness
+/// is still running: the in-flight claim allows exactly one harness run.
+#[tokio::test]
+async fn event_and_scan_overlap_runs_the_harness_once() {
+    let ana = id(1);
+    let checkout = tempfile::tempdir().unwrap();
+    let harness_log = checkout.path().join("harness.log");
+    let harness_log_path = harness_log.to_string_lossy().into_owned();
+    let daemon = spawn_daemon_with(
+        2,
+        &[Peer::new(&ana, "Ana", Some(policy(Mode::Auto, None)))],
+        |cfg| {
+            responder_config(cfg, checkout.path());
+            cfg.pull_interval_secs = 1;
+            let fake = cfg.harnesses.get_mut("fake").unwrap();
+            fake.env.insert("FAKE_SLEEP".into(), "3".into());
+            fake.env
+                .insert("FAKE_HARNESS_LOG".into(), harness_log_path.clone());
+        },
+    )
+    .await;
+    let home = daemon.home().to_path_buf();
+    let cl = client(Some(&ana), &daemon.id);
+    let q = signed(&ana, &daemon.id, "Where is the retry policy defined?");
+    let qid = serde_json::from_str::<Payload>(&q.raw).unwrap().id;
+    assert_eq!(post_envelope(&cl, &daemon, &q).await.status(), 202);
+    // Three scan ticks pass while the first harness run sleeps.
+    let h = home.clone();
+    tokio::task::spawn_blocking(move || {
+        wait_for(10, "the slow harness to answer", || !outbox(&h).is_empty());
+    })
+    .await
+    .unwrap();
+    // Give a late duplicate a chance to show up before counting.
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    let runs = std::fs::read_to_string(&harness_log)
+        .unwrap()
+        .lines()
+        .filter(|l| l.starts_with("pid: "))
+        .count();
+    assert_eq!(runs, 1, "harness ran {runs} times");
+    assert_eq!(outbox(&home).len(), 1);
+    assert_eq!(log_lines(&home).len(), 1);
+    assert_eq!(done(&home, &qid).unwrap().state, "answered");
+    daemon.running.shutdown();
+}
+
+// ---------------------------------------------------------------- AC3 failure paths + CLI
+
+#[test]
+fn deny_cli_edge_cases() {
+    let h = Home::new();
+    let ana_fp = fp(&h.ana);
+    // Unknown peer: exit 1 naming the problem, no overlay touched.
+    let before = std::fs::read(overlay_path(h.path(), &h.ana)).unwrap();
+    h.fails(&["deny", "nobody"], "no contact matches \"nobody\"");
+    assert_eq!(
+        std::fs::read(overlay_path(h.path(), &h.ana)).unwrap(),
+        before
+    );
+    // Zero held records: the policy is still written and 0 reported.
+    let out = h.ok(&["deny", "Ana"]);
+    assert!(
+        out.contains("policy never") && out.contains("0 held questions"),
+        "{out}"
+    );
+    assert_eq!(policy_mode(h.path(), h.cwd(), &h.ana), Some(Mode::Never));
+    // `--json` shape, with one held record this time.
+    let held = h.put(&h.ana, "held?", "consent");
+    let v: Value = serde_json::from_str(&h.ok(&["deny", &ana_fp, "--json"])).unwrap();
+    assert_eq!(
+        v,
+        json!({ "peer": "Ana", "fingerprint": ana_fp, "policy": "never", "denied": [held] })
+    );
+    assert_eq!(done(h.path(), &held).unwrap().state, "denied");
+}
+
+/// `done/<id>.json` blocked: exit 1, the held record is byte-for-byte untouched in `inbox/`;
+/// the retry after unblocking moves it.
+#[test]
+fn deny_with_blocked_done_leaves_record_held() {
+    let h = Home::new();
+    let ana_fp = fp(&h.ana);
+    let held = h.put(&h.ana, "held?", "consent");
+    let spool = Spool::new(h.path()).unwrap();
+    let before = std::fs::read(spool.path(Dir::Inbox, &held)).unwrap();
+    let blocker = spool.path(Dir::Done, &held);
+    block_dir(&blocker);
+    h.fails(&["deny", &ana_fp], &format!("finishing record {held}"));
+    assert_eq!(
+        std::fs::read(spool.path(Dir::Inbox, &held)).unwrap(),
+        before
+    );
+    assert_eq!(inbox(h.path(), &held).unwrap().state, "consent");
+    assert_eq!(policy_mode(h.path(), h.cwd(), &h.ana), Some(Mode::Never));
+    std::fs::remove_dir_all(&blocker).unwrap();
+    let out = h.ok(&["deny", &ana_fp]);
+    assert!(out.contains("1 held question "), "{out}");
+    assert!(inbox(h.path(), &held).is_none());
+    assert_eq!(done(h.path(), &held).unwrap().state, "denied");
+}
+
+/// `inbox/` read-only: the `done/` copy is written, the unlink fails (exit 1), the original
+/// stays `consent`; the retry finishes the move.
+#[test]
+fn deny_with_readonly_inbox_keeps_original_and_retries() {
+    let h = Home::new();
+    let ana_fp = fp(&h.ana);
+    let held = h.put(&h.ana, "held?", "consent");
+    let inbox_dir: PathBuf = h.path().join("spool").join("inbox");
+    chmod(&inbox_dir, 0o555);
+    let (code, _, err) = owl(h.path(), h.cwd(), &["deny", &ana_fp]);
+    chmod(&inbox_dir, 0o755);
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("removing"), "{err}");
+    assert_eq!(inbox(h.path(), &held).unwrap().state, "consent");
+    assert_eq!(done(h.path(), &held).unwrap().state, "denied");
+    h.ok(&["deny", &ana_fp]);
+    assert!(inbox(h.path(), &held).is_none());
+    assert_eq!(done(h.path(), &held).unwrap().state, "denied");
+    assert_eq!(
+        done(h.path(), &held).unwrap().meta["previous_state"],
+        "consent"
+    );
 }

@@ -20,6 +20,8 @@ use crate::spool::{Dir, Record, Spool};
 
 /// `log/outgoing.jsonl` relative to the home: one line per answer that left this machine.
 pub const OUTGOING_LOG: &str = "log/outgoing.jsonl";
+/// `meta` key naming why the scheduler's last automatic attempt failed (`crate::auto`).
+pub const AUTO_ERROR: &str = "auto_error";
 
 /// Draft as stored on an inbox record (`record.draft`), §3.4 step 4.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -104,7 +106,7 @@ pub fn meta_object(rec: &mut Record) -> &mut Map<String, Value> {
 
 /// `meta.auto_error` of a record, if the scheduler left one (§3.4 auto failures).
 pub fn auto_error(rec: &Record) -> Option<&str> {
-    rec.meta.get("auto_error").and_then(Value::as_str)
+    rec.meta.get(AUTO_ERROR).and_then(Value::as_str)
 }
 
 /// Finishes an inbox record: `state`, `meta.done_at` and the `extra` meta keys are set on the
@@ -185,6 +187,8 @@ pub fn draft(
     let d = runner::draft(config, home, harness, project, path, question)?;
     rec.draft = Some(StoredDraft::from_runner(&d).to_value());
     rec.state = "drafted".into();
+    // A fresh draft supersedes whatever the scheduler failed on; the inbox stops nagging.
+    meta_object(&mut rec).remove(AUTO_ERROR);
     Ok((rec, d))
 }
 
@@ -261,6 +265,21 @@ pub fn append_outgoing(home: &Path, line: &OutgoingLine) -> anyhow::Result<()> {
         .with_context(|| format!("appending to {}", path.display()))
 }
 
+/// True when `log/outgoing.jsonl` already holds a line for `question_id`. A missing file is an
+/// empty log; a line that is not JSON (a torn write, a hand edit) is skipped, not an error.
+pub fn has_outgoing_line(home: &Path, question_id: &str) -> anyhow::Result<bool> {
+    let path = home.join(OUTGOING_LOG);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+    };
+    Ok(text
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .any(|v| v.get("question_id").and_then(Value::as_str) == Some(question_id)))
+}
+
 /// §3.4 step 5 for a `drafted` question record: sign the answer, write it to `outbox/`
 /// (state `unacked`) and the responder cache, log it to `outgoing.jsonl`, move the question to
 /// `done/` (state `answered`, `meta.answer_id`).
@@ -269,10 +288,13 @@ pub fn append_outgoing(home: &Path, line: &OutgoingLine) -> anyhow::Result<()> {
 /// meta}` with `meta = {peer, question_id, hash}` — so the daemon's `GET /v1/outbox` listing
 /// and its cache-hit path read them unchanged.
 ///
-/// A previous `send` may have written the answer and then failed to finish the question (the
-/// step is not atomic). The outbox record carries `meta.question_id`, so an existing envelope
-/// for this question is reused rather than signed and spooled twice; the log line is written
-/// only after the question is finished, so a retry logs the answer exactly once.
+/// Order: outbox + cache put → log line → finish. The log line goes in *before* the question
+/// is finished so an answer can never end up served from the outbox yet absent from the log
+/// (a finished question cannot be retried: the inbox record is gone). The step is not atomic:
+/// a previous `send` may have spooled the envelope and then failed on the log or on `finish`.
+/// The outbox record carries `meta.question_id`, so an existing envelope for this question is
+/// reused rather than signed and spooled twice, and the log line is appended only if the log
+/// has none for this question yet — a retry logs exactly once, never zero times.
 pub fn send(
     home: &Path,
     spool: &Spool,
@@ -328,23 +350,25 @@ pub fn send(
             (answer.id, answer.to)
         }
     };
+    if !has_outgoing_line(home, id)? {
+        append_outgoing(
+            home,
+            &OutgoingLine::new(
+                &answer_to,
+                id,
+                &draft.harness,
+                draft.redactions,
+                &draft.text,
+                mode,
+            ),
+        )?;
+    }
     finish(
         spool,
         id,
         rec,
         "answered",
         &[("answer_id", json!(answer_id))],
-    )?;
-    append_outgoing(
-        home,
-        &OutgoingLine::new(
-            &answer_to,
-            id,
-            &draft.harness,
-            draft.redactions,
-            &draft.text,
-            mode,
-        ),
     )?;
     Ok(Sent {
         outbox: spool.path(Dir::Outbox, &answer_id),
@@ -494,6 +518,30 @@ mod tests {
         std::fs::write(blocked.path().join("log"), "not a dir").unwrap();
         let err = format!("{:#}", append_outgoing(blocked.path(), &a).unwrap_err());
         assert!(err.contains("log"), "{err}");
+    }
+
+    #[test]
+    fn has_outgoing_line_tolerates_missing_file_and_garbage() {
+        let home = tempfile::tempdir().unwrap();
+        assert!(
+            !has_outgoing_line(home.path(), "q1").unwrap(),
+            "no file yet"
+        );
+        let dir = home.path().join("log");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("outgoing.jsonl"),
+            "not json\n{\"question_id\":\"q1\"}\n{\"question_id\":7}\n[1]\n",
+        )
+        .unwrap();
+        assert!(has_outgoing_line(home.path(), "q1").unwrap());
+        assert!(!has_outgoing_line(home.path(), "q2").unwrap());
+        assert!(!has_outgoing_line(home.path(), "7").unwrap());
+        // Unreadable file (a directory in its place): an error naming the path, not `false`.
+        let blocked = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(blocked.path().join(OUTGOING_LOG)).unwrap();
+        let err = format!("{:#}", has_outgoing_line(blocked.path(), "q1").unwrap_err());
+        assert!(err.contains("outgoing.jsonl"), "{err}");
     }
 
     #[test]
