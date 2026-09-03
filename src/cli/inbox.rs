@@ -5,13 +5,18 @@
 //! listed record is marked `seen`. Counting: `--count` prints the unseen count (`--all`: the
 //! total) and never marks anything; with `--format` it prints the harness injection line
 //! instead, or nothing at all when the count is 0.
+//!
+//! Consent records get a prompt line under the table (`<name> wants to ask your agent about
+//! <project> — owl allow <fp> [--once|--always] / owl deny <fp>`); records the auto-accept
+//! scheduler failed on show their `auto_error` (§3.4).
 
 use std::collections::BTreeMap;
 use std::path::Path;
 
 use anyhow::bail;
+use owlpost::answer::auto_error;
 use owlpost::contacts::ContactBook;
-use owlpost::envelope::{self, Kind};
+use owlpost::envelope::{self, Body, Kind, Payload};
 use owlpost::spool::{Dir, Record, Spool};
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -91,6 +96,19 @@ pub fn injection(format: Format, per_peer: &[(String, usize)]) -> Option<String>
     })
 }
 
+/// The §3.2 consent prompt for a held question: who, about which project, and the two commands.
+pub fn consent_prompt(book: &ContactBook, payload: &Payload) -> String {
+    let project = match &payload.body {
+        Body::Question { project, .. } => project.as_str(),
+        Body::Answer { .. } => "?",
+    };
+    let fp = &payload.from;
+    format!(
+        "{} wants to ask your agent about {project} — owl allow {fp} [--once|--always] / owl deny {fp}",
+        peer_name(book, fp)
+    )
+}
+
 /// Per-peer counts over `records`, named through the contact book, ordered by count then name.
 pub fn per_peer(
     records: &[(String, Record)],
@@ -116,9 +134,24 @@ pub fn run(home: &Path, opts: Opts) -> anyhow::Result<()> {
     let records = spool.list(Dir::Inbox, |r| !opts.new || !r.seen)?;
     let now = envelope::now_unix();
     let mut rows = Vec::new();
+    let mut notes = Vec::new();
     for (id, rec) in &records {
         let payload = payload_of(id, rec)?;
-        rows.push(summary(id, rec, &payload, &book, now));
+        let mut row = summary(id, rec, &payload, &book, now);
+        let error = auto_error(rec);
+        if let Some(obj) = row.as_object_mut() {
+            obj.insert("auto_error".into(), json!(error));
+        }
+        rows.push(row);
+        if rec.state == "consent" {
+            notes.push(consent_prompt(&book, &payload));
+        }
+        if let Some(e) = error {
+            notes.push(format!(
+                "{id}: auto-accept failed ({}): {e} — owl draft {id} to retry by hand",
+                peer_name(&book, &payload.from)
+            ));
+        }
     }
     if opts.json {
         print_json(&Value::Array(rows.clone()))?;
@@ -133,6 +166,9 @@ pub fn run(home: &Path, opts: Opts) -> anyhow::Result<()> {
             })
             .collect();
         print_table(&["ID", "FROM", "TYPE", "STATE", "PATH", "AGE"], &cells);
+        for n in &notes {
+            println!("{n}");
+        }
     }
     for (id, rec) in &records {
         if !rec.seen {
@@ -213,6 +249,35 @@ mod tests {
             assert_eq!(injection(f, &[]), None);
             assert_eq!(injection(f, &peers(&[("Maciek", 0)])), None);
         }
+    }
+
+    #[test]
+    fn consent_prompt_names_peer_project_and_both_commands() {
+        use owlpost::contacts::Contact;
+        let q = Payload::question("FPA", "FPB", "github.com/x/y", "src/a.rs", "why?");
+        let book = ContactBook {
+            contacts: vec![Contact {
+                name: "Ana".into(),
+                emails: vec![],
+                pubkey: "ed25519:x".into(),
+                endpoints: vec![],
+                source: "local".into(),
+                policy: None,
+                added_at: None,
+                fingerprint: "FPA".into(),
+            }],
+        };
+        assert_eq!(
+            consent_prompt(&book, &q),
+            "Ana wants to ask your agent about github.com/x/y — owl allow FPA [--once|--always] / owl deny FPA"
+        );
+        // Unknown peer: the fingerprint stands in for the name.
+        assert_eq!(
+            consent_prompt(&ContactBook::default(), &q),
+            "FPA wants to ask your agent about github.com/x/y — owl allow FPA [--once|--always] / owl deny FPA"
+        );
+        let a = Payload::answer(&q, "because", "fake", 0, false);
+        assert!(consent_prompt(&book, &a).contains("about ? —"));
     }
 
     #[test]
