@@ -820,6 +820,72 @@ async fn wait_returns_answer() {
     assert_eq!(stdout(&out).trim(), ANSWER);
 }
 
+/// `--wait` runs the daemon's ingestion: a forged entry ahead of the genuine answer in B's
+/// outbox is skipped and never acked; the genuine one is taken.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn wait_skips_forged_entries_and_takes_the_genuine_answer() {
+    let a = id(1);
+    let b = spawn_daemon(2, true, &[Peer::new(&a, "Ana", manual())]).await;
+    let home = asker_home(&a, &b.id, &[&b.addr.to_string()]);
+    let b_home = b.home().to_path_buf();
+    let answerer = std::thread::spawn(move || {
+        let spool = Spool::new(&b_home).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let (qid, rec) = loop {
+            if let Some(x) = spool.list(Dir::Inbox, |_| true).unwrap().into_iter().next() {
+                break x;
+            }
+            assert!(Instant::now() < deadline, "no question reached B");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let q = payload(&rec);
+        // Forged first (lower id sorts first: UUIDv7 is time-ordered), genuine 1 s later.
+        let forged = Payload::answer(&q, "not from Bea", "fake", 0, false);
+        spool
+            .put(
+                Dir::Outbox,
+                &forged.id,
+                &record(&Envelope::sign(&forged, &id(99)), "unacked"),
+            )
+            .unwrap();
+        std::thread::sleep(Duration::from_secs(1));
+        let ans = Payload::answer(&q, ANSWER, "fake", 0, false);
+        spool
+            .put(
+                Dir::Outbox,
+                &ans.id,
+                &record(
+                    &Envelope::sign(&ans, &Identity::from_seed([2; 32])),
+                    "unacked",
+                ),
+            )
+            .unwrap();
+        (qid, forged.id, ans.id)
+    });
+    let out = ask(home.path(), &["--wait", "10"]);
+    let (qid, forged_id, aid) = answerer.join().unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(stdout(&out).trim(), ANSWER);
+
+    let spool = Spool::new(home.path()).unwrap();
+    assert!(spool.get(Dir::Inbox, &forged_id).unwrap().is_none());
+    assert!(spool.get(Dir::Inbox, &aid).unwrap().is_some());
+    assert_eq!(ids(&spool, Dir::Inbox), std::slice::from_ref(&aid));
+    assert_eq!(
+        spool.get(Dir::Done, &qid).unwrap().unwrap().state,
+        "answered"
+    );
+    let bs = b.spool();
+    assert_eq!(
+        bs.get(Dir::Outbox, &forged_id).unwrap().unwrap().state,
+        "unacked",
+        "forged entry never acked"
+    );
+    assert!(bs.get(Dir::Done, &forged_id).unwrap().is_none());
+    assert_eq!(bs.get(Dir::Done, &aid).unwrap().unwrap().state, "acked");
+    b.running.shutdown();
+}
+
 /// Runs `owl ask --wait 10` against a scripted fake peer and returns (output, peer, home).
 async fn ask_wait_fake(a: &Identity, script: FakeScript) -> (Output, FakePeer, TempDir) {
     let peer = spawn_fake(2, a, script).await;

@@ -59,12 +59,16 @@ impl Liveness {
         }
     }
 
-    /// The daemon's skip window: 60 s, but never longer than the pull interval itself.
-    // ponytail: `PROBE_SKIP` capped at the interval — with a 1 s interval an offline peer is
-    // retried every loop, with the default 60 s interval the cap changes nothing. Raise the
-    // cap (or count loops instead of seconds) if short intervals should back off further.
+    /// The daemon's skip window: 60 s, capped at one pull interval, minus one second so the
+    /// re-probe never depends on tick jitter (two ticks are at least `interval` apart, and
+    /// `now` is sampled a little after each one).
+    // ponytail: `PROBE_SKIP` capped at `interval - 1 s` — with a 1 s interval an offline peer
+    // is retried every loop, with the default 60 s interval on the next loop. Raise the cap
+    // (or count loops instead of seconds) if short intervals should back off further.
     pub fn skip_for(interval: Duration) -> Duration {
-        PROBE_SKIP.min(interval)
+        PROBE_SKIP
+            .min(interval)
+            .saturating_sub(Duration::from_secs(1))
     }
 
     /// True while the last probe failed less than `skip` ago; a peer never probed, or whose
@@ -183,7 +187,9 @@ pub enum Verdict {
 }
 
 /// One outbox envelope from `contact` against the open asks: verify with the pinned key,
-/// match `in_reply_to`, store in `inbox/` + cache, move the ask to `done/` (`answered`), ack.
+/// match `in_reply_to` against the asks addressed to *this* contact (an answer B signs to a
+/// question asked of C is `Unrelated`), store in `inbox/` + cache, move the ask to `done/`
+/// (`answered`), ack.
 ///
 /// The inbox write comes before the ask move so a crash in between leaves the ask open and
 /// the (idempotent) inbox write to be repeated on the next pull.
@@ -209,12 +215,17 @@ pub fn ingest_envelope(
             return Ok(Verdict::Forged);
         }
     };
-    let Some(ask) = answer.in_reply_to.as_deref().and_then(|q| open.get(q)) else {
+    let ask = answer
+        .in_reply_to
+        .as_deref()
+        .and_then(|q| open.get(q))
+        .filter(|ask| ask.peer == contact.fingerprint);
+    let Some(ask) = ask else {
         tracing::debug!(
             peer = %contact.fingerprint,
             id = %answer.id,
             in_reply_to = ?answer.in_reply_to,
-            "outbox entry replies to no open ask; left unacked"
+            "outbox entry replies to no open ask to this peer; left unacked"
         );
         return Ok(Verdict::Unrelated);
     };
@@ -278,6 +289,7 @@ pub fn pull_once(
         let items = match client::fetch_outbox(identity, contact) {
             Ok(items) => {
                 liveness.record(peer, true, now);
+                tracing::debug!(peer, count = items.len(), "outbox fetched");
                 items
             }
             Err(e) => {
@@ -514,21 +526,31 @@ mod tests {
     }
 
     #[test]
-    fn skip_window_is_capped_at_the_interval() {
+    fn skip_window_is_one_second_short_of_the_interval() {
         assert_eq!(
             Liveness::skip_for(Duration::from_secs(1)),
-            Duration::from_secs(1)
+            Duration::ZERO,
+            "1 s interval: re-probed on every loop"
+        );
+        assert_eq!(
+            Liveness::skip_for(Duration::from_secs(5)),
+            Duration::from_secs(4)
         );
         assert_eq!(
             Liveness::skip_for(Duration::from_secs(60)),
-            Duration::from_secs(60)
+            Duration::from_secs(59)
         );
         assert_eq!(
             Liveness::skip_for(Duration::from_secs(600)),
-            Duration::from_secs(60),
-            "never longer than PROBE_SKIP"
+            Duration::from_secs(59),
+            "never longer than PROBE_SKIP - 1 s"
         );
         assert_eq!(PROBE_SKIP, Duration::from_secs(60));
+        // A zero window never skips, even right after a failure.
+        let mut lv = Liveness::new(Duration::ZERO);
+        let t0 = Instant::now();
+        lv.record("owl:b", false, t0);
+        assert!(!lv.should_skip("owl:b", t0));
     }
 
     #[test]
@@ -887,6 +909,32 @@ mod tests {
             ingest_envelope(&a, &contact, &spool, &open, &unrelated).unwrap(),
             Verdict::Unrelated
         ));
+        // B-signed answer to A's open ask to C: verified, but not B's to answer.
+        let to_c = question(&a, &other);
+        spool
+            .put(
+                Dir::Asks,
+                &to_c.id,
+                &rec(
+                    &Envelope::sign(&to_c, &a),
+                    "waiting",
+                    "2026-09-01T00:00:00Z",
+                    json!({ "peer": identity::fingerprint(&other.verifying_key()), "hash": "hc" }),
+                ),
+            )
+            .unwrap();
+        let open = open_asks(&spool).unwrap();
+        assert_eq!(open.len(), 2);
+        let hijack = Envelope::sign(&Payload::answer(&to_c, "mine now", "fake", 0, false), &b);
+        assert!(matches!(
+            ingest_envelope(&a, &contact, &spool, &open, &hijack).unwrap(),
+            Verdict::Unrelated
+        ));
+        assert!(
+            spool.get(Dir::Asks, &to_c.id).unwrap().is_some(),
+            "ask to C stays open"
+        );
+        assert!(spool.cache_get("hc").unwrap().is_none());
         let mut no_reply = ans.clone();
         no_reply.in_reply_to = None;
         assert!(matches!(
