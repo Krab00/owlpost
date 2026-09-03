@@ -2,7 +2,9 @@
 //! shared exit-code error type, and the helpers the inbox commands share: record lookup,
 //! payload parsing, the stored draft shape, peer naming, age formatting and machine output.
 
+pub mod allow;
 pub mod ask;
+pub mod deny;
 pub mod doctor;
 pub mod draft;
 pub mod edit;
@@ -19,8 +21,8 @@ use std::path::Path;
 use anyhow::Context;
 use owlpost::contacts::ContactBook;
 use owlpost::envelope::{self, Body, Kind, Payload};
-use owlpost::spool::{Dir, Record, Spool};
-use serde_json::{Map, Value, json};
+use owlpost::spool::Record;
+use serde_json::{Value, json};
 
 /// An error carrying its §9 process exit code (`1` user/data, `2` offline/unavailable, `3`
 /// rate limited, `4` nothing to do, e.g. a `watch` or `ask --wait` timeout). `main` downcasts
@@ -58,132 +60,7 @@ pub fn exit_code(e: &anyhow::Error) -> u8 {
     e.downcast_ref::<ExitError>().map_or(1, |x| x.code)
 }
 
-/// Draft as stored on an inbox record (`record.draft`), §3.4 step 4.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StoredDraft {
-    pub text: String,
-    pub harness: String,
-    pub redactions: u32,
-    pub status: String,
-    pub drafted_at: String,
-}
-
-impl StoredDraft {
-    pub fn from_runner(d: &owlpost::runner::Draft) -> StoredDraft {
-        StoredDraft {
-            text: d.text.clone(),
-            harness: d.harness.clone(),
-            redactions: u32::try_from(d.redactions).unwrap_or(u32::MAX),
-            status: d.status.as_str().to_string(),
-            drafted_at: envelope::rfc3339_now(),
-        }
-    }
-
-    pub fn to_value(&self) -> Value {
-        json!({
-            "text": self.text,
-            "harness": self.harness,
-            "redactions": self.redactions,
-            "status": self.status,
-            "drafted_at": self.drafted_at,
-        })
-    }
-
-    /// `None` when the record has no draft; an error when it has one of the wrong shape.
-    pub fn from_record(id: &str, rec: &Record) -> anyhow::Result<Option<StoredDraft>> {
-        let Some(v) = rec.draft.as_ref().filter(|v| !v.is_null()) else {
-            return Ok(None);
-        };
-        let field = |name: &str| -> anyhow::Result<&str> {
-            v.get(name)
-                .and_then(Value::as_str)
-                .with_context(|| format!("record {id}: draft is malformed (missing {name})"))
-        };
-        let redactions = v
-            .get("redactions")
-            .and_then(Value::as_u64)
-            .with_context(|| format!("record {id}: draft is malformed (missing redactions)"))?;
-        Ok(Some(StoredDraft {
-            text: field("text")?.to_string(),
-            harness: field("harness")?.to_string(),
-            redactions: u32::try_from(redactions).unwrap_or(u32::MAX),
-            status: field("status")?.to_string(),
-            drafted_at: field("drafted_at")?.to_string(),
-        }))
-    }
-}
-
-/// Parses the stored raw payload. The bytes were verified on receipt (§3.2), so no
-/// signature check here.
-pub fn payload_of(id: &str, rec: &Record) -> anyhow::Result<Payload> {
-    serde_json::from_str(&rec.raw).with_context(|| format!("record {id}: payload is malformed"))
-}
-
-/// The inbox record for `id`, or a user error naming the id.
-pub fn inbox_record(spool: &Spool, id: &str) -> anyhow::Result<Record> {
-    spool
-        .get(Dir::Inbox, id)?
-        .with_context(|| format!("no inbox record {id}"))
-}
-
-/// `rec.meta` as an object. Records carry an object there (`{peer, hash}` from the daemon), but
-/// the value is stored JSON, so a stray scalar or array is replaced by an empty object rather
-/// than indexed into (OWL-004 lesson: never `IndexMut` a parsed `Value`).
-pub fn meta_object(rec: &mut Record) -> &mut Map<String, Value> {
-    if !rec.meta.is_object() {
-        rec.meta = Value::Object(Map::new());
-    }
-    match &mut rec.meta {
-        Value::Object(m) => m,
-        _ => unreachable!("meta was just set to an object"),
-    }
-}
-
-/// Finishes an inbox record: `state`, `meta.done_at` and the `extra` meta keys are set on the
-/// record, which is written atomically (temp file + rename, `Spool::put`) into `done/`; only
-/// after that succeeds is the `inbox/` file removed. Two failure shapes, both retryable by
-/// running the same command again:
-///
-/// * writing `done/` fails (destination blocked): nothing was touched, the inbox record is
-///   byte-for-byte as it was;
-/// * removing the inbox file fails (e.g. `inbox/` not writable): the finished copy sits in
-///   `done/` next to the untouched original in `inbox/`; the retry rewrites `done/` in place
-///   and removes the original.
-///
-/// Either way the error is returned, never swallowed, so the caller exits non-zero.
-pub fn finish(
-    spool: &Spool,
-    id: &str,
-    mut rec: Record,
-    state: &str,
-    extra: &[(&str, Value)],
-) -> anyhow::Result<()> {
-    rec.state = state.to_string();
-    let meta = meta_object(&mut rec);
-    meta.insert("done_at".into(), json!(envelope::rfc3339_now()));
-    for (k, v) in extra {
-        meta.insert((*k).to_string(), v.clone());
-    }
-    spool
-        .put(Dir::Done, id, &rec)
-        .with_context(|| format!("finishing record {id}"))?;
-    let src = spool.path(Dir::Inbox, id);
-    std::fs::remove_file(&src).with_context(|| format!("removing {}", src.display()))
-}
-
-/// `(answer id, recipient)` of the outbox envelope already answering question `id`, if any.
-/// `send` reuses it instead of signing a second one and `edit` refuses to change a draft that
-/// has already been shipped this way.
-pub fn existing_answer(spool: &Spool, id: &str) -> anyhow::Result<Option<(String, String)>> {
-    let found = spool.list(Dir::Outbox, |r| {
-        r.meta.get("question_id").and_then(Value::as_str) == Some(id)
-    })?;
-    let Some((aid, arec)) = found.into_iter().next() else {
-        return Ok(None);
-    };
-    let answer = payload_of(&aid, &arec)?;
-    Ok(Some((aid, answer.to)))
-}
+pub use owlpost::answer::{StoredDraft, existing_answer, finish, inbox_record, payload_of};
 
 /// Loads the merged contact book for the current directory; a missing git root is fine.
 pub fn contact_book(home: &Path) -> anyhow::Result<ContactBook> {
@@ -315,53 +192,6 @@ mod tests {
         assert_eq!(age_secs("2026-09-01T10:00:00Z", t + 90), 90);
     }
 
-    fn rec(draft: Value) -> Record {
-        Record {
-            raw: String::new(),
-            sig: String::new(),
-            state: "drafted".into(),
-            seen: false,
-            received_at: "2026-09-01T10:00:00Z".into(),
-            draft: Some(draft),
-            meta: Value::Null,
-        }
-    }
-
-    #[test]
-    fn stored_draft_round_trips_and_rejects_malformed() {
-        let d = StoredDraft {
-            text: "t".into(),
-            harness: "fake".into(),
-            redactions: 1,
-            status: "ok".into(),
-            drafted_at: "2026-09-01T10:00:00Z".into(),
-        };
-        let back = StoredDraft::from_record("x", &rec(d.to_value()))
-            .unwrap()
-            .unwrap();
-        assert_eq!(back, d);
-        assert!(
-            StoredDraft::from_record("x", &rec(Value::Null))
-                .unwrap()
-                .is_none()
-        );
-        let mut r = rec(Value::Null);
-        r.draft = None;
-        assert!(StoredDraft::from_record("x", &r).unwrap().is_none());
-        for bad in [
-            json!({"harness": "fake", "redactions": 0, "status": "ok", "drafted_at": "x"}),
-            json!({"text": "t", "harness": "fake", "redactions": "1", "status": "ok", "drafted_at": "x"}),
-            json!({"text": 5, "harness": "fake", "redactions": 0, "status": "ok", "drafted_at": "x"}),
-            json!("just a string"),
-            json!([]),
-        ] {
-            let err = StoredDraft::from_record("x", &rec(bad.clone()))
-                .unwrap_err()
-                .to_string();
-            assert!(err.contains("record x: draft is malformed"), "{bad}: {err}");
-        }
-    }
-
     #[test]
     fn exit_error_displays_message_and_downcasts() {
         let e: anyhow::Error = ExitError::new(4, "timeout").into();
@@ -406,26 +236,5 @@ mod tests {
         }
         assert_eq!(exit_code(&anyhow::anyhow!("plain")), 1);
         assert_eq!(exit_code(&user_error("user")), 1);
-    }
-
-    /// Every non-object `meta` shape becomes an empty object; an object is kept as is.
-    #[test]
-    fn meta_object_repairs_non_objects_and_keeps_objects() {
-        for bad in [
-            Value::Null,
-            json!("oops"),
-            json!([1]),
-            json!(7),
-            json!(true),
-        ] {
-            let mut r = rec(Value::Null);
-            r.meta = bad.clone();
-            meta_object(&mut r).insert("k".into(), json!(1));
-            assert_eq!(r.meta, json!({ "k": 1 }), "{bad}");
-        }
-        let mut r = rec(Value::Null);
-        r.meta = json!({ "peer": "p", "hash": "h" });
-        meta_object(&mut r).insert("k".into(), json!(1));
-        assert_eq!(r.meta, json!({ "peer": "p", "hash": "h", "k": 1 }));
     }
 }
