@@ -950,6 +950,102 @@ fn manual_draft_clears_auto_error() {
     assert_eq!(rows[0]["auto_error"], Value::Null);
 }
 
+/// After a `send` that failed once the envelope was in `outbox/`, `owl draft` is refused
+/// (exit 1, names the envelope, points to `owl send`): the harness does not run, the draft and
+/// `auto_error` are untouched, and the retry ships the spooled envelope.
+#[test]
+fn draft_refuses_when_envelope_exists() {
+    let h = Home::new();
+    let ana_fp = fp(&h.ana);
+    h.ok(&["allow", &ana_fp, "--always", "--i-verified-the-fingerprint"]);
+    let qid = h.put(&h.ana, "envelope first?", "pending");
+    let spool = Spool::new(h.path()).unwrap();
+    let blocker = spool.path(Dir::Done, &qid);
+    block_dir(&blocker);
+    let cfg = Config::load(h.path()).unwrap();
+    let out = auto::attempt(h.path(), h.cwd(), &cfg, &spool, &qid).unwrap();
+    assert!(matches!(out, Outcome::Failed(_)), "{out:?}");
+    let before = inbox(h.path(), &qid).unwrap();
+    assert_eq!(before.state, "drafted");
+    assert!(before.meta.get(AUTO_ERROR).is_some());
+    let (aid, arec) = outbox(h.path()).into_iter().next().unwrap();
+
+    let harness_log = h.path().join("harness-ran.log");
+    for args in [vec!["draft", &qid], vec!["draft", &qid, "--json"]] {
+        let out = Command::new(OWL)
+            .env_remove("OWLPOST_HOME")
+            .env("FAKE_HARNESS_LOG", &harness_log)
+            .current_dir(h.cwd())
+            .arg("--home")
+            .arg(h.path())
+            .args(&args)
+            .output()
+            .unwrap();
+        let err = String::from_utf8(out.stderr).unwrap();
+        assert_eq!(out.status.code(), Some(1), "{args:?}: {err}");
+        assert!(out.stdout.is_empty(), "{args:?} wrote to stdout");
+        assert!(err.contains(&format!("outbox/{aid}.json")), "{err}");
+        assert!(err.contains(&format!("owl send {qid}")), "{err}");
+        assert!(!harness_log.exists(), "{args:?}: the harness must not run");
+        assert_eq!(inbox(h.path(), &qid).unwrap(), before, "record untouched");
+    }
+
+    std::fs::remove_dir_all(&blocker).unwrap();
+    h.ok(&["send", &qid]);
+    assert!(inbox(h.path(), &qid).is_none());
+    assert_eq!(done(h.path(), &qid).unwrap().state, "answered");
+    let after = outbox(h.path());
+    assert_eq!(after.len(), 1);
+    assert_eq!(after[0].1, arec, "the retry ships the spooled envelope");
+    assert_eq!(log_lines(h.path()).len(), 1);
+
+    // Negative twin: a drafted record without a spooled envelope can still be re-drafted.
+    let other = h.put(&h.maciek, "re-draftable?", "pending");
+    h.ok(&["draft", &other]);
+    h.ok(&["draft", &other]);
+    assert_eq!(inbox(h.path(), &other).unwrap().state, "drafted");
+}
+
+/// The inbox note under a failed auto record names the command that actually retries it:
+/// `owl send <id>` when the signed envelope is already in `outbox/`, `owl draft <id>` otherwise.
+#[test]
+fn inbox_note_points_to_send_when_envelope_exists() {
+    let h = Home::new();
+    let ana_fp = fp(&h.ana);
+    h.ok(&["allow", &ana_fp, "--always", "--i-verified-the-fingerprint"]);
+    let spool = Spool::new(h.path()).unwrap();
+    let cfg = Config::load(h.path()).unwrap();
+
+    // Envelope present: `done/` blocked so the envelope is spooled before the failure.
+    let with = h.put(&h.ana, "with envelope?", "pending");
+    let blocker = spool.path(Dir::Done, &with);
+    block_dir(&blocker);
+    let out = auto::attempt(h.path(), h.cwd(), &cfg, &spool, &with).unwrap();
+    assert!(matches!(out, Outcome::Failed(_)), "{out:?}");
+    // No envelope: unknown-project style failure written the way `attempt` writes it.
+    let without = h.put(&h.ana, "without envelope?", "pending");
+    let mut rec = inbox(h.path(), &without).unwrap();
+    rec.meta = json!({ "peer": ana_fp, AUTO_ERROR: "draft status timeout" });
+    spool.put(Dir::Inbox, &without, &rec).unwrap();
+    assert_eq!(outbox(h.path()).len(), 1);
+
+    let listing = h.ok(&["inbox"]);
+    let note = |id: &str| {
+        listing
+            .lines()
+            .find(|l| l.starts_with(&format!("{id}: auto-accept failed")))
+            .unwrap_or_else(|| panic!("no note for {id}:\n{listing}"))
+            .to_string()
+    };
+    let n = note(&with);
+    assert!(n.contains(&format!("owl send {with} to retry")), "{n}");
+    assert!(!n.contains("owl draft"), "{n}");
+    let n = note(&without);
+    assert!(n.contains(&format!("owl draft {without} to retry")), "{n}");
+    assert!(!n.contains("owl send"), "{n}");
+    std::fs::remove_dir_all(&blocker).unwrap();
+}
+
 /// `pull_interval_secs` (non-default: 1) drives the scan, and `owl allow --always` against a
 /// *running* daemon is picked up by that scan without a restart.
 #[tokio::test]

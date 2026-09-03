@@ -696,6 +696,43 @@ mod tests {
         );
     }
 
+    /// `outbox/` unwritable: `send` fails before any envelope exists, so the record goes back
+    /// to `pending` with the draft dropped and `auto_error` set — nothing spooled, logged or
+    /// finished. (The sibling arm, envelope present → stay `drafted`, is tested above.)
+    #[test]
+    fn send_failure_before_envelope_resets_to_pending() {
+        use std::os::unix::fs::PermissionsExt;
+        let f = Fixture::new(Some(Mode::Auto), true);
+        let id = f.put("pending", peer_meta(&f));
+        let outbox = f.home.path().join("spool").join(Dir::Outbox.name());
+        let chmod = |mode: u32| {
+            std::fs::set_permissions(&outbox, std::fs::Permissions::from_mode(mode)).unwrap()
+        };
+        chmod(0o555);
+        let out = f.attempt(&id);
+        chmod(0o755);
+        let Outcome::Failed(why) = out else {
+            panic!("{out:?}");
+        };
+        assert!(why.contains("outbox"), "{why}");
+        let rec = f.inbox(&id).unwrap();
+        assert_eq!(rec.state, "pending");
+        assert!(rec.draft.is_none(), "draft dropped: {:?}", rec.draft);
+        assert_eq!(answer::auto_error(&rec), Some(why.as_str()));
+        assert!(
+            answer::auto_error(&rec).unwrap().contains("denied"),
+            "{why}"
+        );
+        assert_eq!(rec.meta["peer"], f.fp(&f.peer), "existing meta keys kept");
+        assert_eq!(f.outbox_len(), 0);
+        assert!(f.log_lines().is_empty());
+        assert!(f.spool().get(Dir::Done, &id).unwrap().is_none());
+        assert!(f.spool().list(Dir::Done, |_| true).unwrap().is_empty());
+        // Not a scan candidate until the human acts.
+        let book = ContactBook::load(f.home.path(), f.home.path()).unwrap();
+        assert!(candidates(&f.config, &book, &f.spool()).unwrap().is_empty());
+    }
+
     #[test]
     fn scheduler_claims_once() {
         let s = Scheduler::new();
