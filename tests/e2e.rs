@@ -447,11 +447,13 @@ fn manual_loop() {
     assert_eq!((rec.state.as_str(), rec.seen), ("pending", false));
     assert_eq!(rec.meta["peer"], p.b.fp());
     assert_eq!(rec.meta["in_reply_to"], qid);
+    // The inbox record lands before the ask is moved (pull.rs: store, then move + set_state),
+    // so poll for the final state rather than asserting it the instant the record exists.
+    wait_for(WAIT, "A's ask moved to done/ as answered", || {
+        state(&a_spool, Dir::Done, &qid).as_deref() == Some("answered")
+    });
     assert!(state(&a_spool, Dir::Asks, &qid).is_none());
-    assert_eq!(
-        state(&a_spool, Dir::Done, &qid).as_deref(),
-        Some("answered")
-    );
+    assert!(ids(&a_spool, Dir::Asks).is_empty());
     wait_for(WAIT, "B's outbox acked", || {
         state(&b_spool, Dir::Done, &aid).as_deref() == Some("acked")
     });
@@ -523,11 +525,15 @@ fn auto_loop() {
     // The answer reaches A with no `owl` command run against B's home; B's record went
     // straight from `pending` to done/ (`answered`, then `acked` once A's pull acks it).
     let aid = wait_for_answer(&p.a);
-    assert!(state(&b_spool, Dir::Inbox, &qid).is_none());
-    assert_eq!(
-        state(&b_spool, Dir::Done, &qid).as_deref(),
-        Some("answered")
-    );
+    // `answer::send` puts the outbox record, appends the outgoing log line, then finishes the
+    // inbox record — A can see the answer before B's own bookkeeping lands, so poll.
+    wait_for(WAIT, "B's inbox record finished as answered", || {
+        state(&b_spool, Dir::Inbox, &qid).is_none()
+            && state(&b_spool, Dir::Done, &qid).as_deref() == Some("answered")
+    });
+    wait_for(WAIT, "exactly one outgoing log line on B", || {
+        outgoing_lines(&p.b).len() == 1
+    });
     assert_eq!(
         p.b.commands.load(Ordering::SeqCst),
         0,
@@ -551,11 +557,7 @@ fn auto_loop() {
     assert!(*redactions >= 1);
 
     // B's outgoing log has exactly one line, and it is the `auto` one.
-    let lines: Vec<Value> = std::fs::read_to_string(b_spool_log(&p.b))
-        .unwrap()
-        .lines()
-        .map(|l| serde_json::from_str(l).unwrap())
-        .collect();
+    let lines = outgoing_lines(&p.b);
     assert_eq!(lines.len(), 1, "{lines:?}");
     assert_eq!(lines[0]["mode"], "auto");
     assert_eq!(lines[0]["question_id"], qid);
@@ -567,8 +569,13 @@ fn auto_loop() {
     assert!(out.contains("[redacted]") && !out.contains(SECRET), "{out}");
 }
 
-fn b_spool_log(b: &Node) -> PathBuf {
-    b.path().join(owlpost::answer::OUTGOING_LOG)
+/// Parsed lines of B's `log/outgoing.jsonl` (empty when the file does not exist yet).
+fn outgoing_lines(b: &Node) -> Vec<Value> {
+    std::fs::read_to_string(b.path().join(owlpost::answer::OUTGOING_LOG))
+        .unwrap_or_default()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect()
 }
 
 // ---------------------------------------------------------------- AC3
@@ -707,7 +714,7 @@ fn e2e_real_script_fails_fast() {
     assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
     assert!(out.stdout.is_empty());
     let err = stderr(&out);
-    assert!(err.contains("OWL_HARNESS"), "{err}");
+    assert!(err.contains("OWL_HARNESS is unset"), "{err}");
     assert!(err.contains("claude|codex|opencode"), "{err}");
 
     // OWL_HARNESS set to something outside the list: same guard, names the bad value.
@@ -715,7 +722,7 @@ fn e2e_real_script_fails_fast() {
     assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
     let err = stderr(&out);
     assert!(
-        err.contains("OWL_HARNESS") && err.contains("gemini"),
+        err.contains("OWL_HARNESS=gemini is not one of claude|codex|opencode"),
         "{err}"
     );
 
@@ -726,7 +733,10 @@ fn e2e_real_script_fails_fast() {
         assert_eq!(out.status.code(), Some(2), "{h}: {}", stderr(&out));
         assert!(out.stdout.is_empty(), "{h}: stdout {:?}", out.stdout);
         let err = stderr(&out);
-        assert!(err.contains(h) && err.contains("PATH"), "{h}: {err}");
+        assert!(
+            err.contains(&format!("harness binary '{h}' not found on PATH")),
+            "{h}: {err}"
+        );
     }
 
     // Nothing under tests/ or CI wires the script in: `cargo test` reaches it only through
