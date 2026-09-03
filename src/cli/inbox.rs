@@ -8,7 +8,9 @@
 //!
 //! Consent records get a prompt line under the table (`<name> wants to ask your agent about
 //! <project> — owl allow <fp> [--once|--always] / owl deny <fp>`); records the auto-accept
-//! scheduler failed on show their `auto_error` (§3.4).
+//! scheduler failed on show their `auto_error` (§3.4) with the command that retries them:
+//! `owl send <id>` when the signed answer already sits in `outbox/` (`owl draft` refuses
+//! then), `owl draft <id>` otherwise.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -21,7 +23,7 @@ use owlpost::spool::{Dir, Record, Spool};
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use super::{payload_of, peer_name, print_json, print_table, summary};
+use super::{existing_answer, payload_of, peer_name, print_json, print_table, summary};
 
 pub struct Opts {
     pub count: bool,
@@ -147,8 +149,13 @@ pub fn run(home: &Path, opts: Opts) -> anyhow::Result<()> {
             notes.push(consent_prompt(&book, &payload));
         }
         if let Some(e) = error {
+            let retry = if existing_answer(&spool, id)?.is_some() {
+                "send"
+            } else {
+                "draft"
+            };
             notes.push(format!(
-                "{id}: auto-accept failed ({}): {e} — owl draft {id} to retry by hand",
+                "{id}: auto-accept failed ({}): {e} — owl {retry} {id} to retry by hand",
                 peer_name(&book, &payload.from)
             ));
         }
