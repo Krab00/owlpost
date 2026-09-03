@@ -43,3 +43,6 @@ Tests-only round closed all three gaps on the first try once the fix shape was s
 
 ## OWL-010 — fresh run rounds 1–2 (2026-09-02)
 Round 1 rewrote `finish()` to write done/ atomically before unlinking inbox/ (real fix), but shipped a doc note claiming the unlink-failure arm "cannot be tested without root"; the verifier induced it with `chmod 0o555` on the inbox dir in one line, and the mutant ignoring that error survived. Round 2 added the chmod-guard tests (with guard-sabotage mutants proving the fixture is engaged) and closed a state-machine hole the reuse design opened (edit between a failed send and its retry silently dropped). Rule: any "cannot be tested without root/CI" note is a matrix row to attempt, not an exemption; and any retry/reuse path needs a test for every command allowed between failure and retry.
+
+## OWL-013 (2026-09-03)
+First task to pass round 1 outright: a data-only deliverable (JSON manifests, a shell hook, markdown) whose every AC named an exact string, so the implementer asserted byte-exact stdout and file contents and a 20-mutant sweep found only an equivalent mutant and one unpinned name. Lesson: when the AC fixes a literal, the test asserts equality, never `contains` — and any name a README depends on (marketplace id) should be pinned by a test even if no AC names it.
