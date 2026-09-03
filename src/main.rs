@@ -56,7 +56,8 @@ enum Cmd {
         #[arg(long)]
         fingerprint: Option<String>,
     },
-    /// Set policy manual (once) or auto (always)
+    /// Release held questions from a peer: policy manual (default), --once (no policy),
+    /// --always (auto; a hand-added contact needs --i-verified-the-fingerprint)
     Allow {
         peer: String,
         #[arg(long)]
@@ -66,7 +67,7 @@ enum Cmd {
         #[arg(long)]
         i_verified_the_fingerprint: bool,
     },
-    /// Set policy never
+    /// Policy never: held questions are denied, new ones get 403 unavailable
     Deny { peer: String },
     /// Send a question to a peer
     Ask(cli::ask::AskArgs),
@@ -279,6 +280,22 @@ fn main() -> ExitCode {
                 json: cli.json,
             },
         ),
+        Cmd::Allow {
+            peer,
+            once,
+            always,
+            i_verified_the_fingerprint,
+        } => cli::allow::run(
+            &home,
+            &peer,
+            cli::allow::Opts {
+                once,
+                always,
+                verified: i_verified_the_fingerprint,
+            },
+            cli.json,
+        ),
+        Cmd::Deny { peer } => cli::deny::run(&home, &peer, cli.json),
         Cmd::Show { id } => cli::show::run(&home, &id, cli.json),
         Cmd::Draft { id, harness } => cli::draft::run(&home, &id, harness.as_deref(), cli.json),
         Cmd::Edit { id } => cli::edit::run(&home, &id, cli.json),

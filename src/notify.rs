@@ -1,6 +1,6 @@
 //! OS notifications (§11): `osascript` on macOS, `notify-send` on Linux, or whatever
 //! `$OWLPOST_NOTIFY_CMD` names. The text never carries a question or answer body — only
-//! `"<peer> asks about <path>"` / `"answer from <peer>"`. Nothing here can fail: a disabled
+//! `"<peer> asks about <path>"` / `"answer from <peer>"` / `"auto-answered <peer> about <path>"`. Nothing here can fail: a disabled
 //! config, a missing binary or a spawn error all end in a silent (debug-logged) no-op.
 
 use std::path::{Path, PathBuf};
@@ -18,6 +18,8 @@ pub const TITLE: &str = "owlpost";
 pub enum Kind {
     Question,
     Answer,
+    /// The scheduler answered a question without a human (§3.4 auto).
+    AutoAnswered,
 }
 
 /// The notification text for an event — the only data that ever leaves this module.
@@ -25,6 +27,7 @@ pub fn text(kind: Kind, peer_name: &str, path: &str) -> String {
     match kind {
         Kind::Question => format!("{peer_name} asks about {path}"),
         Kind::Answer => format!("answer from {peer_name}"),
+        Kind::AutoAnswered => format!("auto-answered {peer_name} about {path}"),
     }
 }
 
@@ -175,6 +178,10 @@ mod tests {
         assert_eq!(
             text(Kind::Answer, "Maciek", "src/auth.rs"),
             "answer from Maciek"
+        );
+        assert_eq!(
+            text(Kind::AutoAnswered, "Maciek", "src/auth.rs"),
+            "auto-answered Maciek about src/auth.rs"
         );
     }
 

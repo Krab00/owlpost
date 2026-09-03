@@ -1,5 +1,6 @@
-//! `owl draft <id> [--harness <name>]`: run the OWL-009 runner, store the draft on the inbox
-//! record (state `drafted`), print it with a redaction summary (§3.4, §10).
+//! `owl draft <id> [--harness <name>]`: run the OWL-009 runner through the shared
+//! `owlpost::answer::draft`, store the draft on the inbox record (state `drafted`), print it
+//! with a redaction summary (§3.4, §10).
 //!
 //! State gate (§8): `pending` and `drafted` (re-draft) are accepted; `consent` is refused
 //! with a pointer to `owl allow`; anything else is refused. Runner status `timeout` /
@@ -8,9 +9,10 @@
 
 use std::path::Path;
 
+use owlpost::answer;
 use owlpost::config::Config;
-use owlpost::envelope::{Body, Kind};
-use owlpost::runner::{self, DraftStatus};
+use owlpost::envelope::Kind;
+use owlpost::runner::DraftStatus;
 use owlpost::spool::{Dir, Spool};
 use serde_json::json;
 
@@ -40,25 +42,16 @@ pub fn run(home: &Path, id: &str, harness: Option<&str>, json: bool) -> anyhow::
             )));
         }
     }
-    let Body::Question {
-        project,
-        path,
-        question,
-    } = &payload.body
-    else {
-        return Err(user_error(format!("record {id} has no question body")));
-    };
-    let draft = runner::draft(&config, home, harness, project, path, question)?;
+    let (rec, draft) = answer::draft(&config, home, id, rec, harness)?;
     let stored = StoredDraft::from_runner(&draft);
-    let mut rec = rec;
-    rec.draft = Some(stored.to_value());
-    rec.state = "drafted".into();
     spool.put(Dir::Inbox, id, &rec)?;
 
     if json {
-        let mut v = stored.to_value();
-        v["id"] = json!(id);
-        v["state"] = json!("drafted");
+        let mut v = rec.draft.clone().unwrap_or_default();
+        if let Some(obj) = v.as_object_mut() {
+            obj.insert("id".into(), json!(id));
+            obj.insert("state".into(), json!("drafted"));
+        }
         print_json(&v)?;
     } else {
         println!("{}", stored.text);
