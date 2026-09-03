@@ -1,5 +1,5 @@
-//! Daemon run loop: the mTLS listener and the pull loop (`crate::pull`) as sibling tasks, plus
-//! the hook where the auto-accept scheduler plugs in later.
+//! Daemon run loop: the mTLS listener, the pull loop (`crate::pull`) and the auto-accept scan
+//! (`crate::auto`) as sibling tasks; the event consumer notifies and triggers auto-accept.
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -28,6 +28,8 @@ pub struct Running {
     task: JoinHandle<std::io::Result<()>>,
     /// The pull loop; aborted on `shutdown` / `wait`.
     pull: JoinHandle<()>,
+    /// The auto-accept scan; aborted with the pull loop.
+    auto: JoinHandle<()>,
 }
 
 impl std::fmt::Debug for Running {
@@ -41,6 +43,7 @@ impl Running {
     pub fn shutdown(&self) {
         self.handle.shutdown();
         self.pull.abort();
+        self.auto.abort();
     }
 
     /// Waits for the listener task to end (after `shutdown`, or on a listener error); the pull
@@ -48,6 +51,7 @@ impl Running {
     pub async fn wait(self) -> anyhow::Result<()> {
         let result = self.task.await.context("listener task");
         self.pull.abort();
+        self.auto.abort();
         result??;
         Ok(())
     }
@@ -78,8 +82,8 @@ pub async fn spawn(home: &Path, config: Config) -> anyhow::Result<Running> {
         .with_context(|| format!("config.listen {:?} is not host:port", config.listen))?;
     let tls_config = tls::server_config(&identity, allowed_keys(&book), true)?;
 
-    // ponytail: auto-accept scheduler (OWL-008) joins this consumer; today it notifies only.
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<DaemonEvent>();
+    let scheduler = crate::auto::Scheduler::new();
     let state = Arc::new(AppState::new(
         home.to_path_buf(),
         cwd,
@@ -88,8 +92,14 @@ pub async fn spawn(home: &Path, config: Config) -> anyhow::Result<Running> {
         Some(tx),
     )?);
     let events_state = state.clone();
+    let events_scheduler = scheduler.clone();
     tokio::spawn(async move {
         while let Some(ev) = rx.recv().await {
+            if let DaemonEvent::Question(q) = &ev
+                && q.auto
+            {
+                events_scheduler.spawn(events_state.clone(), q.id.clone());
+            }
             handle_event(&events_state, ev);
         }
     });
@@ -111,12 +121,14 @@ pub async fn spawn(home: &Path, config: Config) -> anyhow::Result<Running> {
     let _ = state.bound.set(addr);
     tracing::info!(%addr, fingerprint = %state.fingerprint(), "listening");
     let pull = tokio::spawn(crate::pull::run_loop(state.clone()));
+    let auto = tokio::spawn(scheduler.run_scan(state.clone()));
     Ok(Running {
         addr,
         state,
         handle,
         task,
         pull,
+        auto,
     })
 }
 
@@ -197,7 +209,6 @@ pub async fn run_foreground(home: &Path, config: Config) -> anyhow::Result<()> {
     let running = spawn(home, config).await?;
     write_addr_file(home, running.addr)?;
     tracing::info!(path = %home.join(ADDR_FILE).display(), "wrote daemon.addr");
-    // ponytail: the spool scan (OWL-011) joins the listener and the pull loop as a sibling task.
     running.wait().await
 }
 
