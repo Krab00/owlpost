@@ -295,6 +295,26 @@ Answer in at most 300 words.
 Rules: automated tests never call a real harness; every network test binds port 0; every test
 uses its own home; `cargo test` must pass offline.
 
+`tests/e2e.rs` runs both peers as real `owl daemon --foreground` subprocesses (each with its
+own `OWLPOST_NOTIFY_CMD` logging script, so notifications are asserted per side) from a
+fixture git repo whose `.agents/peers/` holds both peer files; every `owl` command runs from
+that repo, so contact resolution goes through the repo provider like a user's shell.
+
+Running the manual loop against a real harness:
+
+```
+cargo build
+OWL_HARNESS=claude scripts/e2e-real.sh      # or codex | opencode
+```
+
+The script refuses to start (exit 2) when `OWL_HARNESS` is unset or not one of the three, or
+when that binary is not on `PATH`; it needs `git`. It creates two temp homes and a throwaway
+repo under `mktemp -d` (kept when `OWL_E2E_KEEP` is set), uses `target/debug/owl` (override
+with `OWL_BIN`), prints each step, and saves daemon and command logs under
+`target/e2e-real/<timestamp>/`. The final `owl show` output is the real harness's answer; a
+good run names the throwaway repo's file. CI never runs it and `tests/e2e.rs` only exercises
+its guards with a harness that cannot be found.
+
 Local harness versions available for the manual run: Claude Code 2.1.257 (`claude -p
 --allowed-tools`), Codex CLI 0.145.0 (`codex exec --sandbox read-only --json`), opencode 1.18.18
 (`opencode run --format json --agent <name>`; the `owl-readonly` agent definition with
