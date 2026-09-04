@@ -7,7 +7,7 @@ The Claude Code harness adapter for owlpost (`docs/concept.md` "Harness adapters
 |---|---|---|
 | Hooks | `hooks/hooks.json`, `hooks/owl-count.sh` | On `SessionStart`, `UserPromptSubmit` and `PostToolUse` runs `owl inbox --count --format claude` (5 s timeout) and injects the unseen-question counter line. Silent no-op when `owl` is missing or fails. |
 | Skill | `skills/owlpost/SKILL.md` | When to ask a peer, how to run `owl ask`, how to react to the counter, the answer loop, the memory rule. |
-| Commands | `commands/inbox.md`, `commands/ask.md`, `commands/history.md` | `/owlpost:inbox`, `/owlpost:ask <peer> <path> <question>`, `/owlpost:history`. |
+| Commands | `commands/inbox.md`, `commands/ask.md`, `commands/history.md`, `commands/me.md` | `/owlpost:inbox`, `/owlpost:ask <peer> <path> <question>`, `/owlpost:history`, `/owlpost:me`. |
 | Manifests | `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json` | Plugin metadata; a one-plugin marketplace so the directory can be added from a local path. |
 
 ## Requirements
