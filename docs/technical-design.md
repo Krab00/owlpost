@@ -283,6 +283,20 @@ Answer in at most 300 words.
 - `owl install` writes the launchd plist / systemd unit running `owl daemon` with the current
   home, loads it, and prints the status. `--dry-run` prints the unit instead.
 
+Release and install (OWL-015): `.github/workflows/release.yml` runs on a `v*` tag (the tag must
+equal the Cargo.toml version) and on `workflow_dispatch` as a dry run. It builds `owl` for
+`aarch64-apple-darwin`, `x86_64-apple-darwin` (native on the macOS runner) and
+`x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu` (`cargo-zigbuild`, glibc floor 2.17),
+packs each as `owl-<version>-<target>.tar.gz` holding the single file `owl`, writes `SHA256SUMS`
+over the four, and attaches all five to the GitHub release only on the tag. `scripts/install.sh`
+picks the target from `uname`, downloads tarball + `SHA256SUMS` from
+`https://github.com/Krab00/owlpost/releases/download/<tag>/` (or `.../releases/latest/download/`
+without `--version`, reading the version from the asset name in `SHA256SUMS`), verifies the
+sum, installs to `~/.local/bin` (`--prefix`, `--system`) and prints `owl init`, `owl install`,
+`owl contact export`. Test hooks: `OWL_INSTALL_BASE_URL` (a `file://` dir in `tests/install_sh.rs`
+serves the test binary offline), `OWL_INSTALL_FAKE_SUM=1` (forces the checksum mismatch path),
+`OWL_INSTALL_OS`/`OWL_INSTALL_ARCH` (platform guard), `OWL_INSTALL_CURL` (missing-curl guard).
+
 ## 12. Testing strategy
 
 | Layer | How | Real LLM? |
