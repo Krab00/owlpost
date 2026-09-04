@@ -49,6 +49,7 @@ fn help_lists_all_subcommands() {
         "install",
         "uninstall",
         "doctor",
+        "update",
     ];
     assert_eq!(listed, expected, "help:\n{help}");
     for flag in ["--home", "--json", "--quiet"] {
@@ -687,4 +688,19 @@ fn contact_list_rows_follow_filename_order() {
             ["Adam", fp2.as_str(), "repo", "-"]
         ]
     );
+}
+
+#[test]
+fn update_dry_run_lists_steps() {
+    let out = owl()
+        .args(["update", "--dry-run", "--source", "/repo"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("cargo install --path /repo --locked"), "{s}");
+    assert!(s.contains("owl uninstall && owl install"), "{s}");
+    let out = owl().args(["update", "--dry-run"]).output().unwrap();
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("install.sh | sh"), "{s}");
 }

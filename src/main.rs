@@ -127,6 +127,14 @@ enum Cmd {
     Uninstall,
     /// Check key, config, endpoints, harnesses, daemon
     Doctor,
+    /// Update the owl binary, restart the daemon, reinstall the Claude Code plugin
+    Update {
+        /// Build from this checkout with `cargo install` instead of downloading a release
+        #[arg(long)]
+        source: Option<PathBuf>,
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -309,6 +317,9 @@ fn main() -> ExitCode {
         Cmd::Install { dry_run } => cli::install::install(&home, dry_run),
         Cmd::Uninstall => cli::install::uninstall(),
         Cmd::Doctor => cli::doctor::run(&home, cli.json),
+        Cmd::Update { source, dry_run } => {
+            cli::update::run_update(&home, source.as_deref(), dry_run)
+        }
         _ => Err(anyhow::anyhow!("not implemented yet")),
     };
     match result {

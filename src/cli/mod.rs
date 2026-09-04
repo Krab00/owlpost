@@ -14,6 +14,7 @@ pub mod install;
 pub mod reject;
 pub mod send;
 pub mod show;
+pub mod update;
 pub mod watch;
 
 use std::path::Path;
