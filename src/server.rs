@@ -1030,17 +1030,22 @@ mod tests {
                 "{bad}"
             );
         }
-        // Owner, good path, but the daemon cannot reach the peer: 502 naming why.
-        assert_eq!(
-            call(
-                router(state.clone()),
-                PeerId(Some(owner_fp.clone())),
-                "GET",
-                "/v1/local/owl:nobody/v1/outbox"
-            )
-            .await,
-            (502, "iroh: unknown contact owl:nobody".into())
-        );
+        // Owner, good path, but the daemon cannot reach the peer: 502 naming why. A prefix
+        // or superstring of a known fingerprint is unknown too (exact match only).
+        let prefix = &peer_fp[..peer_fp.len() - 3];
+        for unknown in ["owl:nobody", prefix, &format!("{peer_fp}xyz")] {
+            assert_eq!(
+                call(
+                    router(state.clone()),
+                    PeerId(Some(owner_fp.clone())),
+                    "GET",
+                    &format!("/v1/local/{unknown}/v1/outbox")
+                )
+                .await,
+                (502, format!("iroh: unknown contact {unknown}")),
+                "{unknown}"
+            );
+        }
         assert_eq!(
             call(
                 router(state.clone()),

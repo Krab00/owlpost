@@ -54,12 +54,17 @@ fn ok(o: &Output) -> String {
     stdout(o)
 }
 
-/// `owl ask Bea <PATH> <QUESTION> --project <PROJECT>` from the asker's home.
-fn ask(home: &Path) -> Output {
+/// `owl ask Bea <PATH> <q> --project <PROJECT> <extra…>` from the asker's home.
+fn ask_q(home: &Path, q: &str, extra: &[&str]) -> Output {
     owl(home)
-        .args(["ask", "Bea", PATH, QUESTION, "--project", PROJECT])
+        .args(["ask", "Bea", PATH, q, "--project", PROJECT])
+        .args(extra)
         .output()
         .unwrap()
+}
+
+fn ask(home: &Path) -> Output {
+    ask_q(home, QUESTION, &[])
 }
 
 fn accepted_id(out: &Output) -> String {
@@ -95,12 +100,17 @@ fn relay_config(url: &str) -> impl FnOnce(&mut Config) + '_ {
     move |cfg| cfg.relay_urls = Some(vec![url.to_string()])
 }
 
-/// B: responder with the fake harness and `projects[PROJECT]` mapped to a temp checkout;
-/// Ana in the book without a policy (questions are held for consent).
-async fn spawn_responder(relay_url: Option<&str>, a: &Identity, checkout: &Path) -> TestDaemon {
+/// B: responder (when `enabled`) with the fake harness and `projects[PROJECT]` mapped to a
+/// temp checkout; `peers` is its contact book.
+async fn spawn_responder_with(
+    relay_url: Option<&str>,
+    peers: &[Peer<'_>],
+    checkout: &Path,
+    enabled: bool,
+) -> TestDaemon {
     let checkout = checkout.to_string_lossy().into_owned();
-    spawn_daemon_with(2, &[Peer::new(a, "Ana", None)], |cfg| {
-        cfg.responder.enabled = true;
+    spawn_daemon_with(2, peers, |cfg| {
+        cfg.responder.enabled = enabled;
         cfg.responder.harness = "fake".into();
         cfg.harnesses.insert(
             "fake".into(),
@@ -119,13 +129,24 @@ async fn spawn_responder(relay_url: Option<&str>, a: &Identity, checkout: &Path)
     .await
 }
 
-/// A: asker daemon (pull every second) with Bea in the book at `endpoints`, and
+/// `spawn_responder_with` for the common case: enabled, Ana in the book without a policy
+/// (questions are held for consent).
+async fn spawn_responder(relay_url: Option<&str>, a: &Identity, checkout: &Path) -> TestDaemon {
+    spawn_responder_with(relay_url, &[Peer::new(a, "Ana", None)], checkout, true).await
+}
+
+/// A: asker daemon (pull every `pull_secs`) with Bea in the book at `endpoints`, and
 /// `daemon.addr` written so `owl ask` finds the forward route.
-async fn spawn_asker(relay_url: Option<&str>, b: &Identity, endpoints: &[&str]) -> TestDaemon {
+async fn spawn_asker_with(
+    relay_url: Option<&str>,
+    b: &Identity,
+    endpoints: &[&str],
+    pull_secs: u64,
+) -> TestDaemon {
     let d = spawn_daemon_with(1, &[], |cfg| {
         cfg.name = "Ana".into();
         cfg.responder.enabled = false;
-        cfg.pull_interval_secs = 1;
+        cfg.pull_interval_secs = pull_secs;
         cfg.relay_urls = Some(relay_url.into_iter().map(String::from).collect());
     })
     .await;
@@ -137,6 +158,11 @@ async fn spawn_asker(relay_url: Option<&str>, b: &Identity, endpoints: &[&str]) 
     );
     daemon::write_addr_file(d.home(), d.addr).unwrap();
     d
+}
+
+/// `spawn_asker_with` pulling every second.
+async fn spawn_asker(relay_url: Option<&str>, b: &Identity, endpoints: &[&str]) -> TestDaemon {
+    spawn_asker_with(relay_url, b, endpoints, 1).await
 }
 
 /// One request from `from`'s own test endpoint to daemon `to` over iroh.
@@ -237,10 +263,6 @@ async fn question_and_answer_over_iroh() {
         .and_then(|l| l.split_whitespace().next())
         .unwrap_or_else(|| panic!("send stdout {out:?}"))
         .to_string();
-    assert_eq!(
-        state(&b_spool, Dir::Outbox, &aid).as_deref(),
-        Some("unacked")
-    );
 
     // A's daemon pulls the answer over iroh, stores it, acks it; B moves it to done/.
     wait_for("the answer in A's inbox", || {
@@ -250,8 +272,9 @@ async fn question_and_answer_over_iroh() {
         state(&a_spool, Dir::Done, &qid).as_deref() == Some("answered")
     });
     wait_for("B's outbox entry acked into done", || {
-        state(&b_spool, Dir::Outbox, &aid).is_none() && state(&b_spool, Dir::Done, &aid).is_some()
+        state(&b_spool, Dir::Done, &aid).as_deref() == Some("acked")
     });
+    assert!(state(&b_spool, Dir::Outbox, &aid).is_none());
     let rec = a_spool
         .get(Dir::Inbox, &aid)
         .unwrap()
@@ -539,9 +562,12 @@ async fn iroh_first_then_endpoints() {
     assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
     let err = stderr(&out);
     let err = err.trim();
-    let prefix = "owl: offline: no endpoint of Bea reachable (iroh: ";
-    assert!(err.starts_with(prefix), "{err}");
-    assert!(err.contains(&format!("; {port}: ")), "{err}");
+    // Same wording as before iroh, with the iroh reason (no relay → the peer has no
+    // address) first and the endpoint's reason second.
+    let prefix = format!(
+        "owl: offline: no endpoint of Bea reachable (iroh: dial: No addressing information available; {port}: "
+    );
+    assert_eq!(&err[..prefix.len().min(err.len())], prefix, "{err}");
     assert!(err.ends_with(')'), "{err}");
     assert!(stdout(&out).is_empty());
     for dir in Dir::ALL {
@@ -552,4 +578,136 @@ async fn iroh_first_then_endpoints() {
         );
     }
     a.running.shutdown();
+}
+
+/// `owl ask --wait` over iroh: the CLI's own `fetch_outbox` + `ack` go through the forward
+/// route (`Iroh::ViaDaemon`); the asker daemon's pull loop is parked (1 h) so only the CLI
+/// polls, and the decoy endpoint proves nothing went over HTTPS.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn wait_over_iroh_via_daemon() {
+    let (relay_url, _relay) = relay().await;
+    let checkout = tempfile::tempdir().unwrap();
+    std::fs::write(checkout.path().join("README.md"), "fixture\n").unwrap();
+    let (a_id, b_id) = (id(1), id(2));
+    let decoy = Decoy::bind();
+    let b = spawn_responder(Some(&relay_url), &a_id, checkout.path()).await;
+    let a = spawn_asker_with(Some(&relay_url), &b_id, &[&decoy.addr().to_string()], 3600).await;
+    wait_online(&a).await;
+    wait_online(&b).await;
+    let (a_spool, b_spool) = (a.spool(), b.spool());
+    let b_home = b.home().to_path_buf();
+    let answerer = std::thread::spawn(move || {
+        let spool = Spool::new(&b_home).unwrap();
+        let start = Instant::now();
+        let qid = loop {
+            if let Some((qid, rec)) = spool.list(Dir::Inbox, |_| true).unwrap().into_iter().next()
+                && rec.state == "consent"
+            {
+                break qid;
+            }
+            assert!(start.elapsed() < WAIT, "no question reached B");
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        ok(&owl(&b_home)
+            .args(["allow", "Ana", "--once"])
+            .output()
+            .unwrap());
+        ok(&owl(&b_home)
+            .args(["draft", &qid, "--harness", "fake"])
+            .output()
+            .unwrap());
+        let out = ok(&owl(&b_home).args(["send", &qid]).output().unwrap());
+        let aid = out
+            .lines()
+            .find_map(|l| l.strip_prefix("sent "))
+            .and_then(|l| l.split_whitespace().next())
+            .unwrap()
+            .to_string();
+        (qid, aid)
+    });
+    let out = ask_q(a.home(), QUESTION, &["--wait", "20"]);
+    let (qid, aid) = answerer.join().unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(stdout(&out).contains("retry policy"), "{}", stdout(&out));
+    assert!(
+        stderr(&out).contains(&format!("accepted {qid}")),
+        "{}",
+        stderr(&out)
+    );
+    assert!(!stderr(&out).contains("warning"), "{}", stderr(&out));
+    assert_eq!(
+        state(&a_spool, Dir::Done, &qid).as_deref(),
+        Some("answered")
+    );
+    assert!(state(&a_spool, Dir::Inbox, &aid).is_some());
+    wait_for("B's outbox acked into done", || {
+        state(&b_spool, Dir::Done, &aid).as_deref() == Some("acked")
+    });
+    assert!(state(&b_spool, Dir::Outbox, &aid).is_none());
+    assert_eq!(decoy.attempts(), 0, "HTTPS endpoint never dialed");
+    a.running.shutdown();
+    b.running.shutdown();
+}
+
+/// The peer's own `429` / `403` through the forward route are final: the same exit codes
+/// and wording as over HTTPS, and no fallback to the (decoy) endpoint. Only a `502` from
+/// the forward route means "try `endpoints`".
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn peer_status_via_forward_is_final() {
+    let (relay_url, _relay) = relay().await;
+    let checkout = tempfile::tempdir().unwrap();
+    let (a_id, b_id) = (id(1), id(2));
+    let decoy = Decoy::bind();
+    let b = spawn_responder_with(
+        Some(&relay_url),
+        &[Peer::new(&a_id, "Ana", Some(policy(Mode::Manual, Some(1))))],
+        checkout.path(),
+        true,
+    )
+    .await;
+    let a = spawn_asker_with(Some(&relay_url), &b_id, &[&decoy.addr().to_string()], 3600).await;
+    wait_online(&a).await;
+    wait_online(&b).await;
+    let first = accepted_id(&ask_q(a.home(), QUESTION, &[]));
+    let out = ask_q(a.home(), "Second question?", &[]);
+    assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
+    let err = stderr(&out);
+    assert!(
+        err.trim().starts_with("owl: rate limited, retry after "),
+        "{err}"
+    );
+    assert!(err.trim().ends_with('s'), "{err}");
+    let secs: u64 = err
+        .split("retry after ")
+        .nth(1)
+        .and_then(|s| s.trim_end().strip_suffix('s'))
+        .and_then(|s| s.parse().ok())
+        .unwrap();
+    assert!((1..=3600).contains(&secs), "{secs}");
+    assert_eq!(ids(&a.spool(), Dir::Asks), [first]);
+    assert_eq!(decoy.attempts(), 0, "429 over iroh is final: no HTTPS dial");
+    a.running.shutdown();
+    b.running.shutdown();
+
+    // Responder disabled → 403 → `unavailable`, still no fallback.
+    let decoy = Decoy::bind();
+    let b = spawn_responder_with(
+        Some(&relay_url),
+        &[Peer::new(&a_id, "Ana", None)],
+        checkout.path(),
+        false,
+    )
+    .await;
+    let a = spawn_asker_with(Some(&relay_url), &b_id, &[&decoy.addr().to_string()], 3600).await;
+    wait_online(&a).await;
+    wait_online(&b).await;
+    let out = ask_q(a.home(), QUESTION, &[]);
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert_eq!(
+        stderr(&out).trim(),
+        "owl: unavailable: Bea does not answer questions (policy never or responder disabled)"
+    );
+    assert_eq!(decoy.attempts(), 0, "403 over iroh is final: no HTTPS dial");
+    a.running.shutdown();
+    b.running.shutdown();
 }
