@@ -87,6 +87,7 @@ the ask → allow → draft → send → pull loop; `e2e-real.sh` runs it with `
 | OWL-018 | `owl ask` without a path: repo-level questions, `path` optional in the envelope, runner prompt, listings and `/owlpost:ask` |
 | OWL-019 | Contact scopes named global (user book) / local (`.agents/peers/`); `owl add <peer-file> [--local]` implemented, `owl contact list --global\|--local`, `owl contact remove` |
 | OWL-020 | `/owlpost:contacts`: pick a recipient from the contact list in Claude Code (AskUserQuestion), then continue into the ask flow |
+| OWL-021 | Every `owl` subcommand (except `daemon`) reachable as `/owlpost:<command>`; thin wrappers, confirmation before send/allow/deny/reject/uninstall, parity test against `owl --help` |
 
 ## Pilot (after M3)
 
