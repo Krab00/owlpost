@@ -24,7 +24,7 @@ fn binary_cmd(source: Option<&Path>) -> Vec<String> {
         None => vec![
             "sh".into(),
             "-c".into(),
-            format!("curl -fsSL {INSTALL_SH} | sh"),
+            format!("f=$(mktemp) && curl -fsSL {INSTALL_SH} -o \"$f\" && sh \"$f\""),
         ],
     }
 }
