@@ -355,6 +355,19 @@ async fn unknown_key_is_refused() {
         .unwrap();
     assert_eq!(reply.status, 200);
     assert_eq!(reply.body.as_ref(), b"[]");
+    // The owner-only forward route is not mounted on the iroh listener: 404 for any key.
+    let reply = request(
+        &a,
+        &b,
+        &relay_url,
+        Method::GET,
+        &format!("/v1/local/{}/v1/outbox", fp(&a_id)),
+        vec![],
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(error_of(&reply), (404, "not found".to_string()));
     c.close().await;
     a.close().await;
     b.running.shutdown();
