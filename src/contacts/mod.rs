@@ -1,10 +1,13 @@
-//! Contact book: repo provider + local provider merged, policy overlay, lookup.
-//! See docs/technical-design.md §5.
+//! Contact book: the two scopes merged, policy overlay, lookup. See docs/technical-design.md §5.
+//!
+//! Scope names follow the user's view: **global** = `$OWLPOST_HOME/contacts/` (this machine,
+//! every repo; module [`local`]), **local** = `<git root>/.agents/peers/` (this repository,
+//! shared via PR; module [`repo`]).
 
 pub mod local;
 pub mod repo;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, bail};
@@ -22,7 +25,8 @@ pub struct Contact {
     pub pubkey: String,
     #[serde(default)]
     pub endpoints: Vec<String>,
-    /// `"repo"` or `"local"`; set by the provider, not trusted from the file.
+    /// `"global"` (`$OWLPOST_HOME/contacts/`) or `"local"` (`.agents/peers/`); set by the
+    /// provider, not trusted from the file.
     #[serde(default)]
     pub source: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -92,6 +96,11 @@ fn parse(path: &Path, source: &str) -> anyhow::Result<Contact> {
 
 /// Load every `*.json` in `dir`; malformed files are skipped with a warning on stderr.
 fn load_dir(dir: &Path, source: &str) -> Vec<Contact> {
+    load_dir_paths(dir, source).into_iter().map(|(_, c)| c).collect()
+}
+
+/// [`load_dir`] keeping each contact's file path (for `owl contact remove`).
+fn load_dir_paths(dir: &Path, source: &str) -> Vec<(PathBuf, Contact)> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
@@ -104,7 +113,7 @@ fn load_dir(dir: &Path, source: &str) -> Vec<Contact> {
     let mut out = Vec::new();
     for p in paths {
         match parse(&p, source) {
-            Ok(c) => out.push(c),
+            Ok(c) => out.push((p, c)),
             Err(e) => eprintln!("owl: warning: skipping {}: {e:#}", p.display()),
         }
     }
@@ -117,8 +126,8 @@ pub struct ContactBook {
 }
 
 impl ContactBook {
-    /// Repo contacts first (from the git root above `cwd`), then local ones. A local file whose
-    /// pubkey matches a repo contact contributes only its `policy`.
+    /// Local (repo) contacts first (from the git root above `cwd`), then global ones. A global
+    /// file whose pubkey matches a local contact contributes only its `policy`.
     pub fn load(home: &Path, cwd: &Path) -> anyhow::Result<ContactBook> {
         let mut contacts = repo::find_git_root(cwd)
             .map(|r| repo::load(&r))
@@ -130,6 +139,35 @@ impl ContactBook {
             }
         }
         Ok(ContactBook { contacts })
+    }
+
+    /// The merged book restricted to contacts whose `source` is `scope` (`"global"` or
+    /// `"local"`); a policy overlay stays with the contact it belongs to.
+    pub fn load_scope(home: &Path, cwd: &Path, scope: &str) -> anyhow::Result<ContactBook> {
+        let mut book = ContactBook::load(home, cwd)?;
+        book.contacts.retain(|c| c.source == scope);
+        Ok(book)
+    }
+
+    /// The files of one scope with the contact each holds: `global` = `$home/contacts/`
+    /// minus the policy overlays of local contacts; `local` = `.agents/peers/` of the git
+    /// root above `cwd` (`Err` when there is none).
+    pub fn scope_files(
+        home: &Path,
+        cwd: &Path,
+        scope: &str,
+    ) -> anyhow::Result<Vec<(PathBuf, Contact)>> {
+        if scope == "local" {
+            let root = repo::find_git_root(cwd)
+                .with_context(|| format!("{} is not inside a git repository", cwd.display()))?;
+            return Ok(load_dir_paths(&repo::peers_dir(&root), "local"));
+        }
+        let local: Vec<Contact> = repo::find_git_root(cwd)
+            .map(|r| repo::load(&r))
+            .unwrap_or_default();
+        let mut files = load_dir_paths(&local::dir(home), "global");
+        files.retain(|(_, c)| !local.iter().any(|l| l.pubkey == c.pubkey));
+        Ok(files)
     }
 
     /// Exact fingerprint → exact email → unique case-insensitive name prefix.
@@ -167,7 +205,7 @@ impl ContactBook {
             .and_then(|c| c.policy.as_ref())
     }
 
-    /// Write/update the overlay `$home/contacts/<fingerprint>.json`. For a repo-sourced contact
+    /// Write/update the overlay `$home/contacts/<fingerprint>.json`. For a local (repo) contact
     /// the file holds only pubkey + policy (+ source/added_at); an existing file keeps its fields.
     pub fn set_policy(
         &mut self,
@@ -186,9 +224,9 @@ impl ContactBook {
         let mut v: serde_json::Value = match std::fs::read(&path) {
             Ok(bytes) => serde_json::from_slice(&bytes)
                 .with_context(|| format!("parsing {}", path.display()))?,
-            Err(_) if contact.source == "repo" => serde_json::json!({
+            Err(_) if contact.source == "local" => serde_json::json!({
                 "pubkey": contact.pubkey,
-                "source": "local",
+                "source": "global",
                 "added_at": rfc3339(now_secs()),
             }),
             Err(_) => {
