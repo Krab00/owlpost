@@ -128,9 +128,31 @@ pub fn summary(id: &str, rec: &Record, payload: &Payload, book: &ContactBook, no
     })
 }
 
+/// ANSI colour per row when stdout is a terminal and `NO_COLOR` is unset: questions yellow,
+/// answers green, unseen rows bold. Empty string = no colour.
+pub fn row_style(kind: &str, seen: bool) -> &'static str {
+    use std::io::IsTerminal;
+    if !std::io::stdout().is_terminal() || std::env::var_os("NO_COLOR").is_some() {
+        return "";
+    }
+    match (kind, seen) {
+        ("question", false) => "\x1b[1;33m",
+        ("question", true) => "\x1b[33m",
+        ("answer", false) => "\x1b[1;32m",
+        ("answer", true) => "\x1b[32m",
+        _ => "",
+    }
+}
+
 /// A plain-text table: header from `cols`, rows from `rows`, each column padded to its widest
 /// cell. Nothing is printed for an empty `rows`.
 pub fn print_table(cols: &[&str], rows: &[Vec<String>]) {
+    print_table_styled(cols, rows, &[]);
+}
+
+/// `print_table` with an optional ANSI prefix per row (see [`row_style`]); padding is computed
+/// on the plain cells so escapes never shift columns.
+pub fn print_table_styled(cols: &[&str], rows: &[Vec<String>], styles: &[&str]) {
     if rows.is_empty() {
         return;
     }
@@ -143,7 +165,7 @@ pub fn print_table(cols: &[&str], rows: &[Vec<String>]) {
                 .unwrap_or(0)
         })
         .collect();
-    let line = |cells: Vec<&str>| {
+    let line = |cells: Vec<&str>, style: &str| {
         let mut s = String::new();
         for (i, c) in cells.iter().enumerate() {
             if i + 1 == cells.len() {
@@ -152,11 +174,18 @@ pub fn print_table(cols: &[&str], rows: &[Vec<String>]) {
                 s.push_str(&format!("{:<w$}  ", c, w = widths[i]));
             }
         }
-        println!("{}", s.trim_end());
+        if style.is_empty() {
+            println!("{}", s.trim_end());
+        } else {
+            println!("{style}{}\x1b[0m", s.trim_end());
+        }
     };
-    line(cols.to_vec());
-    for r in rows {
-        line(r.iter().map(String::as_str).collect());
+    line(cols.to_vec(), "");
+    for (i, r) in rows.iter().enumerate() {
+        line(
+            r.iter().map(String::as_str).collect(),
+            styles.get(i).copied().unwrap_or(""),
+        );
     }
 }
 

@@ -37,7 +37,7 @@ const QUESTION: &str = "Where is the retry policy defined?";
 /// default `responder.redact` patterns must scrub it before the answer leaves B.
 const SECRET: &str = "sk-test-123456";
 /// §9 hook injection for exactly one unseen inbox record from Bea.
-const CLAUDE_ONE: &str = r#"{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"owlpost: 1 new question (Bea 1). Say \"show owlpost inbox\" or run `owl inbox`."}}"#;
+const CLAUDE_ONE: &str = r#"{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"owlpost: 1 new answer (Bea 1). Say \"show owlpost inbox\" or run `owl inbox`."}}"#;
 /// Bound for every wait in the loop; the whole `manual_loop` must stay under 60 s (AC1).
 const WAIT: Duration = Duration::from_secs(15);
 
