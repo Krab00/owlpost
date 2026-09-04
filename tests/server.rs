@@ -463,11 +463,11 @@ async fn bad_inputs_are_4xx_never_500() {
             })),
             "missing body.project",
         ),
+        // OWL-018: a missing path is a valid repo-level question (asserted below); a
+        // non-string path is still rejected.
         (
-            shape(with(&|v| {
-                v["body"].as_object_mut().unwrap().remove("path");
-            })),
-            "missing body.path",
+            shape(with(&|v| v["body"]["path"] = json!(["f"]))),
+            "bad schema: data did not match any variant of untagged enum Body",
         ),
         (
             shape(with(&|v| v["type"] = json!("answer"))),
@@ -497,8 +497,25 @@ async fn bad_inputs_are_4xx_never_500() {
         let resp = post_raw(&cl, &b, body.clone(), Some(&sig_over(&a, &body))).await;
         assert_error(resp, 400, err).await;
     }
-    // Only the two accepted questions ever reached the spool.
-    assert_eq!(inbox_ids(&b).len(), 2);
+    // OWL-018: no `body.path` at all is a valid repo-level question and is spooled as such.
+    let mut no_path = base.clone();
+    no_path["id"] = json!("0191c7a0-0000-7000-8000-00000000d0d0");
+    no_path["body"].as_object_mut().unwrap().remove("path");
+    let raw = shape(no_path);
+    let resp = post_raw(&cl, &b, raw.clone(), Some(&sig_over(&a, &raw))).await;
+    assert_eq!(resp.status(), 202, "a question without a path is accepted");
+    let rec = b
+        .spool()
+        .get(Dir::Inbox, "0191c7a0-0000-7000-8000-00000000d0d0")
+        .unwrap()
+        .expect("spooled");
+    let spooled: owlpost::envelope::Payload = serde_json::from_str(&rec.raw).unwrap();
+    assert!(
+        matches!(spooled.body, Body::Question { path: None, .. }),
+        "{spooled:?}"
+    );
+    // Only the three accepted questions ever reached the spool.
+    assert_eq!(inbox_ids(&b).len(), 3);
     // Bad ack ids are 404, not 500.
     for id in ["", "nope", "..", "a b"] {
         let resp = cl
@@ -531,7 +548,7 @@ async fn bad_inputs_are_4xx_never_500() {
     let fresh = signed(&a, &b.id, "after restart?");
     let resp = post_envelope(&cl, &b, &fresh).await;
     assert_eq!(resp.status(), 202, "new ids still accepted after restart");
-    assert_eq!(inbox_ids(&b).len(), 3);
+    assert_eq!(inbox_ids(&b).len(), 4);
     b.running.shutdown();
 }
 

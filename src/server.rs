@@ -865,9 +865,14 @@ mod tests {
         let mut v = valid();
         v["body"].as_object_mut().unwrap().remove("project");
         assert_eq!(err_of(v), "missing body.project");
+        // OWL-018: a repo-level question has no path; a non-string path is still a bad schema.
         let mut v = valid();
         v["body"].as_object_mut().unwrap().remove("path");
-        assert_eq!(err_of(v), "missing body.path");
+        let p = validate_question(&v, "owl:aaaa", "owl:bbbb").unwrap();
+        assert!(matches!(p.body, envelope::Body::Question { path: None, .. }));
+        let mut v = valid();
+        v["body"]["path"] = json!(3);
+        assert!(err_of(v).starts_with("bad schema"));
         let mut v = valid();
         v["body"].as_object_mut().unwrap().remove("question");
         assert_eq!(err_of(v), "missing body.question");
