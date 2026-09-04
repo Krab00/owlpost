@@ -68,7 +68,7 @@ pub fn write_contact_full(home: &Path, peer: &Peer<'_>, endpoints: &[&str], emai
         "emails": emails,
         "pubkey": pubkey_string(&peer.id.verifying_key()),
         "endpoints": endpoints,
-        "source": "local",
+        "source": "global",
         "added_at": "2026-09-01T10:00:00Z",
     });
     if let Some(p) = &peer.policy {

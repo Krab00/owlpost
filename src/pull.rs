@@ -480,7 +480,7 @@ mod tests {
             "emails": [],
             "pubkey": identity::pubkey_string(&id.verifying_key()),
             "endpoints": endpoints,
-            "source": "local",
+            "source": "global",
         });
         std::fs::write(
             dir.join(format!(
