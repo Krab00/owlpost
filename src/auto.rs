@@ -100,7 +100,7 @@ pub fn attempt(
     }
     let payload = answer::payload_of(id, &rec)?;
     let (_, path, _) = answer::question_body(id, &payload)?;
-    let (peer, path) = (payload.from.clone(), path.to_string());
+    let (peer, path) = (payload.from.clone(), path.unwrap_or("-").to_string());
     let original = rec.clone();
     // `answer::draft` drops any stale `auto_error` from an earlier failed attempt.
     let drafted = match answer::draft(config, home, id, rec, None) {
@@ -354,7 +354,7 @@ mod tests {
                 &self.fp(&self.peer),
                 &self.fp(&self.me),
                 PROJECT,
-                "src/auth/session.rs",
+                Some("src/auth/session.rs"),
                 "Where is the retry policy?",
             );
             let env = Envelope::sign(&q, &self.peer);

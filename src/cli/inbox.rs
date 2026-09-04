@@ -294,7 +294,7 @@ mod tests {
     #[test]
     fn consent_prompt_names_peer_project_and_both_commands() {
         use owlpost::contacts::Contact;
-        let q = Payload::question("FPA", "FPB", "github.com/x/y", "src/a.rs", "why?");
+        let q = Payload::question("FPA", "FPB", "github.com/x/y", Some("src/a.rs"), "why?");
         let book = ContactBook {
             contacts: vec![Contact {
                 name: "Ana".into(),

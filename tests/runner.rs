@@ -86,7 +86,7 @@ impl Env {
             self.home.path(),
             harness,
             project,
-            "src/client.rs",
+            Some("src/client.rs"),
             "How are retries configured?",
         )
     }
@@ -135,7 +135,7 @@ fn prompt_contains_question_project_path_and_scope() {
         env.home.path(),
         None,
         "github.com/acme/widgets",
-        "src/client.rs",
+        Some("src/client.rs"),
         question,
     )
     .unwrap();

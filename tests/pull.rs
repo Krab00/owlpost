@@ -109,7 +109,7 @@ fn point_at(a: &TestDaemon, b: &Identity, endpoint: &str) {
 fn open_ask(a: &TestDaemon, b: &Identity, text: &str) -> Payload {
     let q = question(&a.id, b, text);
     let env = Envelope::sign(&q, &a.id);
-    let hash = envelope::question_hash(common::PROJECT, common::PATH, text);
+    let hash = envelope::question_hash(common::PROJECT, Some(common::PATH), text);
     let mut rec = record(&env, "waiting");
     rec.meta = serde_json::json!({ "peer": fp(b), "hash": hash });
     a.spool().put(Dir::Asks, &q.id, &rec).unwrap();
@@ -161,7 +161,7 @@ fn assert_ingested(a: &TestDaemon, b: &TestDaemon, q: &Payload, ans: &Payload, t
     assert_eq!(p.in_reply_to.as_deref(), Some(q.id.as_str()));
     assert_eq!(inbox.meta["peer"], b.fp());
     assert_eq!(inbox.meta["in_reply_to"], q.id);
-    let hash = envelope::question_hash(common::PROJECT, common::PATH, text);
+    let hash = envelope::question_hash(common::PROJECT, Some(common::PATH), text);
     assert_eq!(inbox.meta["hash"], hash);
     let cached = spool.cache_get(&hash).unwrap().expect("answer cached");
     assert_eq!(cached.raw, inbox.raw);
@@ -433,7 +433,7 @@ async fn answer_for_another_peers_ask_is_ignored() {
         "the ask to C stays open"
     );
     assert!(spool.get(Dir::Done, &to_c.id).unwrap().is_none());
-    let c_hash = envelope::question_hash(common::PROJECT, common::PATH, "for Cy");
+    let c_hash = envelope::question_hash(common::PROJECT, Some(common::PATH), "for Cy");
     assert!(
         spool.cache_get(&c_hash).unwrap().is_none(),
         "nothing cached for C's question"

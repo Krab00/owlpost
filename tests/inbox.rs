@@ -141,7 +141,7 @@ impl Home {
                 project,
                 path,
                 question,
-            } => envelope::question_hash(project, path, question),
+            } => envelope::question_hash(project, path.as_deref(), question),
             Body::Answer { .. } => String::new(),
         };
         let rec = Record {
@@ -531,7 +531,7 @@ fn draft_send_moves_records() {
             project,
             path,
             question,
-        } => envelope::question_hash(project, path, question),
+        } => envelope::question_hash(project, path.as_deref(), question),
         Body::Answer { .. } => unreachable!(),
     };
     let cached = h
@@ -544,7 +544,11 @@ fn draft_send_moves_records() {
         (arec.raw.as_str(), arec.sig.as_str())
     );
     // The same question with different whitespace/case normalises to the same hash.
-    let same = envelope::question_hash(PROJECT, PATH, "  where IS the retry   policy defined? ");
+    let same = envelope::question_hash(
+        PROJECT,
+        Some(PATH),
+        "  where IS the retry   policy defined? ",
+    );
     assert!(h.spool().cache_get(&same).unwrap().is_some());
     assert_eq!(h.ok(&["inbox", "--count", "--all"]), "0\n");
     let hist = h.json(&["history", "--json"]);

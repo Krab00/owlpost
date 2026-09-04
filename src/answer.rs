@@ -159,13 +159,13 @@ pub fn existing_answer(spool: &Spool, id: &str) -> anyhow::Result<Option<(String
 pub fn question_body<'a>(
     id: &str,
     payload: &'a Payload,
-) -> anyhow::Result<(&'a str, &'a str, &'a str)> {
+) -> anyhow::Result<(&'a str, Option<&'a str>, &'a str)> {
     match &payload.body {
         Body::Question {
             project,
             path,
             question,
-        } if payload.kind == Kind::Question => Ok((project, path, question)),
+        } if payload.kind == Kind::Question => Ok((project, path.as_deref(), question)),
         _ => bail!("record {id} is an answer, not a question"),
     }
 }
@@ -546,8 +546,8 @@ mod tests {
 
     #[test]
     fn question_body_rejects_answers() {
-        let q = Payload::question("a", "b", "p", "f", "why?");
-        assert_eq!(question_body("x", &q).unwrap(), ("p", "f", "why?"));
+        let q = Payload::question("a", "b", "p", Some("f"), "why?");
+        assert_eq!(question_body("x", &q).unwrap(), ("p", Some("f"), "why?"));
         let a = Payload::answer(&q, "because", "fake", 0, false);
         let err = question_body("x", &a).unwrap_err().to_string();
         assert!(err.contains("record x is an answer"), "{err}");

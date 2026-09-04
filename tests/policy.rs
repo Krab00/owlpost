@@ -79,7 +79,7 @@ fn put(home: &Path, from: &Identity, to: &Identity, text: &str, state: &str) -> 
             project,
             path,
             question,
-        } => envelope::question_hash(project, path, question),
+        } => envelope::question_hash(project, path.as_deref(), question),
         Body::Answer { .. } => unreachable!(),
     };
     Spool::new(home)

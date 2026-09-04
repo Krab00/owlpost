@@ -76,7 +76,7 @@ mod tests {
     }
 
     fn put(spool: &Spool, from: &Identity, to: &Identity, state: &str) -> String {
-        let q = Payload::question(&fp(from), &fp(to), "p", "f", "why?");
+        let q = Payload::question(&fp(from), &fp(to), "p", Some("f"), "why?");
         let env = Envelope::sign(&q, from);
         spool
             .put(
