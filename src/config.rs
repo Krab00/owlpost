@@ -15,6 +15,11 @@ pub struct Config {
     pub emails: Vec<String>,
     pub listen: String,
     pub endpoints: Vec<String>,
+    /// Relays for the iroh transport. Absent (`None`) = n0's public relays and DNS
+    /// discovery; a list = exactly those (self-hosted) relays, no public discovery; `[]` =
+    /// no relay at all (the endpoint is bound but only `endpoints` remain reachable).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relay_urls: Option<Vec<String>>,
     pub pull_interval_secs: u64,
     pub outbox_ttl_days: u64,
     pub rate_limit_per_peer_per_hour: u64,
@@ -165,6 +170,7 @@ impl Default for Config {
             emails: Vec::new(),
             listen: DEFAULT_LISTEN.into(),
             endpoints: Vec::new(),
+            relay_urls: None,
             pull_interval_secs: 60,
             outbox_ttl_days: 14,
             rate_limit_per_peer_per_hour: 20,
@@ -238,6 +244,45 @@ mod tests {
         assert_eq!(cfg.responder.redact.len(), 2);
         assert!(cfg.name.is_empty() && cfg.emails.is_empty());
         assert!(cfg.endpoints.is_empty() && cfg.projects.is_empty());
+        assert_eq!(cfg.relay_urls, None, "absent = n0 public relays");
+    }
+
+    #[test]
+    fn relay_urls_three_states() {
+        let home = tempfile::tempdir().unwrap();
+        let load = |json: &str| {
+            std::fs::write(Config::path(home.path()), json).unwrap();
+            Config::load(home.path())
+        };
+        assert_eq!(load(r#"{}"#).unwrap().relay_urls, None);
+        assert_eq!(load(r#"{"relay_urls": null}"#).unwrap().relay_urls, None);
+        assert_eq!(
+            load(r#"{"relay_urls": []}"#).unwrap().relay_urls,
+            Some(vec![])
+        );
+        assert_eq!(
+            load(r#"{"relay_urls": ["https://relay.corp.example/"]}"#)
+                .unwrap()
+                .relay_urls,
+            Some(vec!["https://relay.corp.example/".to_string()])
+        );
+        assert!(load(r#"{"relay_urls": "https://one"}"#).is_err(), "not a list");
+        assert!(load(r#"{"relay_urls": [1]}"#).is_err(), "not strings");
+        // Saved: the absent state stays absent, a list roundtrips.
+        Config::default().save(home.path()).unwrap();
+        let raw = std::fs::read_to_string(Config::path(home.path())).unwrap();
+        assert!(!raw.contains("relay_urls"), "{raw}");
+        let cfg = Config {
+            relay_urls: Some(vec![]),
+            ..Default::default()
+        };
+        cfg.save(home.path()).unwrap();
+        assert!(
+            std::fs::read_to_string(Config::path(home.path()))
+                .unwrap()
+                .contains("\"relay_urls\": []")
+        );
+        assert_eq!(Config::load(home.path()).unwrap(), cfg);
     }
 
     #[test]

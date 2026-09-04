@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, bail};
 use clap::Args;
-use owlpost::client::{self, SendOutcome};
+use owlpost::client::{self, Iroh, SendOutcome};
 use owlpost::contacts::{Contact, ContactBook};
 use owlpost::envelope::{self, Body, Envelope, Payload};
 use owlpost::identity;
@@ -133,7 +133,10 @@ pub fn run(home: &Path, args: AskArgs, json: bool, quiet: bool) -> anyhow::Resul
     );
     let envelope = Envelope::sign(&payload, &identity);
     let meta = json!({ "peer": contact.fingerprint, "hash": hash });
-    match client::send_question(&identity, &contact, &envelope)? {
+    // iroh goes through the local daemon (the CLI must not bind a second endpoint with the
+    // identity key); without a daemon only the contact's endpoints are tried.
+    let iroh = Iroh::from_home(home);
+    match client::send_question(&identity, &contact, &iroh, &envelope)? {
         SendOutcome::Answer(hit) => {
             let (answer, answer_env) = (hit.payload, hit.envelope);
             pull::store_answer(
@@ -174,7 +177,7 @@ pub fn run(home: &Path, args: AskArgs, json: bool, quiet: bool) -> anyhow::Resul
                         hash,
                         path: parsed.path.clone(),
                     };
-                    wait_for_answer(&identity, &contact, &spool, &ask, secs, json, quiet)
+                    wait_for_answer(&identity, &contact, &iroh, &spool, &ask, secs, json, quiet)
                 }
             }
         }
@@ -253,9 +256,11 @@ fn print_answer(answer: &Payload, json: bool) -> anyhow::Result<()> {
 /// have passed (exit 4; the `asks/` record stays `waiting` for the daemon's pull loop). Each
 /// envelope goes through the daemon's `pull::ingest_envelope`, so a forged or unrelated entry
 /// is skipped and left unacked exactly as the pull loop would.
+#[allow(clippy::too_many_arguments)]
 fn wait_for_answer(
     identity: &identity::Identity,
     contact: &Contact,
+    iroh: &Iroh,
     spool: &Spool,
     ask: &OpenAsk,
     secs: u64,
@@ -266,10 +271,10 @@ fn wait_for_answer(
     let open = BTreeMap::from([(ask.id.clone(), ask.clone())]);
     let mut warned = false;
     loop {
-        match client::fetch_outbox(identity, contact) {
+        match client::fetch_outbox(identity, contact, iroh) {
             Ok(items) => {
                 for env in &items {
-                    match pull::ingest_envelope(identity, contact, spool, &open, env)? {
+                    match pull::ingest_envelope(identity, contact, iroh, spool, &open, env)? {
                         Verdict::Ingested(ing) => {
                             if let Some(e) = &ing.ack_error
                                 && !quiet

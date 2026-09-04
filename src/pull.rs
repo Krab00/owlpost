@@ -13,7 +13,7 @@ use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::client;
+use crate::client::{self, Iroh};
 use crate::config::Config;
 use crate::contacts::{Contact, ContactBook};
 use crate::envelope::{self, Body, Envelope, Payload};
@@ -199,6 +199,7 @@ pub enum Verdict {
 pub fn ingest_envelope(
     identity: &Identity,
     contact: &Contact,
+    iroh: &Iroh,
     spool: &Spool,
     open: &BTreeMap<String, OpenAsk>,
     env: &Envelope,
@@ -239,7 +240,7 @@ pub fn ingest_envelope(
     )?;
     spool.move_to(Dir::Asks, &ask.id, Dir::Done)?;
     spool.set_state(Dir::Done, &ask.id, "answered")?;
-    let ack_error = client::ack(identity, contact, &answer.id).err();
+    let ack_error = client::ack(identity, contact, iroh, &answer.id).err();
     Ok(Verdict::Ingested(Box::new(Ingested {
         ask: ask.clone(),
         answer,
@@ -255,12 +256,15 @@ fn claimed_id(env: &Envelope) -> String {
         .unwrap_or_else(|| "?".to_string())
 }
 
-/// One pull over every responder with an open ask. Contacts are reloaded on each call so an
-/// endpoint edit is picked up without a restart. Returns the status to write.
+/// One pull over every responder with an open ask (iroh first, then `endpoints`, see
+/// `client`). Contacts are reloaded on each call so an endpoint edit is picked up without
+/// a restart. Returns the status to write.
+#[allow(clippy::too_many_arguments)]
 pub fn pull_once(
     home: &Path,
     cwd: &Path,
     identity: &Identity,
+    iroh: &Iroh,
     spool: &Spool,
     liveness: &mut Liveness,
     now: Instant,
@@ -286,7 +290,7 @@ pub fn pull_once(
             continue;
         }
         peers_probed += 1;
-        let items = match client::fetch_outbox(identity, contact) {
+        let items = match client::fetch_outbox(identity, contact, iroh) {
             Ok(items) => {
                 liveness.record(peer, true, now);
                 tracing::debug!(peer, count = items.len(), "outbox fetched");
@@ -299,7 +303,7 @@ pub fn pull_once(
             }
         };
         for env in &items {
-            match ingest_envelope(identity, contact, spool, &open, env) {
+            match ingest_envelope(identity, contact, iroh, spool, &open, env) {
                 Ok(Verdict::Ingested(ing)) => {
                     if let Some(e) = &ing.ack_error {
                         tracing::warn!(peer, id = %ing.answer.id, error = %format!("{e:#}"), "ack failed");
@@ -393,6 +397,7 @@ pub fn tick(state: &AppState, liveness: &mut Liveness) {
         &state.home,
         &state.cwd,
         &state.identity,
+        &Iroh::for_daemon(state),
         &state.spool,
         liveness,
         Instant::now(),
@@ -490,6 +495,10 @@ mod tests {
     fn closed_port() -> String {
         let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         l.local_addr().unwrap().to_string()
+    }
+
+    fn no_iroh() -> Iroh {
+        Iroh::Unavailable("no endpoint".into())
     }
 
     #[test]
@@ -813,7 +822,7 @@ mod tests {
         let mut lv = Liveness::new(Duration::from_secs(60));
         let t0 = Instant::now();
         let mut events = Vec::new();
-        let status = pull_once(home.path(), home.path(), &a, &spool, &mut lv, t0, |ev| {
+        let status = pull_once(home.path(), home.path(), &a, &no_iroh(), &spool, &mut lv, t0, |ev| {
             events.push(ev)
         })
         .unwrap();
@@ -828,6 +837,7 @@ mod tests {
             home.path(),
             home.path(),
             &a,
+            &no_iroh(),
             &spool,
             &mut lv,
             t0 + Duration::from_secs(59),
@@ -840,6 +850,7 @@ mod tests {
             home.path(),
             home.path(),
             &a,
+            &no_iroh(),
             &spool,
             &mut lv,
             t0 + Duration::from_secs(60),
@@ -858,6 +869,7 @@ mod tests {
             empty.path(),
             empty.path(),
             &a,
+            &no_iroh(),
             &spool,
             &mut Liveness::new(Duration::ZERO),
             t0,
@@ -898,7 +910,7 @@ mod tests {
         // Forged: signed by somebody else.
         let forged = Envelope::sign(&ans, &other);
         assert!(matches!(
-            ingest_envelope(&a, &contact, &spool, &open, &forged).unwrap(),
+            ingest_envelope(&a, &contact, &no_iroh(), &spool, &open, &forged).unwrap(),
             Verdict::Forged
         ));
         // Unrelated: replies to an unknown question.
@@ -906,7 +918,7 @@ mod tests {
         unrelated.in_reply_to = Some("someone-elses".into());
         let unrelated = Envelope::sign(&unrelated, &b);
         assert!(matches!(
-            ingest_envelope(&a, &contact, &spool, &open, &unrelated).unwrap(),
+            ingest_envelope(&a, &contact, &no_iroh(), &spool, &open, &unrelated).unwrap(),
             Verdict::Unrelated
         ));
         // B-signed answer to A's open ask to C: verified, but not B's to answer.
@@ -927,7 +939,7 @@ mod tests {
         assert_eq!(open.len(), 2);
         let hijack = Envelope::sign(&Payload::answer(&to_c, "mine now", "fake", 0, false), &b);
         assert!(matches!(
-            ingest_envelope(&a, &contact, &spool, &open, &hijack).unwrap(),
+            ingest_envelope(&a, &contact, &no_iroh(), &spool, &open, &hijack).unwrap(),
             Verdict::Unrelated
         ));
         assert!(
@@ -938,14 +950,14 @@ mod tests {
         let mut no_reply = ans.clone();
         no_reply.in_reply_to = None;
         assert!(matches!(
-            ingest_envelope(&a, &contact, &spool, &open, &Envelope::sign(&no_reply, &b)).unwrap(),
+            ingest_envelope(&a, &contact, &no_iroh(), &spool, &open, &Envelope::sign(&no_reply, &b)).unwrap(),
             Verdict::Unrelated
         ));
         assert!(spool.get(Dir::Inbox, &ans.id).unwrap().is_none());
         assert!(spool.get(Dir::Asks, &q.id).unwrap().is_some());
         // Good: stored, ask moved, ack failed (closed port) but reported, not fatal.
         let good = Envelope::sign(&ans, &b);
-        let Verdict::Ingested(ing) = ingest_envelope(&a, &contact, &spool, &open, &good).unwrap()
+        let Verdict::Ingested(ing) = ingest_envelope(&a, &contact, &no_iroh(), &spool, &open, &good).unwrap()
         else {
             panic!("expected Ingested");
         };
@@ -1002,7 +1014,7 @@ mod tests {
         let ans = Payload::answer(&q, "yes", "fake", 0, false);
         let good = Envelope::sign(&ans, &b);
         std::fs::create_dir_all(spool.path(Dir::Done, &q.id).join("child")).unwrap();
-        let err = ingest_envelope(&a, &contact, &spool, &open, &good)
+        let err = ingest_envelope(&a, &contact, &no_iroh(), &spool, &open, &good)
             .unwrap_err()
             .to_string();
         assert!(err.contains("moving"), "{err}");
@@ -1012,7 +1024,7 @@ mod tests {
         std::fs::remove_dir_all(spool.path(Dir::Done, &q.id)).unwrap();
         std::fs::remove_file(spool.path(Dir::Inbox, &ans.id)).unwrap();
         std::fs::create_dir_all(spool.path(Dir::Inbox, &ans.id).join("child")).unwrap();
-        let err = ingest_envelope(&a, &contact, &spool, &open, &good)
+        let err = ingest_envelope(&a, &contact, &no_iroh(), &spool, &open, &good)
             .unwrap_err()
             .to_string();
         assert!(err.contains("renaming to"), "{err}");
