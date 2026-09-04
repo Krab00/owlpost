@@ -274,6 +274,7 @@ unavailable, `3` rate limited, `4` nothing to do (e.g. `watch` timeout).
 Hook injection formats for `owl inbox --count --format …` (exact):
 
 - `claude`: `{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"owlpost: 2 new questions (Maciek 2). Say \"show owlpost inbox\" or run `owl inbox`."}}`
+  (unseen answers count as `N new answer(s)`; a mix reads `2 new questions, 1 new answer`)
 - `codex`: same JSON shape.
 - `kimi` / `plain`: the sentence alone.
 

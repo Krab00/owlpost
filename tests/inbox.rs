@@ -1480,10 +1480,10 @@ fn count_json_separates_questions_from_answers() {
         json!({ "count": 2, "questions": 1, "peers": [{ "name": "Maciek", "count": 2 }] })
     );
     assert_eq!(h.ok(&["inbox", "--count"]), "2\n");
-    // The claude hook line counts unseen records the same way.
+    // The hook line names both kinds.
     assert_eq!(
         h.ok(&["inbox", "--count", "--format", "plain"]),
-        format!("{SENTENCE_TWO}\n")
+        "owlpost: 1 new question, 1 new answer (Maciek 2). Say \"show owlpost inbox\" or run `owl inbox`.\n"
     );
 }
 

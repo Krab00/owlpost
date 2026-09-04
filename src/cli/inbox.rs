@@ -23,7 +23,7 @@ use owlpost::spool::{Dir, Record, Spool};
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use super::{existing_answer, payload_of, peer_name, print_json, print_table, summary};
+use super::{existing_answer, payload_of, peer_name, print_json, summary};
 
 pub struct Opts {
     pub count: bool,
@@ -54,24 +54,36 @@ impl Format {
 }
 
 /// `owlpost: 2 new questions (Maciek 2). Say "show owlpost inbox" or run `owl inbox`.`
-/// Peers are ordered by count (descending), then name. Singular below two.
-pub fn sentence(per_peer: &[(String, usize)]) -> String {
+/// Peers are ordered by count (descending), then name. Singular below two. `answers` is how
+/// many of the counted records are answers: all answers reads `1 new answer`, a mix reads
+/// `2 new questions, 1 new answer`.
+pub fn sentence(per_peer: &[(String, usize)], answers: usize) -> String {
     let total: usize = per_peer.iter().map(|(_, n)| n).sum();
-    let noun = if total == 1 { "question" } else { "questions" };
+    let questions = total.saturating_sub(answers);
+    let plural = |n: usize, one: &str, many: &str| if n == 1 { one } else { many }.to_string();
+    let what = match (questions, answers) {
+        (_, 0) => format!("{total} new {}", plural(total, "question", "questions")),
+        (0, a) => format!("{a} new {}", plural(a, "answer", "answers")),
+        (q, a) => format!(
+            "{q} new {}, {a} new {}",
+            plural(q, "question", "questions"),
+            plural(a, "answer", "answers")
+        ),
+    };
     let peers = per_peer
         .iter()
         .map(|(name, n)| format!("{name} {n}"))
         .collect::<Vec<_>>()
         .join(", ");
-    format!("owlpost: {total} new {noun} ({peers}). Say \"show owlpost inbox\" or run `owl inbox`.")
+    format!("owlpost: {what} ({peers}). Say \"show owlpost inbox\" or run `owl inbox`.")
 }
 
 /// The exact §9 injection line for `format`; `None` when there is nothing to inject.
-pub fn injection(format: Format, per_peer: &[(String, usize)]) -> Option<String> {
+pub fn injection(format: Format, per_peer: &[(String, usize)], answers: usize) -> Option<String> {
     if per_peer.iter().all(|(_, n)| *n == 0) {
         return None;
     }
-    let text = sentence(per_peer);
+    let text = sentence(per_peer, answers);
     Some(match format {
         Format::Claude | Format::Codex => {
             // Structs keep the §9 key order; `json!` maps would sort keys alphabetically.
@@ -172,7 +184,20 @@ pub fn run(home: &Path, opts: Opts) -> anyhow::Result<()> {
                     .collect()
             })
             .collect();
-        print_table(&["ID", "FROM", "TYPE", "STATE", "PATH", "AGE"], &cells);
+        let styles: Vec<&str> = rows
+            .iter()
+            .map(|r| {
+                super::row_style(
+                    r["type"].as_str().unwrap_or_default(),
+                    r["seen"].as_bool().unwrap_or(true),
+                )
+            })
+            .collect();
+        super::print_table_styled(
+            &["ID", "FROM", "TYPE", "STATE", "PATH", "AGE"],
+            &cells,
+            &styles,
+        );
         for n in &notes {
             println!("{n}");
         }
@@ -195,17 +220,17 @@ fn count(
     let records = spool.list(Dir::Inbox, |r| all || !r.seen)?;
     let per_peer = per_peer(&records, book)?;
     let total = records.len();
+    let questions = records
+        .iter()
+        .filter(|(id, r)| payload_of(id, r).is_ok_and(|p| p.kind == Kind::Question))
+        .count();
     match format {
         Some(f) => {
-            if let Some(line) = injection(f, &per_peer) {
+            if let Some(line) = injection(f, &per_peer, total - questions) {
                 println!("{line}");
             }
         }
         None if json => {
-            let questions = records
-                .iter()
-                .filter(|(id, r)| payload_of(id, r).is_ok_and(|p| p.kind == Kind::Question))
-                .count();
             print_json(&json!({
                 "count": total,
                 "questions": questions,
@@ -228,33 +253,41 @@ mod tests {
     #[test]
     fn sentence_matches_design_literal() {
         assert_eq!(
-            sentence(&peers(&[("Maciek", 2)])),
+            sentence(&peers(&[("Maciek", 2)]), 0),
             "owlpost: 2 new questions (Maciek 2). Say \"show owlpost inbox\" or run `owl inbox`."
         );
         assert_eq!(
-            sentence(&peers(&[("Maciek", 1)])),
+            sentence(&peers(&[("Maciek", 1)]), 0),
             "owlpost: 1 new question (Maciek 1). Say \"show owlpost inbox\" or run `owl inbox`."
         );
         assert_eq!(
-            sentence(&peers(&[("Ana", 2), ("Maciek", 1)])),
+            sentence(&peers(&[("Ana", 2), ("Maciek", 1)]), 0),
             "owlpost: 3 new questions (Ana 2, Maciek 1). Say \"show owlpost inbox\" or run `owl inbox`."
+        );
+        assert_eq!(
+            sentence(&peers(&[("Maciek", 1)]), 1),
+            "owlpost: 1 new answer (Maciek 1). Say \"show owlpost inbox\" or run `owl inbox`."
+        );
+        assert_eq!(
+            sentence(&peers(&[("Ana", 2), ("Maciek", 1)]), 1),
+            "owlpost: 2 new questions, 1 new answer (Ana 2, Maciek 1). Say \"show owlpost inbox\" or run `owl inbox`."
         );
     }
 
     #[test]
     fn injection_shapes_per_format() {
         let p = peers(&[("Maciek", 2)]);
-        let claude = injection(Format::Claude, &p).unwrap();
+        let claude = injection(Format::Claude, &p, 0).unwrap();
         assert_eq!(
             claude,
             r#"{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"owlpost: 2 new questions (Maciek 2). Say \"show owlpost inbox\" or run `owl inbox`."}}"#
         );
-        assert_eq!(injection(Format::Codex, &p).unwrap(), claude);
-        assert_eq!(injection(Format::Kimi, &p).unwrap(), sentence(&p));
-        assert_eq!(injection(Format::Plain, &p).unwrap(), sentence(&p));
+        assert_eq!(injection(Format::Codex, &p, 0).unwrap(), claude);
+        assert_eq!(injection(Format::Kimi, &p, 0).unwrap(), sentence(&p, 0));
+        assert_eq!(injection(Format::Plain, &p, 0).unwrap(), sentence(&p, 0));
         for f in [Format::Plain, Format::Claude, Format::Codex, Format::Kimi] {
-            assert_eq!(injection(f, &[]), None);
-            assert_eq!(injection(f, &peers(&[("Maciek", 0)])), None);
+            assert_eq!(injection(f, &[], 0), None);
+            assert_eq!(injection(f, &peers(&[("Maciek", 0)]), 0), None);
         }
     }
 
