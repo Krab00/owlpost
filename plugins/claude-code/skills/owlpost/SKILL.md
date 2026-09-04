@@ -32,6 +32,7 @@ Do not ask a peer for anything answerable from the checkout. Prefer reading the 
 owl ask --file <path> "<question>"          # proposes peers from git blame of <path>
 owl ask --file <path> --peer <peer> "<question>"
 owl ask <peer> <path> "<question>"          # peer: name prefix, email or fingerprint
+owl ask <peer> "<question>"                  # no path: a question about the repository as a whole
 ```
 
 1. Prefer `--file <path>`. It proposes peers from `git blame` of that file and uses the

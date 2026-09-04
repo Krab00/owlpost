@@ -387,6 +387,128 @@ async fn ask_accepted_writes_ask_record() {
     b.running.shutdown();
 }
 
+/// OWL-018 AC1: `owl ask <peer> "<question>"` with no path is accepted, stored without a
+/// path (key omitted on the wire, hash over the empty path), and the responder's `owl show`,
+/// `owl inbox` print `-` where the path would be.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn ask_without_path() {
+    let a = id(1);
+    let b = spawn_daemon(2, true, &[Peer::new(&a, "Ana", manual())]).await;
+    let home = asker_home(&a, &b.id, &[&b.addr.to_string()]);
+    let out = owl(home.path(), home.path())
+        .args(["ask", "Bea", QUESTION, "--project", PROJECT])
+        .output()
+        .unwrap();
+    let qid = accepted_id(&out);
+    assert!(stderr(&out).is_empty(), "stderr: {}", stderr(&out));
+
+    let spool = Spool::new(home.path()).unwrap();
+    let rec = spool.get(Dir::Asks, &qid).unwrap().expect("asks/<id>.json");
+    assert_eq!(rec.state, "waiting");
+    assert_eq!(rec.meta["hash"], question_hash(PROJECT, None, QUESTION));
+    assert_ne!(
+        rec.meta["hash"],
+        question_hash(PROJECT, Some(PATH), QUESTION),
+        "the repo-level question is a different cache key"
+    );
+    assert_eq!(
+        payload(&rec).body,
+        Body::Question {
+            project: PROJECT.into(),
+            path: None,
+            question: QUESTION.into()
+        }
+    );
+    assert!(
+        !rec.raw.contains("\"path\""),
+        "omitted on the wire: {}",
+        rec.raw
+    );
+
+    // B spooled the very same bytes and prints `-` for the path.
+    let b_rec = b
+        .spool()
+        .get(Dir::Inbox, &qid)
+        .unwrap()
+        .expect("in B's inbox");
+    assert_eq!(b_rec.raw, rec.raw);
+    let show = owl(b.home(), b.home())
+        .args(["show", &qid])
+        .output()
+        .unwrap();
+    assert_eq!(show.status.code(), Some(0), "stderr: {}", stderr(&show));
+    let shown = stdout(&show);
+    assert!(shown.contains("\npath:     -\n"), "{shown}");
+    assert!(
+        shown.contains(&format!("\nproject:  {PROJECT}\n")),
+        "{shown}"
+    );
+    let shown: Value = serde_json::from_str(&stdout(
+        &owl(b.home(), b.home())
+            .args(["show", &qid, "--json"])
+            .output()
+            .unwrap(),
+    ))
+    .unwrap();
+    assert_eq!(shown["path"], "-");
+    assert_eq!(shown["payload"]["body"].get("path"), None);
+    let inbox = owl(b.home(), b.home())
+        .args(["inbox", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(inbox.status.code(), Some(0), "stderr: {}", stderr(&inbox));
+    let rows: Value = serde_json::from_str(&stdout(&inbox)).unwrap();
+    assert_eq!(rows[0]["id"], qid.as_str());
+    assert_eq!(rows[0]["path"], "-");
+
+    // Negative twin: the question itself is still required, nothing is sent.
+    let out = owl(home.path(), home.path())
+        .args(["ask", "Bea", "--project", PROJECT])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        stderr(&out).contains("missing <question>"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(
+        !stderr(&out).contains("missing <path>"),
+        "the path is not required any more: {}",
+        stderr(&out)
+    );
+    assert_eq!(ids(&spool, Dir::Asks), std::slice::from_ref(&qid));
+    // Positive twin: with a path the question still carries it.
+    let out = owl(home.path(), home.path())
+        .args(["ask", "Bea", PATH, "Why that file?", "--project", PROJECT])
+        .output()
+        .unwrap();
+    let qid2 = accepted_id(&out);
+    let rec2 = spool.get(Dir::Asks, &qid2).unwrap().unwrap();
+    assert_eq!(
+        payload(&rec2).body,
+        Body::Question {
+            project: PROJECT.into(),
+            path: Some(PATH.into()),
+            question: "Why that file?".into()
+        }
+    );
+    assert_eq!(
+        rec2.meta["hash"],
+        question_hash(PROJECT, Some(PATH), "Why that file?")
+    );
+    let show = owl(b.home(), b.home())
+        .args(["show", &qid2])
+        .output()
+        .unwrap();
+    assert!(
+        stdout(&show).contains(&format!("\npath:     {PATH}\n")),
+        "{}",
+        stdout(&show)
+    );
+    b.running.shutdown();
+}
+
 /// Sends `QUESTION` to a fake peer whose `POST /v1/questions` reply is scripted verbatim.
 async fn ask_scripted_202(
     a: &Identity,

@@ -434,6 +434,55 @@ mod tests {
         );
     }
 
+    /// OWL-018 AC3: a repo-level question hashes as the empty path — stable, normalised the
+    /// same way, and never equal to the same question about a file.
+    #[test]
+    fn question_hash_without_path_is_stable_and_distinct() {
+        let none = question_hash("p", None, "why x?");
+        assert_eq!(none, question_hash("p", None, "  Why \tX? \n"));
+        assert_ne!(none, question_hash("p", Some("f"), "why x?"));
+        assert_ne!(none, question_hash("p2", None, "why x?"));
+        assert_eq!(
+            none,
+            question_hash("p", Some(""), "why x?"),
+            "None and the empty path are the same key"
+        );
+        // Pinned: SHA-256("p\n\nwhy x?")
+        assert_eq!(
+            none,
+            "a4ebf08f97de160963f99fec4925a88637f5bc246e2836b4d5754a86bbce1c08"
+        );
+    }
+
+    /// OWL-018: a question without a path omits the key on the wire, a payload without the
+    /// key parses as `None`, and an explicit `"path": null` parses the same way.
+    #[test]
+    fn question_without_path_omits_the_key_on_the_wire() {
+        let mut q = fixed_question();
+        q.body = Body::Question {
+            project: "github.com/company/monorepo".into(),
+            path: None,
+            question: "How long is your README?".into(),
+        };
+        let json = String::from_utf8(q.to_signed_bytes()).unwrap();
+        assert_eq!(
+            json,
+            r#"{"v":1,"id":"0191c7a0-0000-7000-8000-000000000000","type":"question","from":"owl:aaaaaaaaaaaaaaaa","to":"owl:bbbbbbbbbbbbbbbb","ts":"2026-09-01T10:00:00Z","in_reply_to":null,"body":{"project":"github.com/company/monorepo","question":"How long is your README?"}}"#
+        );
+        let back: Payload = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, q);
+        let with_null = json.replace(
+            r#""project":"github.com/company/monorepo","#,
+            r#""project":"github.com/company/monorepo","path":null,"#,
+        );
+        assert_ne!(with_null, json);
+        let back: Payload = serde_json::from_str(&with_null).unwrap();
+        assert_eq!(back, q);
+        // The constructor threads `None` through unchanged.
+        let p = Payload::question("owl:a", "owl:b", "proj", None, "why?");
+        assert!(matches!(p.body, Body::Question { path: None, .. }), "{p:?}");
+    }
+
     #[test]
     fn replay_window() {
         let now = TS_UNIX;

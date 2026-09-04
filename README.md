@@ -47,7 +47,7 @@ person and repository, 6–7 whenever you like.
 6. **`owl doctor`** — checks key, config, endpoints, harness binaries and that the daemon is
    reachable. Every line green means you can receive questions; ask a peer to run it too.
 
-7. **`owl ask <peer> <path> "<question>"`** — your first question. The peer approves (or has you
+7. **`owl ask <peer> [path] "<question>"`** — your first question. The peer approves (or has you
    on auto), their agent answers read-only from their checkout, the answer lands in your inbox
    (`owl inbox`, `owl show <id>`) and in your agent's memory via the harness plugin
    (`plugins/claude-code/README.md`).
