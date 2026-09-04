@@ -222,18 +222,36 @@ impl IntoResponse for ApiError {
 
 type ApiResult<T> = Result<T, ApiError>;
 
-pub fn router(state: Arc<AppState>) -> Router {
+/// The §7 routes every listener serves.
+fn peer_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/.well-known/agent-card.json", get(card))
         .route("/.well-known/agent.json", get(card))
         .route("/v1/questions", post(post_question))
         .route("/v1/outbox", get(get_outbox))
         .route("/v1/outbox/{id}/ack", post(ack_outbox))
-        .route("/v1/local/{fingerprint}/{*rest}", any(forward))
+}
+
+fn finish(routes: Router<Arc<AppState>>, state: Arc<AppState>) -> Router {
+    routes
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .with_state(state)
+}
+
+/// The mTLS listener's router: the peer routes plus the owner's forward route.
+pub fn router(state: Arc<AppState>) -> Router {
+    finish(
+        peer_routes().route("/v1/local/{fingerprint}/{*rest}", any(forward)),
+        state,
+    )
+}
+
+/// The iroh listener's router: the peer routes only. The forward route is not mounted, so
+/// it is `404` for every key over iroh, the owner's included.
+pub fn iroh_router(state: Arc<AppState>) -> Router {
+    finish(peer_routes(), state)
 }
 
 async fn not_found() -> ApiError {
@@ -918,6 +936,114 @@ mod tests {
         assert_eq!(card["url"], "https://b.example.org:7411/");
         assert_eq!(card["name"], "Bea");
         assert_eq!(card["owlpost"]["responds"], false);
+    }
+
+    /// The forward route's own refusals, without any network: owner check first, then the
+    /// path allow-list, then `502 iroh: …` for what the daemon cannot reach. Over the iroh
+    /// router the route does not exist at all.
+    #[tokio::test]
+    async fn forward_route_refuses_non_owners_bad_paths_and_unreachable_peers() {
+        use tower::ServiceExt;
+        let home = tempfile::tempdir().unwrap();
+        let owner = Identity::from_seed([3u8; 32]);
+        let peer = Identity::from_seed([4u8; 32]);
+        let dir = crate::contacts::local::dir(home.path());
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("bea.json"),
+            json!({
+                "name": "Bea",
+                "emails": [],
+                "pubkey": identity::pubkey_string(&peer.verifying_key()),
+                "endpoints": [],
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let state = Arc::new(
+            AppState::new(
+                home.path().to_path_buf(),
+                home.path().to_path_buf(),
+                Config::default(),
+                owner,
+                None,
+            )
+            .unwrap(),
+        );
+        let owner_fp = state.fingerprint();
+        let peer_fp = identity::fingerprint(&peer.verifying_key());
+        let call = |router: Router, who: PeerId, method: &str, uri: &str| {
+            let req = axum::http::Request::builder()
+                .method(method)
+                .uri(uri)
+                .extension(who)
+                .body(axum::body::Body::empty())
+                .unwrap();
+            async move {
+                let resp = router.oneshot(req).await.unwrap();
+                let status = resp.status().as_u16();
+                let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                let body: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+                (
+                    status,
+                    body.get("error")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                )
+            }
+        };
+        let path = format!("/v1/local/{peer_fp}/v1/outbox");
+        // Unpinned and non-owner callers: refused before the path is looked at.
+        assert_eq!(
+            call(router(state.clone()), PeerId(None), "GET", &path).await,
+            (401, "client certificate required".into())
+        );
+        assert_eq!(
+            call(router(state.clone()), PeerId(Some(peer_fp.clone())), "GET", &path).await,
+            (403, "owner only".into())
+        );
+        // Owner, but not one of the three peer paths.
+        for bad in ["v1/questions/x", ".well-known/agent-card.json", "v1/outbox/a/ack/"] {
+            let uri = format!("/v1/local/{peer_fp}/{bad}");
+            assert_eq!(
+                call(router(state.clone()), PeerId(Some(owner_fp.clone())), "GET", &uri).await,
+                (404, "not found".into()),
+                "{bad}"
+            );
+        }
+        // Owner, good path, but the daemon cannot reach the peer: 502 naming why.
+        assert_eq!(
+            call(
+                router(state.clone()),
+                PeerId(Some(owner_fp.clone())),
+                "GET",
+                "/v1/local/owl:nobody/v1/outbox"
+            )
+            .await,
+            (502, "iroh: unknown contact owl:nobody".into())
+        );
+        assert_eq!(
+            call(router(state.clone()), PeerId(Some(owner_fp.clone())), "GET", &path).await,
+            (502, "iroh: no endpoint".into()),
+            "known contact, no endpoint in this state"
+        );
+        // Over the iroh listener the route does not exist, even for the owner.
+        assert_eq!(
+            call(iroh_router(state.clone()), PeerId(Some(owner_fp.clone())), "GET", &path).await,
+            (404, "not found".into())
+        );
+        assert_eq!(
+            call(iroh_router(state.clone()), PeerId(Some(owner_fp.clone())), "POST", &path).await,
+            (404, "not found".into())
+        );
+        // The peer routes themselves are on both routers.
+        assert_eq!(
+            call(iroh_router(state.clone()), PeerId(None), "GET", "/v1/outbox").await,
+            (401, "client certificate required".into())
+        );
     }
 
     #[test]

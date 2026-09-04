@@ -675,11 +675,16 @@ fn offline_exits_2_and_queues_nothing() {
         );
     }
 
-    // A contact with no endpoints at all is a user error (1), not "offline".
+    // A contact with no endpoints at all is valid since OWL-017 (iroh reaches it); with no
+    // local daemon to forward over iroh it is offline (2), naming the missing daemon.
     let home = asker_home(&a, &b, &[]);
     let out = ask(home.path(), &[]);
-    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
-    assert!(stderr(&out).contains("no endpoints"), "{}", stderr(&out));
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert_eq!(
+        stderr(&out).trim(),
+        "owl: offline: no endpoint of Bea reachable (iroh: no local daemon (daemon.addr missing))"
+    );
+    assert!(stdout(&out).is_empty());
 
     // Unknown peer: resolution fails before anything is sent (1).
     let out = owl(home.path(), home.path())
