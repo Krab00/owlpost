@@ -538,10 +538,13 @@ async fn outbox_ttl_expires() {
     let mut rec = record(&Envelope::sign(&old, &b), "unacked");
     rec.received_at = yesterday;
     spool.put(Dir::Outbox, &old.id, &rec).unwrap();
-    // A record from this second is exactly at the TTL boundary and must stay.
+    // A record inside the TTL must stay. It is dated a minute ahead rather than "this
+    // second": with a 0-day TTL the first tick lands a few hundred ms after `now` (the iroh
+    // endpoint binds first), so a record stamped `now` expires whenever that crosses a
+    // second boundary. The exact `<=` boundary is pinned by `pull::tests::expire_outbox_boundary`.
     let fresh = Payload::answer(&q, "fresh", "fake", 0, false);
     let mut rec = record(&Envelope::sign(&fresh, &b), "unacked");
-    rec.received_at = envelope::unix_to_rfc3339(now);
+    rec.received_at = envelope::unix_to_rfc3339(now + 60);
     spool.put(Dir::Outbox, &fresh.id, &rec).unwrap();
 
     let d = common::respawn(dir, b).await;
