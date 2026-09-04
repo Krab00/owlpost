@@ -26,12 +26,12 @@ pub const POLL_INTERVAL: Duration = Duration::from_secs(2);
 /// Candidates shown by `--file`.
 pub const MAX_CANDIDATES: usize = 3;
 
-const USAGE: &str = "usage: owl ask <peer> <path> \"<question>\" | owl ask --file <path> [--peer <peer>] \"<question>\"";
+const USAGE: &str = "usage: owl ask <peer> [path] \"<question>\" | owl ask --file <path> [--peer <peer>] \"<question>\"";
 
 #[derive(Debug, Args)]
 pub struct AskArgs {
-    /// `<peer> <path> "<question>"`; `--peer` and `--file` each replace one positional
-    #[arg(value_names = ["PEER", "PATH", "QUESTION"])]
+    /// `<peer> [path] "<question>"`; `--peer` and `--file` each replace one positional
+    #[arg(value_names = ["PEER", "[PATH]", "QUESTION"])]
     pub args: Vec<String>,
     /// Project id (default: normalised `origin` remote of the current repo, else the directory name)
     #[arg(long, value_name = "ID")]
@@ -55,11 +55,13 @@ pub struct AskArgs {
 pub struct Parsed {
     /// `None` = pick from `git blame` candidates.
     pub peer: Option<String>,
-    pub path: String,
+    /// `None` = a question about the repository as a whole (OWL-018).
+    pub path: Option<String>,
     pub question: String,
 }
 
 /// `--peer` covers PEER, `--file` covers PATH; the remaining positionals fill the rest in order.
+/// Without `--file`, two remaining positionals are `<path> <question>`, one is just `<question>`.
 pub fn parse_positionals(
     args: &[String],
     peer_flag: Option<&str>,
@@ -74,12 +76,13 @@ pub fn parse_positionals(
                 .with_context(|| format!("missing <peer>\n{USAGE}"))?,
         ),
     };
+    let mut rest: Vec<String> = it.collect();
     let path = match file_flag {
-        Some(f) => f.to_string(),
-        None => it
-            .next()
-            .with_context(|| format!("missing <path>\n{USAGE}"))?,
+        Some(f) => Some(f.to_string()),
+        None if rest.len() >= 2 => Some(rest.remove(0)),
+        None => None,
     };
+    let mut it = rest.into_iter();
     let question = it
         .next()
         .with_context(|| format!("missing <question>\n{USAGE}"))?;
@@ -104,7 +107,7 @@ pub fn run(home: &Path, args: AskArgs, json: bool, quiet: bool) -> anyhow::Resul
     let contact: Contact = match &parsed.peer {
         Some(query) => book.resolve(query)?.clone(),
         None => {
-            let file = args.file.as_deref().unwrap_or(&parsed.path);
+            let file = args.file.as_deref().expect("peer is None only with --file");
             let stats = blame(&cwd, Path::new(file))?;
             let cands = candidates(&stats, &book.contacts);
             if json {
@@ -117,7 +120,7 @@ pub fn run(home: &Path, args: AskArgs, json: bool, quiet: bool) -> anyhow::Resul
     };
     let project = args.project.clone().unwrap_or_else(|| detect_project(&cwd));
     let spool = Spool::new(home)?;
-    let hash = envelope::question_hash(&project, &parsed.path, &parsed.question);
+    let hash = envelope::question_hash(&project, parsed.path.as_deref(), &parsed.question);
     if !args.no_cache
         && let Some(hit) = cache_lookup(&spool, &hash, quiet)
     {
@@ -128,7 +131,7 @@ pub fn run(home: &Path, args: AskArgs, json: bool, quiet: bool) -> anyhow::Resul
         &own,
         &contact.fingerprint,
         &project,
-        &parsed.path,
+        parsed.path.as_deref(),
         &parsed.question,
     );
     let envelope = Envelope::sign(&payload, &identity);
@@ -175,7 +178,7 @@ pub fn run(home: &Path, args: AskArgs, json: bool, quiet: bool) -> anyhow::Resul
                         id,
                         peer: contact.fingerprint.clone(),
                         hash,
-                        path: parsed.path.clone(),
+                        path: parsed.path.clone().unwrap_or_else(|| "-".to_string()),
                     };
                     wait_for_answer(&identity, &contact, &iroh, &spool, &ask, secs, json, quiet)
                 }
@@ -525,7 +528,7 @@ mod tests {
             parse_positionals(&s(&["bea", "src/x.rs", "why?"]), None, None).unwrap(),
             Parsed {
                 peer: Some("bea".into()),
-                path: "src/x.rs".into(),
+                path: Some("src/x.rs".into()),
                 question: "why?".into()
             }
         );
@@ -533,7 +536,7 @@ mod tests {
             parse_positionals(&s(&["why?"]), None, Some("src/x.rs")).unwrap(),
             Parsed {
                 peer: None,
-                path: "src/x.rs".into(),
+                path: Some("src/x.rs".into()),
                 question: "why?".into()
             }
         );
@@ -541,7 +544,7 @@ mod tests {
             parse_positionals(&s(&["why?"]), Some("bea"), Some("src/x.rs")).unwrap(),
             Parsed {
                 peer: Some("bea".into()),
-                path: "src/x.rs".into(),
+                path: Some("src/x.rs".into()),
                 question: "why?".into()
             }
         );
@@ -549,7 +552,7 @@ mod tests {
             parse_positionals(&s(&["src/x.rs", "why?"]), Some("bea"), None).unwrap(),
             Parsed {
                 peer: Some("bea".into()),
-                path: "src/x.rs".into(),
+                path: Some("src/x.rs".into()),
                 question: "why?".into()
             }
         );
@@ -557,8 +560,25 @@ mod tests {
             parse_positionals(&s(args), p, f).unwrap_err().to_string()
         };
         assert!(err(&[], None, None).contains("missing <peer>"));
-        assert!(err(&["bea"], None, None).contains("missing <path>"));
-        assert!(err(&["bea", "p"], None, None).contains("missing <question>"));
+        assert!(err(&["bea"], None, None).contains("missing <question>"));
+        // Two positionals after the peer are `<path> <question>`; one is a repo-level question.
+        assert_eq!(
+            parse_positionals(&s(&["bea", "why?"]), None, None).unwrap(),
+            Parsed {
+                peer: Some("bea".into()),
+                path: None,
+                question: "why?".into()
+            }
+        );
+        assert_eq!(
+            parse_positionals(&s(&["why?"]), Some("bea"), None).unwrap(),
+            Parsed {
+                peer: Some("bea".into()),
+                path: None,
+                question: "why?".into()
+            }
+        );
+        assert!(err(&["bea", "  "], None, None).contains("question is empty"));
         assert!(err(&[], None, Some("f")).contains("missing <question>"));
         assert!(err(&["bea", "p", "q", "extra"], None, None).contains("unexpected argument"));
         assert!(err(&["q", "extra"], Some("bea"), Some("f")).contains("unexpected argument"));

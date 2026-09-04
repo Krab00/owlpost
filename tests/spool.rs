@@ -208,7 +208,7 @@ fn record_roundtrip_keeps_draft_and_meta() {
 fn cache_roundtrip() {
     let home = tempfile::tempdir().unwrap();
     let spool = Spool::new(home.path()).unwrap();
-    let hash = owlpost::envelope::question_hash("proj", "path", "why?");
+    let hash = owlpost::envelope::question_hash("proj", Some("path"), "why?");
     let mut r = rec("cached");
     r.raw = r#"{"type":"answer"}"#.into();
     assert!(spool.cache_get(&hash).unwrap().is_none());
@@ -220,7 +220,7 @@ fn cache_roundtrip() {
             .join(format!("{hash}.json"))
             .exists()
     );
-    let other = owlpost::envelope::question_hash("proj", "path", "why not?");
+    let other = owlpost::envelope::question_hash("proj", Some("path"), "why not?");
     assert_ne!(other, hash);
     assert!(spool.cache_get(&other).unwrap().is_none());
     assert!(

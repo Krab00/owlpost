@@ -69,7 +69,7 @@ pub struct AnswerIngested {
     pub id: String,
     /// Fingerprint of the answering peer.
     pub peer: String,
-    /// Path the original question was about.
+    /// Path the original question was about; `-` for a repo-level question.
     pub path: String,
 }
 
@@ -384,7 +384,6 @@ fn validate_question(value: &Value, caller: &str, me: &str) -> ApiResult<Payload
         .and_then(Value::as_object)
         .ok_or_else(|| ApiError::bad_request("body must be an object"))?;
     str_field(body, "project").map_err(|_| ApiError::bad_request("missing body.project"))?;
-    str_field(body, "path").map_err(|_| ApiError::bad_request("missing body.path"))?;
     let question =
         str_field(body, "question").map_err(|_| ApiError::bad_request("missing body.question"))?;
     if question.trim().is_empty() {
@@ -467,7 +466,7 @@ async fn post_question(
             project,
             path,
             question,
-        } => (project.as_str(), path.as_str(), question.as_str()),
+        } => (project.as_str(), path.as_deref(), question.as_str()),
         envelope::Body::Answer { .. } => {
             return Err(ApiError::bad_request("type must be question"));
         }

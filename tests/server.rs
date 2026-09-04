@@ -184,7 +184,7 @@ async fn question_is_accepted_and_spooled() {
         rec.meta["hash"],
         question_hash(
             PROJECT,
-            PATH,
+            Some(PATH),
             "Why is the refresh token rotated on every read?"
         )
     );
@@ -295,7 +295,7 @@ async fn never_and_disabled_return_unavailable() {
     let ans = Envelope::sign(&Payload::answer(&q, "Because.", "fake", 0, true), &b.id);
     b.spool()
         .cache_put(
-            &question_hash(PROJECT, PATH, "why?"),
+            &question_hash(PROJECT, Some(PATH), "why?"),
             &record(&ans.raw, &ans.sig, "cached"),
         )
         .unwrap();
@@ -329,7 +329,7 @@ async fn never_and_disabled_return_unavailable() {
     let ans = Envelope::sign(&Payload::answer(&q, "Because.", "fake", 0, true), &b.id);
     b.spool()
         .cache_put(
-            &question_hash(PROJECT, PATH, "why?"),
+            &question_hash(PROJECT, Some(PATH), "why?"),
             &record(&ans.raw, &ans.sig, "cached"),
         )
         .unwrap();
@@ -642,7 +642,7 @@ async fn cache_hit_returns_answer() {
     let ans_env = Envelope::sign(&answer, &b.id);
     b.spool()
         .cache_put(
-            &question_hash(PROJECT, PATH, text),
+            &question_hash(PROJECT, Some(PATH), text),
             &record(&ans_env.raw, &ans_env.sig, "cached"),
         )
         .unwrap();
@@ -721,7 +721,7 @@ async fn cache_hit_returns_answer() {
     );
     b.spool()
         .cache_put(
-            &question_hash(PROJECT, PATH, text),
+            &question_hash(PROJECT, Some(PATH), text),
             &record(&ans_env.raw, &ans_env.sig, "cached"),
         )
         .unwrap();

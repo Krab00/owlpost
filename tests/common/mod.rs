@@ -217,7 +217,7 @@ pub fn record(env: &Envelope, state: &str) -> Record {
 }
 
 pub fn question(from: &Identity, to: &Identity, text: &str) -> Payload {
-    Payload::question(&fp(from), &fp(to), PROJECT, PATH, text)
+    Payload::question(&fp(from), &fp(to), PROJECT, Some(PATH), text)
 }
 
 pub fn signed(from: &Identity, to: &Identity, text: &str) -> Envelope {

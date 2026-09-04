@@ -97,7 +97,7 @@ pub struct OpenAsk {
     pub peer: String,
     /// Asker-cache key: `meta.hash`, else recomputed from the question.
     pub hash: String,
-    /// Path the question was about (for the notification).
+    /// Path the question was about (for the notification); `-` for a repo-level question.
     pub path: String,
 }
 
@@ -129,8 +129,9 @@ pub fn open_ask(id: &str, rec: &Record) -> Option<OpenAsk> {
     Some(OpenAsk {
         id: id.to_string(),
         peer: meta_str("peer").unwrap_or_else(|| payload.to.clone()),
-        hash: meta_str("hash").unwrap_or_else(|| envelope::question_hash(project, path, question)),
-        path: path.clone(),
+        hash: meta_str("hash")
+            .unwrap_or_else(|| envelope::question_hash(project, path.as_deref(), question)),
+        path: path.clone().unwrap_or_else(|| "-".to_string()),
     })
 }
 
@@ -467,7 +468,7 @@ mod tests {
             &identity::fingerprint(&a.verifying_key()),
             &identity::fingerprint(&b.verifying_key()),
             "proj",
-            "src/x.rs",
+            Some("src/x.rs"),
             "why?",
         )
     }
@@ -604,7 +605,7 @@ mod tests {
         assert_eq!(ask.peer, identity::fingerprint(&b.verifying_key()));
         assert_eq!(
             ask.hash,
-            envelope::question_hash("proj", "src/x.rs", "why?")
+            envelope::question_hash("proj", Some("src/x.rs"), "why?")
         );
         // Wrong-shape meta (array, empty strings, numbers): same fallbacks, no panic.
         for meta in [
@@ -616,7 +617,7 @@ mod tests {
             assert_eq!(ask.peer, identity::fingerprint(&b.verifying_key()));
             assert_eq!(
                 ask.hash,
-                envelope::question_hash("proj", "src/x.rs", "why?")
+                envelope::question_hash("proj", Some("src/x.rs"), "why?")
             );
         }
         // Not a payload, or an answer payload: skipped.

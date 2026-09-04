@@ -90,7 +90,7 @@ fn seed(home: &Path, me: &Identity, maciek: &Identity, n: usize, seen: bool) {
             seen,
             received_at: envelope::rfc3339_now(),
             draft: None,
-            meta: json!({ "peer": p.from, "hash": envelope::question_hash(project, path, question) }),
+            meta: json!({ "peer": p.from, "hash": envelope::question_hash(project, path.as_deref(), question) }),
         };
         spool.put(Dir::Inbox, &p.id, &rec).unwrap();
     }

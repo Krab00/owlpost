@@ -487,7 +487,7 @@ mod tests {
             Identity::from_seed([3; 32]),
         );
         let contact = contact_for(&b, &[]);
-        let q = Payload::question("owl:a", "owl:b", "p", "f", "why?");
+        let q = Payload::question("owl:a", "owl:b", "p", Some("f"), "why?");
         let ans = Payload::answer(&q, "Because.", "fake", 0, false);
         let good = Envelope::sign(&ans, &b);
         let got = verify_answer(&contact, &good, Some(&q.id)).unwrap();
@@ -540,7 +540,10 @@ mod tests {
     fn no_endpoints_without_iroh_is_offline() {
         let (a, b) = (Identity::from_seed([1; 32]), Identity::from_seed([2; 32]));
         let contact = contact_for(&b, &[]);
-        let env = Envelope::sign(&Payload::question("owl:a", "owl:b", "p", "f", "why?"), &a);
+        let env = Envelope::sign(
+            &Payload::question("owl:a", "owl:b", "p", Some("f"), "why?"),
+            &a,
+        );
         match send_question(&a, &contact, &no_iroh(), &env).unwrap() {
             SendOutcome::Offline { errors } => {
                 assert_eq!(errors, ["iroh: no local daemon (daemon.addr missing)"]);
@@ -564,7 +567,10 @@ mod tests {
         };
         let (p1, p2) = (closed(()), closed(()));
         let contact = contact_for(&b, &[&p1, &p2]);
-        let env = Envelope::sign(&Payload::question("owl:a", "owl:b", "p", "f", "why?"), &a);
+        let env = Envelope::sign(
+            &Payload::question("owl:a", "owl:b", "p", Some("f"), "why?"),
+            &a,
+        );
         match send_question(&a, &contact, &no_iroh(), &env).unwrap() {
             SendOutcome::Offline { errors } => {
                 assert_eq!(errors.len(), 3, "{errors:?}");

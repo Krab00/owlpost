@@ -50,7 +50,7 @@ pub fn run(home: &Path, id: &str, json: bool) -> anyhow::Result<()> {
                     question,
                 } => {
                     println!("project:  {project}");
-                    println!("path:     {path}");
+                    println!("path:     {}", path.as_deref().unwrap_or("-"));
                     println!("question:");
                     println!("{question}");
                 }

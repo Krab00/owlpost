@@ -196,7 +196,8 @@ pub fn peer_name(state: &AppState, fingerprint: &str) -> String {
         .unwrap_or_else(|| fingerprint.to_string())
 }
 
-/// `body.path` of the spooled question `id`; `"?"` when the record cannot be read.
+/// `body.path` of the spooled question `id`; `"-"` for a repo-level question, `"?"` when the
+/// record cannot be read.
 fn question_path(state: &AppState, id: &str) -> String {
     let rec = match state.spool.get(Dir::Inbox, id) {
         Ok(Some(rec)) => rec,
@@ -206,7 +207,7 @@ fn question_path(state: &AppState, id: &str) -> String {
         Ok(crate::envelope::Payload {
             body: crate::envelope::Body::Question { path, .. },
             ..
-        }) => path,
+        }) => path.unwrap_or_else(|| "-".to_string()),
         _ => "?".to_string(),
     }
 }
