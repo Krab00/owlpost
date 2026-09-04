@@ -1315,7 +1315,7 @@ async fn unexpected_status_is_an_error_naming_it() {
     q.ts = envelope::unix_to_rfc3339(envelope::now_unix() - 3600);
     let env = Envelope::sign(&q, &a);
     let ident = Identity::from_seed([1; 32]);
-    let err = tokio::task::spawn_blocking(move || client::send_question(&ident, &contact, &env))
+    let err = tokio::task::spawn_blocking(move || client::send_question(&ident, &contact, &client::Iroh::Unavailable("none".into()), &env))
         .await
         .unwrap()
         .unwrap_err()
@@ -1326,7 +1326,7 @@ async fn unexpected_status_is_an_error_naming_it() {
     let q = question(&a, &b.id, QUESTION);
     let env = Envelope::sign(&q, &a);
     let ident = Identity::from_seed([1; 32]);
-    let out = tokio::task::spawn_blocking(move || client::send_question(&ident, &contact, &env))
+    let out = tokio::task::spawn_blocking(move || client::send_question(&ident, &contact, &client::Iroh::Unavailable("none".into()), &env))
         .await
         .unwrap()
         .unwrap();

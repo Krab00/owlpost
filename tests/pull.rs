@@ -488,6 +488,7 @@ async fn asks_are_grouped_by_responder() {
             &home,
             &home,
             &a_id,
+            &owlpost::client::Iroh::Unavailable("none".into()),
             &spool,
             &mut liveness,
             Instant::now(),

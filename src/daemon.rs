@@ -1,7 +1,8 @@
-//! Daemon run loop: the mTLS listener, the pull loop (`crate::pull`) and the auto-accept scan
-//! (`crate::auto`) as sibling tasks; the event consumer notifies and triggers auto-accept.
+//! Daemon run loop: the mTLS listener, the iroh listener (`crate::iroh`), the pull loop
+//! (`crate::pull`) and the auto-accept scan (`crate::auto`) as sibling tasks; the event
+//! consumer notifies and triggers auto-accept.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -30,6 +31,9 @@ pub struct Running {
     pull: JoinHandle<()>,
     /// The auto-accept scan; aborted with the pull loop.
     auto: JoinHandle<()>,
+    /// The iroh endpoint (closed on `shutdown` / `wait`) and its accept loop.
+    iroh: iroh::Endpoint,
+    accept: JoinHandle<()>,
 }
 
 impl std::fmt::Debug for Running {
@@ -39,21 +43,32 @@ impl std::fmt::Debug for Running {
 }
 
 impl Running {
-    /// Stops accepting, drops open connections and stops the pull loop.
+    /// Stops accepting, drops open connections, closes the iroh endpoint and stops the pull
+    /// loop.
     pub fn shutdown(&self) {
         self.handle.shutdown();
         self.pull.abort();
         self.auto.abort();
+        self.accept.abort();
+        let endpoint = self.iroh.clone();
+        tokio::spawn(async move { endpoint.close().await });
     }
 
     /// Waits for the listener task to end (after `shutdown`, or on a listener error); the pull
-    /// loop is stopped with it.
+    /// loop and the iroh endpoint are stopped with it.
     pub async fn wait(self) -> anyhow::Result<()> {
         let result = self.task.await.context("listener task");
         self.pull.abort();
         self.auto.abort();
+        self.accept.abort();
+        self.iroh.close().await;
         result??;
         Ok(())
+    }
+
+    /// The daemon's iroh endpoint.
+    pub fn iroh(&self) -> &iroh::Endpoint {
+        &self.iroh
     }
 
     /// True while the pull loop task is alive.
@@ -62,12 +77,14 @@ impl Running {
     }
 }
 
-/// Client keys allowed through the TLS handshake: every contact in the merged book.
-pub fn allowed_keys(book: &ContactBook) -> AllowedKeys {
+/// Client keys allowed through the TLS handshake: every contact in the merged book, plus
+/// the owner's own key (the CLI uses it for the iroh forward route).
+pub fn allowed_keys(book: &ContactBook, owner: &Identity) -> AllowedKeys {
     book.contacts
         .iter()
         .filter_map(|c| identity::parse_pubkey(&c.pubkey).ok())
         .map(|pk| *pk.as_bytes())
+        .chain(std::iter::once(*owner.verifying_key().as_bytes()))
         .collect()
 }
 
@@ -80,7 +97,7 @@ pub async fn spawn(home: &Path, config: Config) -> anyhow::Result<Running> {
         .listen
         .parse()
         .with_context(|| format!("config.listen {:?} is not host:port", config.listen))?;
-    let tls_config = tls::server_config(&identity, allowed_keys(&book), true)?;
+    let tls_config = tls::server_config(&identity, allowed_keys(&book, &identity), true)?;
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<DaemonEvent>();
     let scheduler = crate::auto::Scheduler::new();
@@ -103,6 +120,9 @@ pub async fn spawn(home: &Path, config: Config) -> anyhow::Result<Running> {
             handle_event(&events_state, ev);
         }
     });
+    let endpoint = crate::iroh::endpoint(&state.identity, state.config.relay_urls.as_deref()).await?;
+    let _ = state.iroh.set(endpoint.clone());
+    let accept = tokio::spawn(crate::iroh::accept_loop(endpoint.clone(), state.clone()));
     let app = crate::server::router(state.clone());
     let acceptor = PeerAcceptor::new(RustlsAcceptor::new(RustlsConfig::from_config(tls_config)));
     let handle = Handle::new();
@@ -116,10 +136,12 @@ pub async fn spawn(home: &Path, config: Config) -> anyhow::Result<Running> {
             Ok(Ok(())) => anyhow::anyhow!("listener exited before binding"),
             Err(e) => anyhow::Error::from(e),
         };
+        accept.abort();
+        endpoint.close().await;
         return Err(err.context(format!("binding {listen}")));
     };
     let _ = state.bound.set(addr);
-    tracing::info!(%addr, fingerprint = %state.fingerprint(), "listening");
+    tracing::info!(%addr, fingerprint = %state.fingerprint(), iroh = %endpoint.id().fmt_short(), "listening");
     let pull = tokio::spawn(crate::pull::run_loop(state.clone()));
     let auto = tokio::spawn(scheduler.run_scan(state.clone()));
     Ok(Running {
@@ -129,6 +151,8 @@ pub async fn spawn(home: &Path, config: Config) -> anyhow::Result<Running> {
         task,
         pull,
         auto,
+        iroh: endpoint,
+        accept,
     })
 }
 
@@ -204,6 +228,30 @@ pub fn write_addr_file(home: &Path, addr: SocketAddr) -> anyhow::Result<()> {
     write_atomic(home, ADDR_FILE, format!("{addr}\n").as_bytes())
 }
 
+/// A wildcard bind address is not connectable; use the loopback of the same family.
+pub fn connect_addr(addr: SocketAddr) -> SocketAddr {
+    if addr.ip().is_unspecified() {
+        let ip: IpAddr = match addr.ip() {
+            IpAddr::V4(_) => "127.0.0.1".parse().expect("literal"),
+            IpAddr::V6(_) => "::1".parse().expect("literal"),
+        };
+        SocketAddr::new(ip, addr.port())
+    } else {
+        addr
+    }
+}
+
+/// The connectable address of the local daemon from `<home>/daemon.addr`; `None` when the
+/// file is missing or does not hold `host:port`.
+pub fn local_addr(home: &Path) -> Option<SocketAddr> {
+    std::fs::read_to_string(home.join(ADDR_FILE))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+        .map(connect_addr)
+}
+
 /// `owl daemon --foreground`: serve until the listener stops (or the process is killed).
 pub async fn run_foreground(home: &Path, config: Config) -> anyhow::Result<()> {
     let running = spawn(home, config).await?;
@@ -254,9 +302,10 @@ mod tests {
     }
 
     #[test]
-    fn allowed_keys_skips_bad_pubkeys() {
+    fn allowed_keys_skips_bad_pubkeys_and_adds_the_owner() {
         use crate::contacts::Contact;
         let good = Identity::from_seed([5u8; 32]);
+        let owner = Identity::from_seed([6u8; 32]);
         let mk = |pubkey: &str| Contact {
             name: String::new(),
             emails: vec![],
@@ -274,10 +323,67 @@ mod tests {
                 mk("garbage"),
             ],
         };
-        let keys = allowed_keys(&book);
-        assert_eq!(keys.len(), 1);
+        let keys = allowed_keys(&book, &owner);
+        assert_eq!(keys.len(), 2);
         assert!(keys.contains(good.verifying_key().as_bytes()));
-        assert!(allowed_keys(&ContactBook::default()).is_empty());
+        assert!(keys.contains(owner.verifying_key().as_bytes()));
+        let only_owner = allowed_keys(&ContactBook::default(), &owner);
+        assert_eq!(only_owner.len(), 1);
+        assert!(only_owner.contains(owner.verifying_key().as_bytes()));
+    }
+
+    #[test]
+    fn local_addr_reads_daemon_addr_and_maps_wildcards() {
+        let home = tempfile::tempdir().unwrap();
+        assert_eq!(local_addr(home.path()), None, "no file");
+        std::fs::write(home.path().join(ADDR_FILE), "garbage\n").unwrap();
+        assert_eq!(local_addr(home.path()), None, "not host:port");
+        write_addr_file(home.path(), "0.0.0.0:7411".parse().unwrap()).unwrap();
+        assert_eq!(
+            local_addr(home.path()),
+            Some("127.0.0.1:7411".parse().unwrap())
+        );
+        write_addr_file(home.path(), "[::]:7411".parse().unwrap()).unwrap();
+        assert_eq!(local_addr(home.path()), Some("[::1]:7411".parse().unwrap()));
+        write_addr_file(home.path(), "10.0.0.5:1".parse().unwrap()).unwrap();
+        assert_eq!(local_addr(home.path()), Some("10.0.0.5:1".parse().unwrap()));
+    }
+
+    /// AC1: the iroh endpoint id is the identity's public key, byte for byte, and the card
+    /// repeats it as `iroh.id` next to `owlpost.pubkey`.
+    #[tokio::test]
+    async fn iroh_endpoint_id_is_identity_pubkey() {
+        let home = tempfile::tempdir().unwrap();
+        let id = Identity::from_seed([7u8; 32]);
+        id.save(home.path()).unwrap();
+        let cfg = Config {
+            listen: "127.0.0.1:0".into(),
+            relay_urls: Some(vec![]),
+            ..Default::default()
+        };
+        let running = spawn(home.path(), cfg).await.unwrap();
+        assert_eq!(
+            running.iroh().id().as_bytes(),
+            id.verifying_key().as_bytes()
+        );
+        assert_eq!(
+            running.state.iroh.get().unwrap().id().as_bytes(),
+            id.verifying_key().as_bytes()
+        );
+        let card = crate::server::card_json(&running.state);
+        assert_eq!(
+            card["iroh"]["id"],
+            identity::pubkey_string(&id.verifying_key())
+        );
+        assert_eq!(card["iroh"]["id"], card["owlpost"]["pubkey"]);
+        assert_eq!(card["iroh"]["relay"], serde_json::Value::Null);
+        // A different seed is a different id: the equality above is not vacuous.
+        assert_ne!(
+            running.iroh().id().as_bytes(),
+            Identity::from_seed([8u8; 32]).verifying_key().as_bytes()
+        );
+        running.shutdown();
+        running.wait().await.unwrap();
     }
 
     #[tokio::test]
