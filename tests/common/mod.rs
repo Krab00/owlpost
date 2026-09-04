@@ -1,5 +1,6 @@
 //! Shared integration helpers: a daemon with a temp home on 127.0.0.1:0, peer contacts with
-//! optional policy overlays, pinned / unpinned reqwest clients, signed questions.
+//! optional policy overlays, pinned / unpinned reqwest clients, signed questions, and a
+//! plain-HTTP iroh relay on 127.0.0.1:0 for the iroh tests.
 #![allow(dead_code)]
 
 use std::net::SocketAddr;
@@ -99,11 +100,15 @@ pub fn prepare_home_with(
         id.save(home).unwrap();
     }
     // `notify` is off in every fixture daemon so the suite never fires real desktop
-    // notifications; `tests/notify.rs` opts in explicitly through `tweak`.
+    // notifications; `tests/notify.rs` opts in explicitly through `tweak`. `relay_urls` is
+    // the empty list so no fixture daemon ever touches n0's public relays or DNS discovery
+    // (the default `None` would): the iroh endpoint is bound but has no relay; the iroh
+    // tests point it at `relay()` through `tweak`.
     let mut cfg = Config {
         name: "Bea".into(),
         listen: "127.0.0.1:0".into(),
         notify: false,
+        relay_urls: Some(vec![]),
         ..Default::default()
     };
     tweak(&mut cfg);
@@ -165,6 +170,28 @@ pub async fn respawn(dir: TempDir, id: Identity) -> TestDaemon {
         id,
         running,
     }
+}
+
+/// A plain-HTTP iroh relay on 127.0.0.1:0 (no TLS, no QUIC, no n0 infrastructure). The
+/// returned URL goes into `config.relay_urls`; the server stops when dropped.
+pub async fn relay() -> (String, iroh_relay::server::Server) {
+    use iroh_relay::server::{RelayConfig, Server, ServerConfig};
+    let mut config = ServerConfig::default();
+    config.relay = Some(RelayConfig::new((std::net::Ipv4Addr::LOCALHOST, 0)));
+    config.quic = None;
+    let server = Server::spawn(config).await.expect("test relay");
+    let addr = server.http_addr().expect("http relay bound");
+    (format!("http://{addr}/"), server)
+}
+
+/// Bounded wait (≤ 10 s) until the daemon's iroh endpoint is connected to its home relay.
+pub async fn wait_online(d: &TestDaemon) {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        d.running.iroh().online(),
+    )
+    .await
+    .expect("iroh endpoint never reached its relay");
 }
 
 /// reqwest client pinned to `server`'s key; `client = Some(id)` presents a certificate.

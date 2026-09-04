@@ -13,26 +13,34 @@ machine A (asker)                                   machine B (responder)
 │  hooks → `owl inbox --count` │                    │  hooks → `owl inbox --count` │
 │  skill → `owl ask …`         │                    │  skill → `owl draft/send`    │
 │         │ exec               │                    │         │ exec               │
-│  ┌──────▼──────┐             │   HTTPS + mTLS     │  ┌──────▼──────┐             │
-│  │ owl (CLI)   │──┐          │  POST /v1/questions│  │ owl (CLI)   │──┐          │
-│  └─────────────┘  │ spool    │ ─────────────────► │  └─────────────┘  │ spool    │
-│  ┌─────────────┐  │ (files)  │  GET  /v1/outbox   │  ┌─────────────┐  │ (files)  │
-│  │ owl daemon  │◄─┘          │ ◄───────────────── │  │ owl daemon  │◄─┘          │
-│  │ (launchd)   │ pull loop   │                    │  │ (launchd)   │─► runner ─► headless
+│  ┌──────▼──────┐             │  iroh (QUIC by key,│  ┌──────▼──────┐             │
+│  │ owl (CLI)   │──┐          │  hole punch/relay) │  │ owl (CLI)   │──┐          │
+│  └──────┬──────┘  │ spool    │  or HTTPS + mTLS   │  └─────────────┘  │ spool    │
+│         │ /v1/local (forward)│  POST /v1/questions│                   │          │
+│  ┌──────▼──────┐  │ (files)  │ ─────────────────► │  ┌─────────────┐  │ (files)  │
+│  │ owl daemon  │◄─┘          │  GET  /v1/outbox   │  │ owl daemon  │◄─┘          │
+│  │ (launchd)   │ pull loop   │ ◄───────────────── │  │ (launchd)   │─► runner ─► headless
 │  └─────────────┘ OS toast    │                    │  └─────────────┘   read-only session
 └──────────────────────────────┘                    └──────────────────────────────┘
+                                   ┌───────────┐
+              (fallback path only) │ iroh relay│ forwards encrypted QUIC; sees keys + timing
+                                   └───────────┘
 ```
 
 One binary, `owl`, in two roles:
 
 | Role | Lifetime | Responsibilities |
 |---|---|---|
-| `owl daemon` | resident, managed by launchd / systemd user unit, restarted by the OS | HTTPS/mTLS listener; verify signatures, replay, rate limits; write to spool; OS notifications; pull loop for answers; auto-accept runs; consent holding |
+| `owl daemon` | resident, managed by launchd / systemd user unit, restarted by the OS | HTTPS/mTLS listener and iroh listener (one handler, two transports); verify signatures, replay, rate limits; write to spool; OS notifications; pull loop for answers (iroh first, then `endpoints`); auto-accept runs; consent holding; the owner-only forward route the CLI uses to reach peers over iroh |
 | `owl <cmd>` | one-shot, milliseconds | everything the human or the agent does: `ask`, `inbox`, `show`, `draft`, `send`, `reject`, `allow/deny`, `history`, `add`, `card`, `whoami`, `install`, `watch` |
 
-The CLI and the daemon share state only through the **spool** — a directory of JSON files.
-There is no IPC socket in the MVP: the CLI reads and writes the same directories the daemon
-does, and the daemon notices new work by scanning on a short interval.
+The CLI and the daemon share state through the **spool** — a directory of JSON files: the
+CLI reads and writes the same directories the daemon does, and the daemon notices new work by
+scanning on a short interval. The one live call is the iroh **forward route**: an iroh
+endpoint identity is a network singleton (a second endpoint with the same key bumps the
+first at the relay), so only the daemon binds one, and `owl ask` sends its iroh requests to
+the local daemon over the existing mTLS listener (`/v1/local/…`, accepted only from the
+owner's own key), which replays them to the peer.
 `// ponytail: no unix socket; add one only when a command needs a live daemon answer`.
 
 Harness **adapters** are configuration packages (hooks, skill, slash commands) that call `owl`.
@@ -73,8 +81,9 @@ directories or a `state` field update; either way a crash leaves a consistent fi
    contact emails; the human picks).
 2. `owl` checks the **asker-side cache** (hash of project + path + normalised question). Hit →
    answer returned immediately, nothing sent.
-3. Builds the question payload, signs it, connects to the peer's endpoints in order over mTLS
-   (client cert = our key; server cert must match the peer's pinned pubkey).
+3. Builds the question payload, signs it, and reaches the peer: **iroh first** (dial by the
+   contact's key through the local daemon), then the contact's `endpoints` in order over
+   mTLS (client cert = our key; server cert must match the peer's pinned pubkey).
 4. Responses: `200` with an answer payload (responder cache hit), `202 accepted` (queued for the
    human or auto-accept), `403 unavailable` (never/disabled — same wording as offline), `429`
    rate limited. Connection failure → "offline, try later". Nothing is queued locally.
@@ -144,7 +153,9 @@ harness's native memory (Claude Code: auto-memory / `CLAUDE.md` as appropriate) 
 | Concern | Mechanism |
 |---|---|
 | Identity | ed25519 keypair per person; fingerprint = `owl:` + first 16 base32 chars of SHA-256(pubkey) |
-| Transport confidentiality + peer authentication | TLS 1.3 mutual auth; self-signed certs generated from the ed25519 key (rcgen); custom rustls verifiers compare the certificate's SubjectPublicKeyInfo with the pinned pubkey from the contact list; unknown keys are refused at handshake |
+| Transport confidentiality + peer authentication (`endpoints`) | TLS 1.3 mutual auth; self-signed certs generated from the ed25519 key (rcgen); custom rustls verifiers compare the certificate's SubjectPublicKeyInfo with the pinned pubkey from the contact list; unknown keys are refused at handshake |
+| Transport confidentiality + peer authentication (iroh) | QUIC with TLS 1.3 keyed by the same ed25519 key (the iroh endpoint id *is* the contact's pubkey); the daemon reads the remote key off the connection and compares the 32 bytes with the contact book (no certificate to parse); unknown keys are closed before any stream is accepted, never stored |
+| Relay visibility | the relay forwards end-to-end encrypted QUIC only when no direct path exists; it learns which two keys connected, when, and from which IPs — never content. Default: n0's public relays; `relay_urls` = a self-hosted relay keeps the metadata in-house; `endpoints`-only contacts avoid relays entirely |
 | Message authenticity at rest and via relay | ed25519 signature over the exact HTTP body bytes, carried in `X-Owl-Signature`; stored alongside the body |
 | Replay | `id` (UUIDv7) + `ts` (RFC 3339); reject `|now − ts| > 5 min` and ids in the seen window |
 | Abuse | per-peer token bucket (default 20 questions/hour), `429`; asker-side and responder-side caches |
@@ -157,7 +168,9 @@ harness's native memory (Claude Code: auto-memory / `CLAUDE.md` as appropriate) 
 
 | Situation | Result |
 |---|---|
-| Responder offline when asking | immediate failure, nothing queued, ask again later |
+| Responder offline when asking | immediate failure, nothing queued, ask again later — reported only after **both** transports failed (iroh dial, bounded by a 10 s timeout, then every `endpoint`) |
+| Responder behind NAT, no `endpoints` | reached over iroh: direct after hole punching, else through the relay; same request, same statuses |
+| Relay unreachable / not configured (`relay_urls: []`) | iroh is dead for that pair; delivery falls back to `endpoints`, and with none the peer is offline |
 | Responder `never` / responder disabled | `403 unavailable`, wording identical to offline |
 | Asker offline when the answer is produced | answer waits in the responder's outbox; asker's daemon pulls it when both are online |
 | Answer never pulled | expires from outbox after TTL; responder cache still answers a re-ask instantly |
@@ -201,3 +214,4 @@ Kimi and opencode adapters as configuration-only follow-ups.
 | D10 | Auto-accept in MVP behind a per-contact flag, off by default | sandbox exists anyway; pilot must measure human-gated latency |
 | D11 | Statusline badge post-MVP | unreliable in Claude Code idle, absent in Codex, needs a footer script in Kimi |
 | D12 | Full A2A deferred | only request/response is needed; task lifecycle conflicts with no-queue semantics |
+| D13 | iroh as the first transport, `endpoints` second | the first cross-machine test had no dialable address; iroh dials by the key we already pin, hole punches and falls back to a relay that sees metadata but no content; the relay can be self-hosted; the daemon owns the single endpoint and forwards for the CLI |

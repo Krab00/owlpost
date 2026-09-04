@@ -1,9 +1,10 @@
 //! `owl doctor` (§9): one line per check — `ok|warn|fail  <name>: <detail>` — for the key,
 //! the config, every endpoint's host, the configured harness binaries, the daemon at
-//! `daemon.addr` (card fetch, pinned to our own key) and the age of the last pull recorded in
-//! `daemon.status`. Exit 1 when any check fails; `--json` prints `[{check, status, detail}]`.
+//! `daemon.addr` (card fetch, pinned to our own key), the daemon's iroh endpoint (from the
+//! card) and the age of the last pull recorded in `daemon.status`. Exit 1 when any check
+//! fails; `--json` prints `[{check, status, detail}]`.
 
-use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -15,6 +16,7 @@ use serde_json::Value;
 use crate::cli::ExitError;
 use owlpost::config::Config;
 use owlpost::daemon::ADDR_FILE;
+pub use owlpost::daemon::connect_addr;
 use owlpost::envelope;
 use owlpost::identity::{self, Identity};
 use owlpost::pull::{self, STATUS_FILE};
@@ -107,12 +109,12 @@ pub fn config_check(home: &Path) -> (Check, Config) {
 }
 
 /// `endpoints`: one line per configured `host:port`, resolved with the system resolver;
-/// a single `warn` when none is configured.
+/// a single `ok` when none is configured (peers reach the daemon over iroh).
 pub fn endpoint_checks(config: &Config) -> Vec<Check> {
     if config.endpoints.is_empty() {
-        return vec![Check::warn(
+        return vec![Check::ok(
             "endpoints",
-            "none configured (peers cannot reach this daemon)",
+            "none configured (peers reach this daemon over iroh)",
         )];
     }
     config
@@ -178,42 +180,35 @@ pub fn harness_checks(
     out
 }
 
-/// A wildcard bind address is not connectable; use the loopback of the same family.
-pub fn connect_addr(addr: SocketAddr) -> SocketAddr {
-    if addr.ip().is_unspecified() {
-        let ip: IpAddr = match addr.ip() {
-            IpAddr::V4(_) => "127.0.0.1".parse().expect("literal"),
-            IpAddr::V6(_) => "::1".parse().expect("literal"),
-        };
-        SocketAddr::new(ip, addr.port())
-    } else {
-        addr
-    }
-}
-
 /// `daemon`: `daemon.addr` exists, the card is served there and (when our key is known) the
-/// card's fingerprint is ours.
-pub fn daemon_check(home: &Path, id: Option<&Identity>) -> Check {
+/// card's fingerprint is ours. Returns the card when it was fetched (for `iroh_check`).
+pub fn daemon_check(home: &Path, id: Option<&Identity>) -> (Check, Option<Value>) {
     let addr_path = home.join(ADDR_FILE);
     let raw = match std::fs::read_to_string(&addr_path) {
         Ok(s) => s,
         Err(_) => {
-            return Check::fail(
-                "daemon",
-                format!("{} missing (is the daemon running?)", addr_path.display()),
+            return (
+                Check::fail(
+                    "daemon",
+                    format!("{} missing (is the daemon running?)", addr_path.display()),
+                ),
+                None,
             );
         }
     };
     let addr: SocketAddr = match raw.trim().parse() {
         Ok(a) => a,
         Err(_) => {
-            return Check::fail(
-                "daemon",
-                format!(
-                    "{} holds {:?}, not host:port",
-                    addr_path.display(),
-                    raw.trim()
+            return (
+                Check::fail(
+                    "daemon",
+                    format!(
+                        "{} holds {:?}, not host:port",
+                        addr_path.display(),
+                        raw.trim()
+                    ),
                 ),
+                None,
             );
         }
     };
@@ -224,16 +219,58 @@ pub fn daemon_check(home: &Path, id: Option<&Identity>) -> Check {
                 .get("owlpost")
                 .and_then(|o| o.get("fingerprint"))
                 .and_then(Value::as_str)
-                .unwrap_or_default();
+                .unwrap_or_default()
+                .to_string();
             match id.map(|i| identity::fingerprint(&i.verifying_key())) {
-                Some(mine) if mine != got => Check::fail(
-                    "daemon",
-                    format!("reachable at {target} but serves fingerprint {got:?}, not ours"),
+                Some(mine) if mine != got => (
+                    Check::fail(
+                        "daemon",
+                        format!("reachable at {target} but serves fingerprint {got:?}, not ours"),
+                    ),
+                    Some(card),
                 ),
-                _ => Check::ok("daemon", format!("reachable at {target} ({got})")),
+                _ => (
+                    Check::ok("daemon", format!("reachable at {target} ({got})")),
+                    Some(card),
+                ),
             }
         }
-        Err(e) => Check::fail("daemon", format!("{target}: {e:#}")),
+        Err(e) => (Check::fail("daemon", format!("{target}: {e:#}")), None),
+    }
+}
+
+/// iroh's short form of an endpoint id: hex of the first five key bytes.
+fn short_id(pubkey: &str) -> String {
+    match identity::parse_pubkey(pubkey) {
+        Ok(pk) => pk.as_bytes()[..5]
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect(),
+        Err(_) => pubkey.to_string(),
+    }
+}
+
+/// `iroh`: from the card's `iroh` block — `ok iroh: <id short>, relay <url>` when the
+/// endpoint is connected to a relay, `warn iroh: bound, no relay` when it is not; `warn`
+/// too when the card was not fetched (the daemon line says why) or carries no endpoint.
+pub fn iroh_check(card: Option<&Value>) -> Check {
+    let Some(card) = card else {
+        return Check::warn("iroh", "unknown (daemon unreachable)");
+    };
+    let Some(id) = card
+        .get("iroh")
+        .and_then(|i| i.get("id"))
+        .and_then(Value::as_str)
+    else {
+        return Check::warn("iroh", "not bound");
+    };
+    match card
+        .get("iroh")
+        .and_then(|i| i.get("relay"))
+        .and_then(Value::as_str)
+    {
+        Some(relay) => Check::ok("iroh", format!("{}, relay {relay}", short_id(id))),
+        None => Check::warn("iroh", "bound, no relay"),
     }
 }
 
@@ -327,7 +364,9 @@ pub fn run_checks(home: &Path) -> Vec<Check> {
         std::env::var_os("PATH").as_deref(),
         &user_home,
     ));
-    out.push(daemon_check(home, id.as_ref()));
+    let (daemon_line, card) = daemon_check(home, id.as_ref());
+    out.push(daemon_line);
+    out.push(iroh_check(card.as_ref()));
     out.push(pull_check(home, &config, envelope::now_unix()));
     out
 }
@@ -422,7 +461,11 @@ mod tests {
     fn endpoint_checks_resolve_or_fail() {
         let mut cfg = Config::default();
         let none = endpoint_checks(&cfg);
-        assert_eq!(statuses(&none), [("endpoints".to_string(), Status::Warn)]);
+        assert_eq!(statuses(&none), [("endpoints".to_string(), Status::Ok)]);
+        assert_eq!(
+            none[0].line(),
+            "ok   endpoints: none configured (peers reach this daemon over iroh)"
+        );
         cfg.endpoints = vec![
             "127.0.0.1:7411".into(),
             "localhost:7411".into(),
@@ -555,21 +598,80 @@ mod tests {
     #[test]
     fn daemon_check_without_addr_file_or_listener_fails() {
         let home = tempfile::tempdir().unwrap();
-        let c = daemon_check(home.path(), None);
+        let (c, card) = daemon_check(home.path(), None);
         assert_eq!(c.status, Status::Fail);
         assert!(c.detail.contains("daemon.addr missing"), "{c:?}");
+        assert!(card.is_none());
         std::fs::write(home.path().join(ADDR_FILE), "garbage\n").unwrap();
-        let c = daemon_check(home.path(), None);
+        let (c, card) = daemon_check(home.path(), None);
         assert_eq!(c.status, Status::Fail);
         assert!(c.detail.contains("not host:port"), "{c:?}");
+        assert!(card.is_none());
         // A port nobody listens on: connection refused → fail naming the address.
         let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = free.local_addr().unwrap();
         drop(free);
         std::fs::write(home.path().join(ADDR_FILE), format!("{addr}\n")).unwrap();
-        let c = daemon_check(home.path(), None);
+        let (c, card) = daemon_check(home.path(), None);
         assert_eq!(c.status, Status::Fail);
         assert!(c.detail.starts_with(&addr.to_string()), "{c:?}");
+        assert!(card.is_none());
+    }
+
+    /// AC6: the two iroh lines, pinned verbatim, plus the two fallbacks.
+    #[test]
+    fn iroh_line() {
+        let id = Identity::from_seed([7u8; 32]);
+        let pubkey = identity::pubkey_string(&id.verifying_key());
+        let hex: String = id.verifying_key().as_bytes()[..5]
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert_eq!(hex.len(), 10);
+        let connected = serde_json::json!({
+            "owlpost": { "fingerprint": "owl:x" },
+            "iroh": { "id": pubkey, "relay": "http://127.0.0.1:3340/" }
+        });
+        assert_eq!(
+            iroh_check(Some(&connected)).line(),
+            format!("ok   iroh: {hex}, relay http://127.0.0.1:3340/")
+        );
+        let bound = serde_json::json!({ "iroh": { "id": pubkey, "relay": null } });
+        assert_eq!(
+            iroh_check(Some(&bound)).line(),
+            "warn iroh: bound, no relay"
+        );
+        let no_relay_key = serde_json::json!({ "iroh": { "id": pubkey } });
+        assert_eq!(
+            iroh_check(Some(&no_relay_key)).line(),
+            "warn iroh: bound, no relay"
+        );
+        // A relay that is not a string is no relay.
+        let odd = serde_json::json!({ "iroh": { "id": pubkey, "relay": 7 } });
+        assert_eq!(iroh_check(Some(&odd)).line(), "warn iroh: bound, no relay");
+        // No endpoint in the card (`iroh: null`, missing, or an id that is not a string).
+        for card in [
+            serde_json::json!({ "iroh": null }),
+            serde_json::json!({ "owlpost": {} }),
+            serde_json::json!({ "iroh": { "id": 5, "relay": "x" } }),
+            serde_json::json!([]),
+        ] {
+            assert_eq!(
+                iroh_check(Some(&card)).line(),
+                "warn iroh: not bound",
+                "{card}"
+            );
+        }
+        assert_eq!(
+            iroh_check(None).line(),
+            "warn iroh: unknown (daemon unreachable)"
+        );
+        // An unparseable id is shown as is rather than hidden.
+        let raw = serde_json::json!({ "iroh": { "id": "ed25519:AAAA", "relay": "r" } });
+        assert_eq!(
+            iroh_check(Some(&raw)).line(),
+            "ok   iroh: ed25519:AAAA, relay r"
+        );
     }
 
     fn status_at(home: &Path, last_pull_at: &str) {
