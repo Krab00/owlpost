@@ -162,23 +162,23 @@ fn installs_the_tagged_version_into_prefix() {
         .collect();
     assert_eq!(names, vec!["owl".to_string()]);
 
-    // Stdout: what was fetched, where it landed, the three next steps in order.
-    let so = stdout(&out);
-    assert!(
-        so.contains(&format!("downloading {}/{}", rel.base_url(), rel.asset)),
-        "{so}"
+    // Stdout, whole: what was fetched, where it landed, the PATH note (the temp prefix is
+    // never on PATH), the three next steps in order.
+    assert_eq!(
+        stdout(&out),
+        format!(
+            "downloading {base}/{asset}\n\
+             installed owl {VERSION} to {pfx}/owl\n\
+             note: {pfx} is not on your PATH; add it to your shell profile\n\
+             next steps:\n\
+             \x20 owl init              # create your key and config, prints your fingerprint\n\
+             \x20 owl install           # register the owl daemon as a user service\n\
+             \x20 owl contact export    # your peer file, to be committed under .agents/peers/\n",
+            base = rel.base_url(),
+            asset = rel.asset,
+            pfx = pfx.display()
+        )
     );
-    assert!(
-        so.contains(&format!("installed owl {VERSION} to {}/owl", pfx.display())),
-        "{so}"
-    );
-    let steps: Vec<&str> = so
-        .lines()
-        .filter_map(|l| l.strip_prefix("  owl "))
-        .map(|l| l.split('#').next().unwrap().trim())
-        .collect();
-    assert_eq!(steps, ["init", "install", "contact export"]);
-    assert!(so.contains("next steps:"), "{so}");
 }
 
 #[test]
@@ -570,41 +570,56 @@ fn usage_errors_are_distinct_and_exit_2() {
     }
 }
 
+const USAGE: &str = "owl install: download a release of owl, verify its SHA-256 and install it
+
+usage: install.sh [--version <tag>] [--prefix <dir> | --system]
+   or: curl -fsSL https://raw.githubusercontent.com/Krab00/owlpost/main/scripts/install.sh | sh
+
+  --version <tag>   release tag to install, e.g. v0.1.0 (default: the latest release)
+  --prefix <dir>    directory that receives owl (default: ~/.local/bin)
+  --system          shorthand for --prefix /usr/local/bin
+  -h, --help        print this help
+";
+
 #[test]
-fn help_prints_flags_and_exits_0() {
+fn help_prints_the_usage_text_and_exits_0() {
     for flag in ["--help", "-h"] {
         let out = install(&[flag], &[]);
         assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
-        let so = stdout(&out);
-        for token in [
-            "--version <tag>",
-            "--prefix <dir>",
-            "--system",
-            "curl -fsSL",
-        ] {
-            assert!(so.contains(token), "{flag}: missing {token} in {so}");
-        }
+        assert_eq!(stdout(&out), USAGE, "{flag}");
         assert!(stderr(&out).is_empty());
     }
 }
 
 #[test]
 fn system_flag_targets_usr_local_bin() {
-    // /usr/local/bin is either writable (then the fetch from a dead base fails) or not (then
-    // the prefix guard names it); either way the flag resolved to that path.
+    // The prefix guard runs before any download, so the expected message depends only on
+    // whether /usr/local/bin is writable here; decide that with the script's own predicate
+    // and assert the one exact message. The fake curl keeps github.com out of it.
+    let d = tempfile::tempdir().unwrap();
+    let (curl, log) = fake_curl(d.path());
+    let writable = Command::new("/bin/sh")
+        .args(["-c", "[ -d /usr/local/bin ] && [ -w /usr/local/bin ]"])
+        .status()
+        .unwrap()
+        .success();
     let out = install(
         &["--system", "--version", "v1.2.3"],
-        &[("OWL_INSTALL_BASE_URL", "file:///nonexistent-owl-base")],
+        &[("OWL_INSTALL_CURL", curl.to_str().unwrap())],
     );
     assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
-    let err = stderr(&out);
-    assert!(
-        err.trim()
-            == "owl install: prefix /usr/local/bin is not writable (use --prefix <dir> you own, or sudo for --system)"
-            || err.trim()
-                == "owl install: download failed for file:///nonexistent-owl-base/SHA256SUMS",
-        "{err}"
+    let expected = if writable {
+        "owl install: download failed for https://github.com/Krab00/owlpost/releases/download/v1.2.3/SHA256SUMS"
+    } else {
+        "owl install: prefix /usr/local/bin is not writable (use --prefix <dir> you own, or sudo for --system)"
+    };
+    assert_eq!(stderr(&out).trim(), expected, "writable={writable}");
+    assert_eq!(
+        log.exists(),
+        writable,
+        "curl runs only past the prefix guard"
     );
+    assert!(!Path::new("/usr/local/bin/owl.tmp.0").exists());
 }
 
 // ---------------------------------------------------------------- real URLs, no network
@@ -654,8 +669,12 @@ fn default_base_url_is_the_github_release_for_the_normalised_tag() {
             "{args:?}"
         );
         let logged = fs::read_to_string(&log).unwrap();
-        assert!(logged.trim().ends_with(url), "{args:?}: curl got {logged}");
-        assert!(logged.contains("-fsSL"), "{logged}");
+        // Exactly one curl call: -fsSL --retry 2 -o <tmp>/SHA256SUMS <url>
+        let argv: Vec<&str> = logged.trim().split(' ').collect();
+        assert_eq!(argv.len(), 6, "{args:?}: curl got {logged}");
+        assert_eq!(&argv[..4], ["-fsSL", "--retry", "2", "-o"], "{logged}");
+        assert!(argv[4].ends_with("/SHA256SUMS"), "{logged}");
+        assert_eq!(argv[5], url, "{logged}");
     }
 }
 
@@ -692,4 +711,349 @@ fn installed_binary_is_made_executable_even_if_the_tarball_entry_is_not() {
     let mode = fs::metadata(pfx.join("owl")).unwrap().permissions().mode();
     assert_eq!(mode & 0o111, 0o111, "mode {mode:o}");
     assert_eq!(owl_version(&pfx), format!("owl {VERSION}"));
+}
+
+// ---------------------------------------------------------------- round 2 rows
+
+#[test]
+fn directory_at_prefix_owl_fails_before_download_and_leaves_nothing() {
+    let rel = Release::build();
+    let (_d, pfx) = prefix();
+    fs::create_dir_all(pfx.join("owl")).unwrap();
+    let out = install(
+        &["--version", VERSION, "--prefix", pfx.to_str().unwrap()],
+        &[("OWL_INSTALL_BASE_URL", &rel.base_url())],
+    );
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert_eq!(
+        stderr(&out).trim(),
+        format!(
+            "owl install: could not write {}/owl: is a directory",
+            pfx.display()
+        )
+    );
+    assert!(stdout(&out).is_empty(), "no download: {}", stdout(&out));
+    // The directory is untouched and no temp file exists anywhere under the prefix.
+    let mut stack = vec![pfx.clone()];
+    let mut seen = Vec::new();
+    while let Some(dir) = stack.pop() {
+        for e in fs::read_dir(&dir).unwrap() {
+            let e = e.unwrap();
+            if e.file_type().unwrap().is_dir() {
+                stack.push(e.path());
+            }
+            seen.push(e.path());
+        }
+    }
+    assert_eq!(seen, vec![pfx.join("owl")], "{seen:?}");
+    assert!(
+        !seen.iter().any(|p| p
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("owl.tmp.")),
+        "{seen:?}"
+    );
+}
+
+/// The README's form: the script arrives on stdin (`curl … | sh -s -- <args>`), so `$0` is
+/// `sh` and nothing may depend on the script's own path.
+fn install_piped(args: &[&str], env: &[(&str, &str)]) -> Output {
+    let mut c = Command::new("/bin/sh");
+    c.arg("-s").arg("--").args(args);
+    c.stdin(Stdio::from(fs::File::open(INSTALL_SH).unwrap()));
+    for k in [
+        "OWL_INSTALL_BASE_URL",
+        "OWL_INSTALL_FAKE_SUM",
+        "OWL_INSTALL_CURL",
+    ] {
+        c.env_remove(k);
+    }
+    for (k, v) in env {
+        c.env(k, v);
+    }
+    c.output().unwrap()
+}
+
+#[test]
+fn piped_form_prints_help_and_installs() {
+    for flag in ["-h", "--help"] {
+        let out = install_piped(&[flag], &[]);
+        assert_eq!(out.status.code(), Some(0), "{flag}: {}", stderr(&out));
+        assert_eq!(stdout(&out), USAGE, "{flag}");
+        assert!(stderr(&out).is_empty(), "{flag}: {}", stderr(&out));
+    }
+    let rel = Release::build();
+    let (_d, pfx) = prefix();
+    let out = install_piped(
+        &["--version", VERSION, "--prefix", pfx.to_str().unwrap()],
+        &[("OWL_INSTALL_BASE_URL", &rel.base_url())],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(stderr(&out).is_empty(), "{}", stderr(&out));
+    assert_eq!(owl_version(&pfx), format!("owl {VERSION}"));
+    // And a guard through the pipe keeps its exit code and message.
+    let out = install_piped(&["--bogus"], &[]);
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(
+        stderr(&out).trim(),
+        "owl install: unknown argument '--bogus' (see --help)"
+    );
+}
+
+/// Runs the script with `PATH` set to a directory holding only the named tools (symlinks to
+/// the real binaries), the platform pinned so `uname` is not needed, and curl by absolute
+/// path so only the guard under test can fire.
+fn install_with_tools(tools: &[&str]) -> Output {
+    let d = tempfile::tempdir().unwrap();
+    for t in tools {
+        let real = String::from_utf8(
+            Command::new("/bin/sh")
+                .args(["-c", &format!("command -v {t}")])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(real.trim(), d.path().join(t)).unwrap();
+    }
+    let curl = String::from_utf8(
+        Command::new("/bin/sh")
+            .args(["-c", "command -v curl"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    let mut c = Command::new("/bin/sh");
+    c.arg(INSTALL_SH)
+        .args(["--prefix", d.path().join("bin").to_str().unwrap()])
+        .env("PATH", d.path())
+        .env("OWL_INSTALL_OS", "Linux")
+        .env("OWL_INSTALL_ARCH", "x86_64")
+        .env("OWL_INSTALL_CURL", curl.trim())
+        .env("OWL_INSTALL_BASE_URL", "file:///nonexistent")
+        .stdin(Stdio::null());
+    c.output().unwrap()
+}
+
+#[test]
+fn missing_tar_fails_with_its_own_message() {
+    let out = install_with_tools(&[]);
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert_eq!(
+        stderr(&out).trim(),
+        "owl install: tar is required but was not found on PATH"
+    );
+    assert!(stdout(&out).is_empty());
+}
+
+#[test]
+fn missing_sha256_tool_fails_with_its_own_message() {
+    let out = install_with_tools(&["tar"]);
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert_eq!(
+        stderr(&out).trim(),
+        "owl install: neither sha256sum nor shasum is available to verify the download"
+    );
+    assert!(stdout(&out).is_empty());
+    // Positive twin: either tool alone is enough to get past the guard (to the prefix step,
+    // which then fails on the dead base URL, proving the guard was passed).
+    for tool in ["sha256sum", "shasum"] {
+        let has = Command::new("/bin/sh")
+            .args(["-c", &format!("command -v {tool}")])
+            .output()
+            .unwrap()
+            .status
+            .success();
+        if !has {
+            continue;
+        }
+        // mkdir/mktemp/rm are what the prefix and download steps themselves need.
+        let out = install_with_tools(&["tar", tool, "mkdir", "mktemp", "rm"]);
+        assert_eq!(out.status.code(), Some(1), "{tool}: {}", stderr(&out));
+        assert_eq!(
+            stderr(&out).trim(),
+            "owl install: download failed for file:///nonexistent/SHA256SUMS",
+            "{tool}"
+        );
+    }
+}
+
+/// A release dir whose tarball bytes are `bytes` and whose SHA256SUMS matches them exactly,
+/// so the checksum passes and only the extraction can fail.
+fn release_with_bytes(bytes: &[u8]) -> (tempfile::TempDir, String) {
+    let dir = tempfile::tempdir().unwrap();
+    let asset = format!("owl-{VERSION}-{}.tar.gz", host_target());
+    fs::write(dir.path().join(&asset), bytes).unwrap();
+    let sum = sha256(&dir.path().join(&asset));
+    fs::write(dir.path().join("SHA256SUMS"), format!("{sum}  {asset}\n")).unwrap();
+    (dir, asset)
+}
+
+#[test]
+fn unextractable_tarball_fails_after_a_matching_checksum() {
+    // Arm 1: not a gzip stream at all.
+    let (dir, asset) = release_with_bytes(b"this is not a tarball\n");
+    let (_d, pfx) = prefix();
+    let out = install(
+        &["--version", VERSION, "--prefix", pfx.to_str().unwrap()],
+        &[(
+            "OWL_INSTALL_BASE_URL",
+            &format!("file://{}", dir.path().display()),
+        )],
+    );
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert_eq!(
+        stderr(&out).trim(),
+        format!("owl install: could not extract owl from {asset}")
+    );
+    assert!(!pfx.join("owl").exists());
+    assert_eq!(fs::read_dir(&pfx).unwrap().count(), 0, "prefix stays empty");
+
+    // Arm 2: a valid tarball that holds no `owl` entry.
+    let src = tempfile::tempdir().unwrap();
+    fs::write(src.path().join("README"), b"no binary here").unwrap();
+    let tgz = src.path().join("x.tar.gz");
+    let tar = Command::new("tar")
+        .arg("-C")
+        .arg(src.path())
+        .arg("-czf")
+        .arg(&tgz)
+        .arg("README")
+        .output()
+        .unwrap();
+    assert!(tar.status.success());
+    let (dir, asset) = release_with_bytes(&fs::read(&tgz).unwrap());
+    let out = install(
+        &["--version", VERSION, "--prefix", pfx.to_str().unwrap()],
+        &[(
+            "OWL_INSTALL_BASE_URL",
+            &format!("file://{}", dir.path().display()),
+        )],
+    );
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert_eq!(
+        stderr(&out).trim(),
+        format!("owl install: could not extract owl from {asset}")
+    );
+    assert!(!pfx.join("owl").exists());
+}
+
+#[test]
+fn trailing_slash_on_base_url_is_stripped() {
+    // file:// arm: the fetched URL has a single slash and the install succeeds.
+    let rel = Release::build();
+    let (_d, pfx) = prefix();
+    let base = format!("{}/", rel.base_url());
+    let out = install(
+        &["--version", VERSION, "--prefix", pfx.to_str().unwrap()],
+        &[("OWL_INSTALL_BASE_URL", &base)],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(
+        stdout(&out).lines().next().unwrap(),
+        format!("downloading {}/{}", rel.base_url(), rel.asset)
+    );
+    assert_eq!(owl_version(&pfx), format!("owl {VERSION}"));
+
+    // http arm through the fake curl: the URL curl receives has no `//`.
+    let d = tempfile::tempdir().unwrap();
+    let (curl, log) = fake_curl(d.path());
+    let out = install(
+        &["--version", VERSION, "--prefix", pfx.to_str().unwrap()],
+        &[
+            ("OWL_INSTALL_BASE_URL", "https://mirror.example/owl/"),
+            ("OWL_INSTALL_CURL", curl.to_str().unwrap()),
+        ],
+    );
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert_eq!(
+        stderr(&out).trim(),
+        "owl install: download failed for https://mirror.example/owl/SHA256SUMS"
+    );
+    let logged = fs::read_to_string(&log).unwrap();
+    assert!(
+        logged
+            .trim()
+            .ends_with(" https://mirror.example/owl/SHA256SUMS"),
+        "{logged}"
+    );
+}
+
+// ---------------------------------------------------------------- drift guard vs release.yml
+
+#[test]
+fn install_sh_targets_and_asset_name_match_release_yml() {
+    let yml = fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/.github/workflows/release.yml"
+    ))
+    .unwrap();
+    // The workflow's matrix targets, in order, and its asset name pattern.
+    let mut wf_targets: Vec<String> = yml
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("- target: "))
+        .map(str::to_string)
+        .collect();
+    assert_eq!(wf_targets.len(), 4, "{wf_targets:?}");
+    assert!(
+        yml.contains(r#"asset="owl-${VERSION}-${TARGET}.tar.gz""#),
+        "release.yml asset name pattern"
+    );
+    assert!(yml.contains("sha256sum owl-*.tar.gz > SHA256SUMS"));
+
+    // The script's case table: every `target="…"` literal, and its asset construction.
+    let sh = fs::read_to_string(INSTALL_SH).unwrap();
+    let mut sh_targets: Vec<String> = sh
+        .lines()
+        .filter_map(|l| {
+            let i = l.find("target=\"")? + "target=\"".len();
+            let rest = &l[i..];
+            Some(rest[..rest.find('"')?].to_string())
+        })
+        .collect();
+    sh_targets.sort();
+    sh_targets.dedup();
+    wf_targets.sort();
+    assert_eq!(sh_targets, wf_targets);
+    assert!(
+        sh.contains(r#"asset="owl-${version}-${target}.tar.gz""#),
+        "install.sh builds the same asset name"
+    );
+
+    // Behavioural twin: for each workflow target, a SHA256SUMS written with the workflow's
+    // naming makes the script request exactly that tarball (present in the sums, absent on
+    // disk, so the download-failed message names it).
+    let dir = tempfile::tempdir().unwrap();
+    let sums: String = wf_targets
+        .iter()
+        .map(|t| format!("{}  owl-9.9.9-{t}.tar.gz\n", "b".repeat(64)))
+        .collect();
+    fs::write(dir.path().join("SHA256SUMS"), sums).unwrap();
+    let base = format!("file://{}", dir.path().display());
+    let (_d, pfx) = prefix();
+    for (os, arch, target) in [
+        ("Darwin", "arm64", "aarch64-apple-darwin"),
+        ("Darwin", "x86_64", "x86_64-apple-darwin"),
+        ("Linux", "x86_64", "x86_64-unknown-linux-gnu"),
+        ("Linux", "aarch64", "aarch64-unknown-linux-gnu"),
+    ] {
+        assert!(wf_targets.contains(&target.to_string()), "{target}");
+        let out = install(
+            &["--version", "9.9.9", "--prefix", pfx.to_str().unwrap()],
+            &[
+                ("OWL_INSTALL_OS", os),
+                ("OWL_INSTALL_ARCH", arch),
+                ("OWL_INSTALL_BASE_URL", &base),
+            ],
+        );
+        assert_eq!(out.status.code(), Some(1), "{target}: {}", stderr(&out));
+        assert_eq!(
+            stderr(&out).trim(),
+            format!("owl install: download failed for {base}/owl-9.9.9-{target}.tar.gz"),
+            "{target}"
+        );
+    }
 }
