@@ -3,8 +3,9 @@
 //! A peer is reached by its ed25519 key: the daemon's iroh endpoint identity is derived from
 //! the same seed as `identity::Identity`, so the endpoint id **is** the contact's `pubkey`.
 //! iroh finds a direct path by hole punching and falls back to a relay. The HTTP contract
-//! (§7) is unchanged: the same axum router is served with hyper over an iroh bi-stream
-//! (ALPN `owl/1`, one HTTP/1 request per stream).
+//! (§7) is unchanged: the same axum handlers are served with hyper over an iroh bi-stream
+//! (ALPN `owl/1`, one HTTP/1 request per stream); only the owner's forward route is not
+//! mounted here (`server::iroh_router`).
 //!
 //! The endpoint identity is a network singleton — the relay bumps a second registration of
 //! the same key — so only the daemon binds one. The CLI reaches peers through the daemon's
@@ -140,7 +141,7 @@ async fn serve(conn: Connection, state: Arc<AppState>) {
     };
     tracing::debug!(peer = %fingerprint, "iroh: connection accepted");
     let service = TowerToHyperService::new(
-        Extension(PeerId(Some(fingerprint))).layer(crate::server::router(state)),
+        Extension(PeerId(Some(fingerprint))).layer(crate::server::iroh_router(state)),
     );
     loop {
         let (send, recv) = match conn.accept_bi().await {
