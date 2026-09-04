@@ -2,6 +2,7 @@
 //! shared exit-code error type, and the helpers the inbox commands share: record lookup,
 //! payload parsing, the stored draft shape, peer naming, age formatting and machine output.
 
+pub mod add;
 pub mod allow;
 pub mod ask;
 pub mod deny;
