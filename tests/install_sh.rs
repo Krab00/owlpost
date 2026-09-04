@@ -606,3 +606,90 @@ fn system_flag_targets_usr_local_bin() {
         "{err}"
     );
 }
+
+// ---------------------------------------------------------------- real URLs, no network
+
+/// A fake `curl` that records its arguments and fails, so the URL the script would fetch
+/// from GitHub is observable without any network access.
+fn fake_curl(dir: &Path) -> (PathBuf, PathBuf) {
+    let log = dir.join("curl.log");
+    let bin = dir.join("curl");
+    fs::write(
+        &bin,
+        format!("#!/bin/sh\necho \"$@\" >> {}\nexit 22\n", log.display()),
+    )
+    .unwrap();
+    fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+    (bin, log)
+}
+
+#[test]
+fn default_base_url_is_the_github_release_for_the_normalised_tag() {
+    let d = tempfile::tempdir().unwrap();
+    let (curl, log) = fake_curl(d.path());
+    let (_p, pfx) = prefix();
+    let cases = [
+        (
+            vec!["--version", "0.1.0"],
+            "https://github.com/Krab00/owlpost/releases/download/v0.1.0/SHA256SUMS",
+        ),
+        (
+            vec!["--version", "v0.1.0"],
+            "https://github.com/Krab00/owlpost/releases/download/v0.1.0/SHA256SUMS",
+        ),
+        (
+            vec![],
+            "https://github.com/Krab00/owlpost/releases/latest/download/SHA256SUMS",
+        ),
+    ];
+    for (args, url) in cases {
+        let _ = fs::remove_file(&log);
+        let mut full = args.clone();
+        full.extend(["--prefix", pfx.to_str().unwrap()]);
+        let out = install(&full, &[("OWL_INSTALL_CURL", curl.to_str().unwrap())]);
+        assert_eq!(out.status.code(), Some(1), "{args:?}: {}", stderr(&out));
+        assert_eq!(
+            stderr(&out).trim(),
+            format!("owl install: download failed for {url}"),
+            "{args:?}"
+        );
+        let logged = fs::read_to_string(&log).unwrap();
+        assert!(logged.trim().ends_with(url), "{args:?}: curl got {logged}");
+        assert!(logged.contains("-fsSL"), "{logged}");
+    }
+}
+
+#[test]
+fn installed_binary_is_made_executable_even_if_the_tarball_entry_is_not() {
+    // A release tarball normally carries the mode bit; the installer must not depend on it.
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src");
+    fs::create_dir(&src).unwrap();
+    fs::copy(env!("CARGO_BIN_EXE_owl"), src.join("owl")).unwrap();
+    fs::set_permissions(src.join("owl"), fs::Permissions::from_mode(0o644)).unwrap();
+    let asset = format!("owl-{VERSION}-{}.tar.gz", host_target());
+    let tar = Command::new("tar")
+        .arg("-C")
+        .arg(&src)
+        .arg("-czf")
+        .arg(dir.path().join(&asset))
+        .arg("owl")
+        .output()
+        .unwrap();
+    assert!(tar.status.success(), "{}", stderr(&tar));
+    let sum = sha256(&dir.path().join(&asset));
+    fs::write(dir.path().join("SHA256SUMS"), format!("{sum}  {asset}\n")).unwrap();
+
+    let (_p, pfx) = prefix();
+    let out = install(
+        &["--version", VERSION, "--prefix", pfx.to_str().unwrap()],
+        &[(
+            "OWL_INSTALL_BASE_URL",
+            &format!("file://{}", dir.path().display()),
+        )],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let mode = fs::metadata(pfx.join("owl")).unwrap().permissions().mode();
+    assert_eq!(mode & 0o111, 0o111, "mode {mode:o}");
+    assert_eq!(owl_version(&pfx), format!("owl {VERSION}"));
+}
