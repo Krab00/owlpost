@@ -77,7 +77,14 @@ fn config_for_doctor(cfg: &mut owlpost::config::Config) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn doctor_reports_each_check() {
-    let d = spawn_daemon_with(1, &[], config_for_doctor).await;
+    // A local relay (never n0's) so the iroh line is the connected `ok` form.
+    let (relay_url, _relay) = common::relay().await;
+    let d = spawn_daemon_with(1, &[], |cfg| {
+        config_for_doctor(cfg);
+        cfg.relay_urls = Some(vec![relay_url.clone()]);
+    })
+    .await;
+    common::wait_online(&d).await;
     daemon::write_addr_file(d.home(), d.addr).unwrap();
     wait_for_status(d.home());
 
@@ -96,12 +103,24 @@ async fn doctor_reports_each_check() {
             ("ok", "endpoints"),
             ("ok", "harness"),
             ("ok", "daemon"),
+            ("ok", "iroh"),
             ("ok", "pull"),
         ]
         .map(|(s, n)| (s.to_string(), n.to_string())),
         "{stdout}"
     );
     assert!(line(&stdout, "key").contains(&d.fp()), "{stdout}");
+    // AC6: the connected iroh line, verbatim: iroh's short id (hex of the first five key
+    // bytes) and the relay URL the daemon reported in its card.
+    let short: String = d.id.verifying_key().as_bytes()[..5]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    assert_eq!(
+        line(&stdout, "iroh"),
+        format!("ok   iroh: {short}, relay {relay_url}"),
+        "{stdout}"
+    );
     assert!(line(&stdout, "config").contains("config.json"), "{stdout}");
     assert!(
         line(&stdout, "endpoints").contains("127.0.0.1:7411 -> 127.0.0.1"),
@@ -185,7 +204,7 @@ async fn doctor_reports_each_check() {
         .collect();
     assert_eq!(
         names,
-        ["key", "config", "endpoints", "harness", "daemon", "pull"]
+        ["key", "config", "endpoints", "harness", "daemon", "iroh", "pull"]
     );
     assert!(
         arr.iter()
@@ -220,6 +239,7 @@ async fn doctor_reports_each_check() {
             ("ok", "endpoints"),
             ("ok", "harness"),
             ("fail", "daemon"),
+            ("warn", "iroh"),
             ("ok", "pull"),
         ]
         .map(|(s, n)| (s.to_string(), n.to_string())),
@@ -229,6 +249,7 @@ async fn doctor_reports_each_check() {
         line(&stdout, "daemon").contains(&addr.to_string()),
         "{stdout}"
     );
+    assert_eq!(line(&stdout, "iroh"), "warn iroh: unknown (daemon unreachable)");
     assert!(stderr.contains("1 check(s) failed"), "{stderr}");
     // --json carries the failure too, still exit 1.
     let out = owl(home).args(["--json", "doctor"]).output().unwrap();
@@ -265,19 +286,21 @@ async fn doctor_fails_on_foreign_daemon_and_missing_pieces() {
     mine.running.shutdown();
     other.running.shutdown();
 
-    // Empty home: key fails, config warns (defaults), endpoints warn, harness lines for the
-    // default set, daemon fails, pull warns — and the harness line for `fake` still resolves.
+    // Empty home: key fails, config warns (defaults), endpoints ok (iroh reaches the daemon),
+    // harness lines for the default set, daemon fails, iroh unknown, pull warns — and the
+    // harness line for `fake` still resolves.
     let empty = tempfile::tempdir().unwrap();
     let out = owl(empty.path()).arg("doctor").output().unwrap();
     let (stdout, _) = text(&out);
     assert_eq!(out.status.code(), Some(1), "{stdout}");
     assert!(line(&stdout, "key").starts_with("fail"), "{stdout}");
     assert!(line(&stdout, "config").starts_with("warn"), "{stdout}");
-    assert!(line(&stdout, "endpoints").starts_with("warn"), "{stdout}");
-    assert!(
-        line(&stdout, "endpoints").contains("none configured"),
+    assert_eq!(
+        line(&stdout, "endpoints"),
+        "ok   endpoints: none configured (peers reach this daemon over iroh)",
         "{stdout}"
     );
+    assert_eq!(line(&stdout, "iroh"), "warn iroh: unknown (daemon unreachable)");
     assert!(
         stdout
             .lines()

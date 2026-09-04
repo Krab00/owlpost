@@ -1,0 +1,489 @@
+//! OWL-017 AC2..AC5: the iroh transport. Two in-process daemons in temp homes, a plain-HTTP
+//! iroh relay on 127.0.0.1:0 started in each test (never n0's relays, no DNS discovery), and
+//! `owl ask` as a subprocess reaching the peer through the asker's daemon forward route.
+//!
+//! Every contact book here has **empty `endpoints`**, so nothing can travel over HTTPS unless
+//! a test says so explicitly (AC5).
+
+mod common;
+
+use std::net::{SocketAddr, TcpListener};
+use std::path::Path;
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
+
+use axum::http::{HeaderMap, HeaderValue, Method};
+use common::*;
+use iroh::endpoint::{ApplicationClose, ConnectionError, VarInt};
+use owlpost::config::{Config, Harness};
+use owlpost::contacts::{ContactBook, Mode};
+use owlpost::daemon;
+use owlpost::identity::{Identity, pubkey_string};
+use owlpost::iroh::{self as owl_iroh, ALPN, CLOSE_UNKNOWN_KEY, Reply};
+use owlpost::server::SIGNATURE_HEADER;
+use owlpost::spool::{Dir, Spool};
+
+const QUESTION: &str = "Where is the retry policy defined?";
+const FAKE_HARNESS: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/fake-harness.sh"
+);
+/// Bound for every wait on another task's or process's write.
+const WAIT: Duration = Duration::from_secs(20);
+
+fn owl(home: &Path) -> Command {
+    let mut c = Command::new(env!("CARGO_BIN_EXE_owl"));
+    c.env_remove("OWLPOST_HOME")
+        .arg("--home")
+        .arg(home)
+        .current_dir(home)
+        .stdin(Stdio::null());
+    c
+}
+
+fn stdout(o: &Output) -> String {
+    String::from_utf8_lossy(&o.stdout).into_owned()
+}
+
+fn stderr(o: &Output) -> String {
+    String::from_utf8_lossy(&o.stderr).into_owned()
+}
+
+fn ok(o: &Output) -> String {
+    assert_eq!(o.status.code(), Some(0), "stderr: {}", stderr(o));
+    stdout(o)
+}
+
+/// `owl ask Bea <PATH> <QUESTION> --project <PROJECT>` from the asker's home.
+fn ask(home: &Path) -> Output {
+    owl(home)
+        .args(["ask", "Bea", PATH, QUESTION, "--project", PROJECT])
+        .output()
+        .unwrap()
+}
+
+fn accepted_id(out: &Output) -> String {
+    let line = ok(out);
+    line.trim()
+        .strip_prefix("accepted ")
+        .unwrap_or_else(|| panic!("stdout {line:?}"))
+        .to_string()
+}
+
+fn ids(spool: &Spool, dir: Dir) -> Vec<String> {
+    spool
+        .list(dir, |_| true)
+        .unwrap()
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect()
+}
+
+fn state(spool: &Spool, dir: Dir, id: &str) -> Option<String> {
+    spool.get(dir, id).unwrap().map(|r| r.state)
+}
+
+fn wait_for(what: &str, mut cond: impl FnMut() -> bool) {
+    let start = Instant::now();
+    while !cond() {
+        assert!(start.elapsed() < WAIT, "timed out waiting for {what}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn relay_config(url: &str) -> impl FnOnce(&mut Config) + '_ {
+    move |cfg| cfg.relay_urls = Some(vec![url.to_string()])
+}
+
+/// B: responder with the fake harness and `projects[PROJECT]` mapped to a temp checkout;
+/// Ana in the book without a policy (questions are held for consent).
+async fn spawn_responder(relay_url: Option<&str>, a: &Identity, checkout: &Path) -> TestDaemon {
+    let checkout = checkout.to_string_lossy().into_owned();
+    spawn_daemon_with(2, &[Peer::new(a, "Ana", None)], |cfg| {
+        cfg.responder.enabled = true;
+        cfg.responder.harness = "fake".into();
+        cfg.harnesses.insert(
+            "fake".into(),
+            Harness {
+                cmd: vec![FAKE_HARNESS.into(), "{prompt}".into()],
+                answer_path: "raw".into(),
+                enabled: true,
+                disabled_reason: None,
+                env: Default::default(),
+            },
+        );
+        cfg.projects.insert(PROJECT.into(), checkout);
+        // `None` = no relay at all (`relay_urls = []`), never the n0 defaults.
+        cfg.relay_urls = Some(relay_url.into_iter().map(String::from).collect());
+    })
+    .await
+}
+
+/// A: asker daemon (pull every second) with Bea in the book at `endpoints`, and
+/// `daemon.addr` written so `owl ask` finds the forward route.
+async fn spawn_asker(relay_url: Option<&str>, b: &Identity, endpoints: &[&str]) -> TestDaemon {
+    let d = spawn_daemon_with(1, &[], |cfg| {
+        cfg.name = "Ana".into();
+        cfg.responder.enabled = false;
+        cfg.pull_interval_secs = 1;
+        cfg.relay_urls = Some(relay_url.into_iter().map(String::from).collect());
+    })
+    .await;
+    write_contact_full(
+        d.home(),
+        &Peer::new(b, "Bea", None),
+        endpoints,
+        &["bea@example.org"],
+    );
+    daemon::write_addr_file(d.home(), d.addr).unwrap();
+    d
+}
+
+/// One request from `from`'s own test endpoint to daemon `to` over iroh.
+async fn request(
+    from: &iroh::Endpoint,
+    to: &TestDaemon,
+    relay_url: &str,
+    method: Method,
+    path: &str,
+    body: Vec<u8>,
+    sig: Option<&str>,
+) -> anyhow::Result<Reply> {
+    let addr = owl_iroh::peer_addr(
+        &pubkey_string(&to.id.verifying_key()),
+        Some(&[relay_url.to_string()]),
+    )
+    .unwrap();
+    let mut headers = HeaderMap::new();
+    headers.insert("content-type", HeaderValue::from_static("application/json"));
+    if let Some(s) = sig {
+        headers.insert(SIGNATURE_HEADER, HeaderValue::from_str(s).unwrap());
+    }
+    owl_iroh::request(from, addr, method, path, headers, body.into()).await
+}
+
+fn error_of(reply: &Reply) -> (u16, String) {
+    let v: serde_json::Value = serde_json::from_slice(&reply.body).unwrap_or_default();
+    (
+        reply.status,
+        v.get("error")
+            .and_then(|e| e.as_str())
+            .unwrap_or_default()
+            .to_string(),
+    )
+}
+
+// AC2
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn question_and_answer_over_iroh() {
+    let (relay_url, _relay) = relay().await;
+    let checkout = tempfile::tempdir().unwrap();
+    std::fs::write(checkout.path().join("README.md"), "fixture\n").unwrap();
+    let (a_id, b_id) = (id(1), id(2));
+    let b = spawn_responder(Some(&relay_url), &a_id, checkout.path()).await;
+    let a = spawn_asker(Some(&relay_url), &b_id, &[]).await;
+    wait_online(&a).await;
+    wait_online(&b).await;
+    let (a_spool, b_spool) = (a.spool(), b.spool());
+    // The premise: neither side knows a host:port for the other.
+    let book = ContactBook::load(a.home(), a.home()).unwrap();
+    assert!(book.resolve("Bea").unwrap().endpoints.is_empty());
+    let book = ContactBook::load(b.home(), b.home()).unwrap();
+    assert!(book.resolve("Ana").unwrap().endpoints.is_empty());
+
+    // A asks over iroh (through A's daemon): `accepted <id>`; B holds it for consent.
+    let qid = accepted_id(&ask(a.home()));
+    assert_eq!(state(&a_spool, Dir::Asks, &qid).as_deref(), Some("waiting"));
+    wait_for("the question in B's inbox", || {
+        state(&b_spool, Dir::Inbox, &qid).as_deref() == Some("consent")
+    });
+
+    // B: allow once, draft with the fake harness, send.
+    let out = ok(&owl(b.home())
+        .args(["allow", "Ana", "--once"])
+        .output()
+        .unwrap());
+    assert!(out.contains("released 1"), "{out}");
+    let out = ok(&owl(b.home())
+        .args(["draft", &qid, "--harness", "fake"])
+        .output()
+        .unwrap());
+    assert!(out.contains("retry policy"), "{out}");
+    assert_eq!(state(&b_spool, Dir::Inbox, &qid).as_deref(), Some("drafted"));
+    let out = ok(&owl(b.home()).args(["send", &qid]).output().unwrap());
+    let aid = out
+        .lines()
+        .find_map(|l| l.strip_prefix("sent "))
+        .and_then(|l| l.split_whitespace().next())
+        .unwrap_or_else(|| panic!("send stdout {out:?}"))
+        .to_string();
+    assert_eq!(state(&b_spool, Dir::Outbox, &aid).as_deref(), Some("unacked"));
+
+    // A's daemon pulls the answer over iroh, stores it, acks it; B moves it to done/.
+    wait_for("the answer in A's inbox", || {
+        state(&a_spool, Dir::Inbox, &aid).is_some()
+    });
+    wait_for("A's ask moved to done", || {
+        state(&a_spool, Dir::Done, &qid).as_deref() == Some("answered")
+    });
+    wait_for("B's outbox entry acked into done", || {
+        state(&b_spool, Dir::Outbox, &aid).is_none() && state(&b_spool, Dir::Done, &aid).is_some()
+    });
+    let rec = a_spool.get(Dir::Inbox, &aid).unwrap().expect("answer stored");
+    assert!(rec.raw.contains("retry policy"), "{}", rec.raw);
+    assert_eq!(rec.meta["peer"], b.fp());
+
+    a.running.shutdown();
+    b.running.shutdown();
+}
+
+// AC3
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unknown_key_is_refused() {
+    let (relay_url, _relay) = relay().await;
+    let checkout = tempfile::tempdir().unwrap();
+    let (a_id, c_id) = (id(1), id(3));
+    let b = spawn_responder(Some(&relay_url), &a_id, checkout.path()).await;
+    wait_online(&b).await;
+    let contacts_dir = b.home().join("contacts");
+    let before = std::fs::read_dir(&contacts_dir)
+        .unwrap()
+        .map(|e| {
+            let p = e.unwrap().path();
+            (p.clone(), std::fs::read(&p).unwrap())
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(before.len(), 1, "only Ana is known");
+
+    // C is not in B's book. The QUIC handshake completes (iroh authenticates the key), then
+    // B closes the connection with the `unknown key` code before accepting any stream.
+    let c = owl_iroh::endpoint(&c_id, Some(&[relay_url.clone()]))
+        .await
+        .unwrap();
+    let addr = owl_iroh::peer_addr(
+        &pubkey_string(&b.id.verifying_key()),
+        Some(&[relay_url.clone()]),
+    )
+    .unwrap();
+    let conn = tokio::time::timeout(WAIT, c.connect(addr.clone(), ALPN))
+        .await
+        .expect("dial within the bound")
+        .expect("handshake");
+    let closed = tokio::time::timeout(WAIT, conn.closed())
+        .await
+        .expect("closed within the bound");
+    assert_eq!(
+        closed,
+        ConnectionError::ApplicationClosed(ApplicationClose {
+            error_code: CLOSE_UNKNOWN_KEY,
+            reason: b"unknown key".as_slice().into(),
+        })
+    );
+    assert_eq!(CLOSE_UNKNOWN_KEY, VarInt::from_u32(1));
+
+    // A well-formed question signed by C on a fresh connection: no HTTP response of any
+    // status comes back (the router never saw it), only the close reason.
+    let q = signed(&c_id, &b.id, "let me in?");
+    let err = request(
+        &c,
+        &b,
+        &relay_url,
+        Method::POST,
+        "/v1/questions",
+        q.raw.clone().into_bytes(),
+        Some(&q.sig),
+    )
+    .await
+    .expect_err("no request is answered for an unknown key");
+    let err = format!("{err:#}");
+    assert!(err.contains("unknown key"), "{err}");
+
+    // Nothing was stored or learned: five empty spool dirs, no seen-ids, same contact book.
+    let spool = b.spool();
+    for dir in Dir::ALL {
+        assert!(ids(&spool, dir).is_empty(), "{} must stay empty", dir.name());
+    }
+    assert!(!b.home().join("seen-ids.txt").exists());
+    let after = std::fs::read_dir(&contacts_dir)
+        .unwrap()
+        .map(|e| {
+            let p = e.unwrap().path();
+            (p.clone(), std::fs::read(&p).unwrap())
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(after, before, "no TOFU on the iroh path");
+    let book = ContactBook::load(b.home(), b.home()).unwrap();
+    assert_eq!(book.contacts.len(), 1);
+    assert_eq!(book.contacts[0].fingerprint, fp(&a_id));
+
+    // The known key on the same daemon is served (the refusal is about the key, not iroh).
+    let a = owl_iroh::endpoint(&a_id, Some(&[relay_url.clone()]))
+        .await
+        .unwrap();
+    let reply = request(&a, &b, &relay_url, Method::GET, "/v1/outbox", vec![], None)
+        .await
+        .unwrap();
+    assert_eq!(reply.status, 200);
+    assert_eq!(reply.body.as_ref(), b"[]");
+    c.close().await;
+    a.close().await;
+    b.running.shutdown();
+}
+
+// AC4
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn signature_and_replay_rules_apply_over_iroh() {
+    let (relay_url, _relay) = relay().await;
+    let (a_id, c_id) = (id(1), id(3));
+    // Ana: manual, 3 questions per hour (the same threshold as `tests/server.rs`).
+    let b = spawn_daemon_with(
+        2,
+        &[Peer::new(&a_id, "Ana", Some(policy(Mode::Manual, Some(3))))],
+        relay_config(&relay_url),
+    )
+    .await;
+    wait_online(&b).await;
+    let a = owl_iroh::endpoint(&a_id, Some(&[relay_url.clone()]))
+        .await
+        .unwrap();
+    let post = |raw: Vec<u8>, sig: String| {
+        let (a, b, relay_url) = (&a, &b, &relay_url);
+        async move {
+            request(a, b, relay_url, Method::POST, "/v1/questions", raw, Some(&sig))
+                .await
+                .unwrap()
+        }
+    };
+
+    // Wrong signature: C signs A's payload → the HTTPS suite's `400 bad signature`.
+    let q0 = question(&a_id, &b.id, "q0");
+    let raw0 = q0.to_signed_bytes();
+    let forged = owlpost::envelope::Envelope::sign(&q0, &c_id).sig;
+    assert_eq!(
+        error_of(&post(raw0.clone(), forged).await),
+        (400, "bad signature".to_string())
+    );
+    assert!(ids(&b.spool(), Dir::Inbox).is_empty(), "rejected before any write");
+    assert!(!b.home().join("seen-ids.txt").exists());
+
+    // Valid → 202; the same id again → the HTTPS suite's `409 duplicate id`.
+    let env0 = signed(&a_id, &b.id, "q0");
+    let reply = post(env0.raw.clone().into_bytes(), env0.sig.clone()).await;
+    assert_eq!(reply.status, 202, "{}", String::from_utf8_lossy(&reply.body));
+    assert_eq!(
+        error_of(&post(env0.raw.clone().into_bytes(), env0.sig.clone()).await),
+        (409, "duplicate id".to_string())
+    );
+
+    // Rate limit: the 4th distinct question in the hour → `429 rate limited`, Retry-After
+    // 1200 s (3/h), exactly as over HTTPS; the 4th is not spooled.
+    for i in 1..3 {
+        let env = signed(&a_id, &b.id, &format!("q{i}"));
+        let reply = post(env.raw.into_bytes(), env.sig).await;
+        assert_eq!(reply.status, 202, "question {i}");
+    }
+    let env3 = signed(&a_id, &b.id, "q3");
+    let reply = post(env3.raw.clone().into_bytes(), env3.sig.clone()).await;
+    assert_eq!(error_of(&reply), (429, "rate limited".to_string()));
+    assert_eq!(
+        reply.headers.get("retry-after").and_then(|v| v.to_str().ok()),
+        Some("1200")
+    );
+    assert_eq!(ids(&b.spool(), Dir::Inbox).len(), 3);
+    // A rate-limited id is not burned: still 429, never 409.
+    let reply = post(env3.raw.into_bytes(), env3.sig).await;
+    assert_eq!(error_of(&reply), (429, "rate limited".to_string()));
+    a.close().await;
+    b.running.shutdown();
+}
+
+/// A TCP listener that records every connection attempt: after the run, `accept` drains
+/// the kernel backlog, so a client that connected (and even hung up) is still counted.
+struct Decoy(TcpListener);
+
+impl Decoy {
+    fn bind() -> Decoy {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        l.set_nonblocking(true).unwrap();
+        Decoy(l)
+    }
+
+    fn addr(&self) -> SocketAddr {
+        self.0.local_addr().unwrap()
+    }
+
+    fn attempts(&self) -> usize {
+        let mut n = 0;
+        while self.0.accept().is_ok() {
+            n += 1;
+        }
+        n
+    }
+}
+
+/// `host:port` nobody listens on (bound, read, released).
+fn closed_port() -> String {
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    l.local_addr().unwrap().to_string()
+}
+
+// AC5
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn iroh_first_then_endpoints() {
+    let (relay_url, _relay) = relay().await;
+    let checkout = tempfile::tempdir().unwrap();
+    let (a_id, b_id) = (id(1), id(2));
+
+    // 1. iroh available, `endpoints` holds one address that records attempts: the question
+    //    arrives over iroh and the address is never dialed.
+    let decoy = Decoy::bind();
+    // The decoy is a live listener: a dial would succeed at TCP level and be counted.
+    drop(std::net::TcpStream::connect(decoy.addr()).expect("the decoy accepts connections"));
+    assert_eq!(decoy.attempts(), 1, "the counter sees a completed connect");
+    let b = spawn_responder(Some(&relay_url), &a_id, checkout.path()).await;
+    let a = spawn_asker(Some(&relay_url), &b_id, &[&decoy.addr().to_string()]).await;
+    wait_online(&a).await;
+    wait_online(&b).await;
+    let qid = accepted_id(&ask(a.home()));
+    wait_for("the question in B's inbox", || {
+        state(&b.spool(), Dir::Inbox, &qid).is_some()
+    });
+    assert_eq!(decoy.attempts(), 0, "the endpoint was never dialed");
+    a.running.shutdown();
+    b.running.shutdown();
+
+    // 2. iroh unavailable (no relay on either side: the peer has no address at all) and a
+    //    reachable endpoint: `owl ask` succeeds over HTTPS.
+    let b = spawn_responder(None, &a_id, checkout.path()).await;
+    assert_eq!(
+        Config::load(b.home()).unwrap().relay_urls,
+        Some(vec![]),
+        "no relay: `relay_urls = []`"
+    );
+    let a = spawn_asker(None, &b_id, &[&b.addr.to_string()]).await;
+    assert_eq!(Config::load(a.home()).unwrap().relay_urls, Some(vec![]));
+    let qid = accepted_id(&ask(a.home()));
+    wait_for("the question in B's inbox", || {
+        state(&b.spool(), Dir::Inbox, &qid).is_some()
+    });
+    a.running.shutdown();
+    b.running.shutdown();
+
+    // 3. Both unavailable: offline, in the same wording as before iroh, one reason per
+    //    transport (iroh first, then the endpoint).
+    let port = closed_port();
+    let a = spawn_asker(None, &b_id, &[&port]).await;
+    let out = ask(a.home());
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    let err = stderr(&out);
+    let err = err.trim();
+    let prefix = "owl: offline: no endpoint of Bea reachable (iroh: ";
+    assert!(err.starts_with(prefix), "{err}");
+    assert!(err.contains(&format!("; {port}: ")), "{err}");
+    assert!(err.ends_with(')'), "{err}");
+    assert!(stdout(&out).is_empty());
+    for dir in Dir::ALL {
+        assert!(ids(&a.spool(), dir).is_empty(), "{} must stay empty", dir.name());
+    }
+    a.running.shutdown();
+}
