@@ -266,7 +266,10 @@ mod tests {
                 .relay_urls,
             Some(vec!["https://relay.corp.example/".to_string()])
         );
-        assert!(load(r#"{"relay_urls": "https://one"}"#).is_err(), "not a list");
+        assert!(
+            load(r#"{"relay_urls": "https://one"}"#).is_err(),
+            "not a list"
+        );
         assert!(load(r#"{"relay_urls": [1]}"#).is_err(), "not strings");
         // Saved: the absent state stays absent, a list roundtrips.
         Config::default().save(home.path()).unwrap();

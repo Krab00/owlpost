@@ -173,6 +173,23 @@ fn error_of(reply: &Reply) -> (u16, String) {
     )
 }
 
+/// The shared fixture never touches n0's relays or DNS discovery: a plain `spawn_daemon`
+/// binds its iroh endpoint with `relay_urls = []`, no relay, no address lookup.
+#[tokio::test]
+async fn fixture_daemons_have_no_relay_and_no_discovery() {
+    let d = spawn_daemon(2, true, &[]).await;
+    assert_eq!(Config::load(d.home()).unwrap().relay_urls, Some(vec![]));
+    let ep = d.running.iroh();
+    assert_eq!(ep.addr().relay_urls().count(), 0);
+    assert!(
+        ep.address_lookup().unwrap().is_empty(),
+        "no public discovery"
+    );
+    assert_eq!(owl_iroh::home_relay(ep), None);
+    assert_eq!(ep.id().as_bytes(), d.id.verifying_key().as_bytes());
+    d.running.shutdown();
+}
+
 // AC2
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn question_and_answer_over_iroh() {
@@ -209,7 +226,10 @@ async fn question_and_answer_over_iroh() {
         .output()
         .unwrap());
     assert!(out.contains("retry policy"), "{out}");
-    assert_eq!(state(&b_spool, Dir::Inbox, &qid).as_deref(), Some("drafted"));
+    assert_eq!(
+        state(&b_spool, Dir::Inbox, &qid).as_deref(),
+        Some("drafted")
+    );
     let out = ok(&owl(b.home()).args(["send", &qid]).output().unwrap());
     let aid = out
         .lines()
@@ -217,7 +237,10 @@ async fn question_and_answer_over_iroh() {
         .and_then(|l| l.split_whitespace().next())
         .unwrap_or_else(|| panic!("send stdout {out:?}"))
         .to_string();
-    assert_eq!(state(&b_spool, Dir::Outbox, &aid).as_deref(), Some("unacked"));
+    assert_eq!(
+        state(&b_spool, Dir::Outbox, &aid).as_deref(),
+        Some("unacked")
+    );
 
     // A's daemon pulls the answer over iroh, stores it, acks it; B moves it to done/.
     wait_for("the answer in A's inbox", || {
@@ -229,7 +252,10 @@ async fn question_and_answer_over_iroh() {
     wait_for("B's outbox entry acked into done", || {
         state(&b_spool, Dir::Outbox, &aid).is_none() && state(&b_spool, Dir::Done, &aid).is_some()
     });
-    let rec = a_spool.get(Dir::Inbox, &aid).unwrap().expect("answer stored");
+    let rec = a_spool
+        .get(Dir::Inbox, &aid)
+        .unwrap()
+        .expect("answer stored");
     assert!(rec.raw.contains("retry policy"), "{}", rec.raw);
     assert_eq!(rec.meta["peer"], b.fp());
 
@@ -257,12 +283,12 @@ async fn unknown_key_is_refused() {
 
     // C is not in B's book. The QUIC handshake completes (iroh authenticates the key), then
     // B closes the connection with the `unknown key` code before accepting any stream.
-    let c = owl_iroh::endpoint(&c_id, Some(&[relay_url.clone()]))
+    let c = owl_iroh::endpoint(&c_id, Some(std::slice::from_ref(&relay_url)))
         .await
         .unwrap();
     let addr = owl_iroh::peer_addr(
         &pubkey_string(&b.id.verifying_key()),
-        Some(&[relay_url.clone()]),
+        Some(std::slice::from_ref(&relay_url)),
     )
     .unwrap();
     let conn = tokio::time::timeout(WAIT, c.connect(addr.clone(), ALPN))
@@ -301,7 +327,11 @@ async fn unknown_key_is_refused() {
     // Nothing was stored or learned: five empty spool dirs, no seen-ids, same contact book.
     let spool = b.spool();
     for dir in Dir::ALL {
-        assert!(ids(&spool, dir).is_empty(), "{} must stay empty", dir.name());
+        assert!(
+            ids(&spool, dir).is_empty(),
+            "{} must stay empty",
+            dir.name()
+        );
     }
     assert!(!b.home().join("seen-ids.txt").exists());
     let after = std::fs::read_dir(&contacts_dir)
@@ -317,7 +347,7 @@ async fn unknown_key_is_refused() {
     assert_eq!(book.contacts[0].fingerprint, fp(&a_id));
 
     // The known key on the same daemon is served (the refusal is about the key, not iroh).
-    let a = owl_iroh::endpoint(&a_id, Some(&[relay_url.clone()]))
+    let a = owl_iroh::endpoint(&a_id, Some(std::slice::from_ref(&relay_url)))
         .await
         .unwrap();
     let reply = request(&a, &b, &relay_url, Method::GET, "/v1/outbox", vec![], None)
@@ -343,15 +373,23 @@ async fn signature_and_replay_rules_apply_over_iroh() {
     )
     .await;
     wait_online(&b).await;
-    let a = owl_iroh::endpoint(&a_id, Some(&[relay_url.clone()]))
+    let a = owl_iroh::endpoint(&a_id, Some(std::slice::from_ref(&relay_url)))
         .await
         .unwrap();
     let post = |raw: Vec<u8>, sig: String| {
         let (a, b, relay_url) = (&a, &b, &relay_url);
         async move {
-            request(a, b, relay_url, Method::POST, "/v1/questions", raw, Some(&sig))
-                .await
-                .unwrap()
+            request(
+                a,
+                b,
+                relay_url,
+                Method::POST,
+                "/v1/questions",
+                raw,
+                Some(&sig),
+            )
+            .await
+            .unwrap()
         }
     };
 
@@ -363,13 +401,21 @@ async fn signature_and_replay_rules_apply_over_iroh() {
         error_of(&post(raw0.clone(), forged).await),
         (400, "bad signature".to_string())
     );
-    assert!(ids(&b.spool(), Dir::Inbox).is_empty(), "rejected before any write");
+    assert!(
+        ids(&b.spool(), Dir::Inbox).is_empty(),
+        "rejected before any write"
+    );
     assert!(!b.home().join("seen-ids.txt").exists());
 
     // Valid → 202; the same id again → the HTTPS suite's `409 duplicate id`.
     let env0 = signed(&a_id, &b.id, "q0");
     let reply = post(env0.raw.clone().into_bytes(), env0.sig.clone()).await;
-    assert_eq!(reply.status, 202, "{}", String::from_utf8_lossy(&reply.body));
+    assert_eq!(
+        reply.status,
+        202,
+        "{}",
+        String::from_utf8_lossy(&reply.body)
+    );
     assert_eq!(
         error_of(&post(env0.raw.clone().into_bytes(), env0.sig.clone()).await),
         (409, "duplicate id".to_string())
@@ -386,7 +432,10 @@ async fn signature_and_replay_rules_apply_over_iroh() {
     let reply = post(env3.raw.clone().into_bytes(), env3.sig.clone()).await;
     assert_eq!(error_of(&reply), (429, "rate limited".to_string()));
     assert_eq!(
-        reply.headers.get("retry-after").and_then(|v| v.to_str().ok()),
+        reply
+            .headers
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok()),
         Some("1200")
     );
     assert_eq!(ids(&b.spool(), Dir::Inbox).len(), 3);
@@ -483,7 +532,11 @@ async fn iroh_first_then_endpoints() {
     assert!(err.ends_with(')'), "{err}");
     assert!(stdout(&out).is_empty());
     for dir in Dir::ALL {
-        assert!(ids(&a.spool(), dir).is_empty(), "{} must stay empty", dir.name());
+        assert!(
+            ids(&a.spool(), dir).is_empty(),
+            "{} must stay empty",
+            dir.name()
+        );
     }
     a.running.shutdown();
 }

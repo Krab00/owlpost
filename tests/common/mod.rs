@@ -186,9 +186,12 @@ pub async fn relay() -> (String, iroh_relay::server::Server) {
 
 /// Bounded wait (≤ 10 s) until the daemon's iroh endpoint is connected to its home relay.
 pub async fn wait_online(d: &TestDaemon) {
-    tokio::time::timeout(std::time::Duration::from_secs(10), d.running.iroh().online())
-        .await
-        .expect("iroh endpoint never reached its relay");
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        d.running.iroh().online(),
+    )
+    .await
+    .expect("iroh endpoint never reached its relay");
 }
 
 /// reqwest client pinned to `server`'s key; `client = Some(id)` presents a certificate.

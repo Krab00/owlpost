@@ -1002,14 +1002,30 @@ mod tests {
             (401, "client certificate required".into())
         );
         assert_eq!(
-            call(router(state.clone()), PeerId(Some(peer_fp.clone())), "GET", &path).await,
+            call(
+                router(state.clone()),
+                PeerId(Some(peer_fp.clone())),
+                "GET",
+                &path
+            )
+            .await,
             (403, "owner only".into())
         );
         // Owner, but not one of the three peer paths.
-        for bad in ["v1/questions/x", ".well-known/agent-card.json", "v1/outbox/a/ack/"] {
+        for bad in [
+            "v1/questions/x",
+            ".well-known/agent-card.json",
+            "v1/outbox/a/ack/",
+        ] {
             let uri = format!("/v1/local/{peer_fp}/{bad}");
             assert_eq!(
-                call(router(state.clone()), PeerId(Some(owner_fp.clone())), "GET", &uri).await,
+                call(
+                    router(state.clone()),
+                    PeerId(Some(owner_fp.clone())),
+                    "GET",
+                    &uri
+                )
+                .await,
                 (404, "not found".into()),
                 "{bad}"
             );
@@ -1026,22 +1042,46 @@ mod tests {
             (502, "iroh: unknown contact owl:nobody".into())
         );
         assert_eq!(
-            call(router(state.clone()), PeerId(Some(owner_fp.clone())), "GET", &path).await,
+            call(
+                router(state.clone()),
+                PeerId(Some(owner_fp.clone())),
+                "GET",
+                &path
+            )
+            .await,
             (502, "iroh: no endpoint".into()),
             "known contact, no endpoint in this state"
         );
         // Over the iroh listener the route does not exist, even for the owner.
         assert_eq!(
-            call(iroh_router(state.clone()), PeerId(Some(owner_fp.clone())), "GET", &path).await,
+            call(
+                iroh_router(state.clone()),
+                PeerId(Some(owner_fp.clone())),
+                "GET",
+                &path
+            )
+            .await,
             (404, "not found".into())
         );
         assert_eq!(
-            call(iroh_router(state.clone()), PeerId(Some(owner_fp.clone())), "POST", &path).await,
+            call(
+                iroh_router(state.clone()),
+                PeerId(Some(owner_fp.clone())),
+                "POST",
+                &path
+            )
+            .await,
             (404, "not found".into())
         );
         // The peer routes themselves are on both routers.
         assert_eq!(
-            call(iroh_router(state.clone()), PeerId(None), "GET", "/v1/outbox").await,
+            call(
+                iroh_router(state.clone()),
+                PeerId(None),
+                "GET",
+                "/v1/outbox"
+            )
+            .await,
             (401, "client certificate required".into())
         );
     }
@@ -1050,7 +1090,9 @@ mod tests {
     fn forwardable_is_exactly_the_three_peer_paths() {
         assert!(forwardable("v1/questions"));
         assert!(forwardable("v1/outbox"));
-        assert!(forwardable("v1/outbox/0191c7a0-0000-7000-8000-000000000000/ack"));
+        assert!(forwardable(
+            "v1/outbox/0191c7a0-0000-7000-8000-000000000000/ack"
+        ));
         assert!(forwardable("v1/outbox/abc/ack"));
         for bad in [
             "",

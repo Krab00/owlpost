@@ -155,7 +155,15 @@ fn reach(
 ) -> anyhow::Result<Result<Reply, Vec<String>>> {
     let client = http_client(identity, contact)?;
     let mut errors = Vec::new();
-    match via_iroh(identity, contact, iroh, &method, path, headers, body.clone()) {
+    match via_iroh(
+        identity,
+        contact,
+        iroh,
+        &method,
+        path,
+        headers,
+        body.clone(),
+    ) {
         Ok(reply) => return Ok(Ok(reply)),
         Err(e) => errors.push(format!("iroh: {e:#}")),
     }
@@ -220,7 +228,8 @@ fn via_iroh(
             ))
         }
         Iroh::ViaDaemon(addr) => {
-            let cfg = tls::client_config(Some(identity), Some(*identity.verifying_key().as_bytes()))?;
+            let cfg =
+                tls::client_config(Some(identity), Some(*identity.verifying_key().as_bytes()))?;
             let client = Client::builder()
                 .use_preconfigured_tls(Arc::unwrap_or_clone(cfg))
                 .connect_timeout(CONNECT_TIMEOUT)
@@ -538,7 +547,9 @@ mod tests {
             }
             other => panic!("expected Offline, got {other:?}"),
         }
-        let err = fetch_outbox(&a, &contact, &no_iroh()).unwrap_err().to_string();
+        let err = fetch_outbox(&a, &contact, &no_iroh())
+            .unwrap_err()
+            .to_string();
         assert_eq!(err, "offline: iroh: no local daemon (daemon.addr missing)");
         let err = ack(&a, &contact, &no_iroh(), "x").unwrap_err().to_string();
         assert_eq!(err, "offline: iroh: no local daemon (daemon.addr missing)");
@@ -577,7 +588,9 @@ mod tests {
             }
             other => panic!("expected Offline, got {other:?}"),
         }
-        let err = fetch_outbox(&a, &contact, &no_iroh()).unwrap_err().to_string();
+        let err = fetch_outbox(&a, &contact, &no_iroh())
+            .unwrap_err()
+            .to_string();
         assert!(err.starts_with("offline: iroh: "), "{err}");
         let err = ack(&a, &contact, &no_iroh(), "x").unwrap_err().to_string();
         assert!(err.starts_with("offline: iroh: "), "{err}");
@@ -594,7 +607,11 @@ mod tests {
         let Iroh::ViaDaemon(addr) = Iroh::from_home(home.path()) else {
             panic!("daemon.addr present must be ViaDaemon");
         };
-        assert_eq!(addr.to_string(), "127.0.0.1:7411", "wildcard mapped to loopback");
+        assert_eq!(
+            addr.to_string(),
+            "127.0.0.1:7411",
+            "wildcard mapped to loopback"
+        );
         std::fs::write(home.path().join(crate::daemon::ADDR_FILE), "junk").unwrap();
         assert!(matches!(Iroh::from_home(home.path()), Iroh::Unavailable(_)));
     }

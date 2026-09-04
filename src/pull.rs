@@ -822,9 +822,16 @@ mod tests {
         let mut lv = Liveness::new(Duration::from_secs(60));
         let t0 = Instant::now();
         let mut events = Vec::new();
-        let status = pull_once(home.path(), home.path(), &a, &no_iroh(), &spool, &mut lv, t0, |ev| {
-            events.push(ev)
-        })
+        let status = pull_once(
+            home.path(),
+            home.path(),
+            &a,
+            &no_iroh(),
+            &spool,
+            &mut lv,
+            t0,
+            |ev| events.push(ev),
+        )
         .unwrap();
         assert_eq!(status.open_asks, 2, "both parseable asks stay open");
         assert_eq!(status.peers_probed, 1, "only the known contact is probed");
@@ -950,14 +957,23 @@ mod tests {
         let mut no_reply = ans.clone();
         no_reply.in_reply_to = None;
         assert!(matches!(
-            ingest_envelope(&a, &contact, &no_iroh(), &spool, &open, &Envelope::sign(&no_reply, &b)).unwrap(),
+            ingest_envelope(
+                &a,
+                &contact,
+                &no_iroh(),
+                &spool,
+                &open,
+                &Envelope::sign(&no_reply, &b)
+            )
+            .unwrap(),
             Verdict::Unrelated
         ));
         assert!(spool.get(Dir::Inbox, &ans.id).unwrap().is_none());
         assert!(spool.get(Dir::Asks, &q.id).unwrap().is_some());
         // Good: stored, ask moved, ack failed (closed port) but reported, not fatal.
         let good = Envelope::sign(&ans, &b);
-        let Verdict::Ingested(ing) = ingest_envelope(&a, &contact, &no_iroh(), &spool, &open, &good).unwrap()
+        let Verdict::Ingested(ing) =
+            ingest_envelope(&a, &contact, &no_iroh(), &spool, &open, &good).unwrap()
         else {
             panic!("expected Ingested");
         };

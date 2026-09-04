@@ -726,8 +726,35 @@ fn e2e_real_script_fails_fast() {
         "{err}"
     );
 
-    // Valid harness whose binary is not on PATH: non-zero, names the binary.
+    // OWL_TRANSPORT outside https|iroh: same guard class, names the bad value; it is
+    // checked before the PATH lookup, so an empty PATH does not mask it.
     let empty = tempfile::tempdir().unwrap();
+    let out = e2e_real(
+        &[("OWL_HARNESS", "claude"), ("OWL_TRANSPORT", "tcp")],
+        Some(empty.path()),
+    );
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    let err = stderr(&out);
+    assert!(
+        err.contains("OWL_TRANSPORT=tcp is not one of https|iroh"),
+        "{err}"
+    );
+    // Both accepted values get past that guard (and stop at the next one, the PATH lookup).
+    for t in ["https", "iroh"] {
+        let out = e2e_real(
+            &[("OWL_HARNESS", "claude"), ("OWL_TRANSPORT", t)],
+            Some(empty.path()),
+        );
+        assert_eq!(out.status.code(), Some(2), "{t}: {}", stderr(&out));
+        let err = stderr(&out);
+        assert!(!err.contains("is not one of https|iroh"), "{t}: {err}");
+        assert!(
+            err.contains("harness binary 'claude' not found on PATH"),
+            "{t}: {err}"
+        );
+    }
+
+    // Valid harness whose binary is not on PATH: non-zero, names the binary.
     for h in ["claude", "codex", "opencode"] {
         let out = e2e_real(&[("OWL_HARNESS", h)], Some(empty.path()));
         assert_eq!(out.status.code(), Some(2), "{h}: {}", stderr(&out));
