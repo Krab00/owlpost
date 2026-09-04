@@ -869,7 +869,10 @@ mod tests {
         let mut v = valid();
         v["body"].as_object_mut().unwrap().remove("path");
         let p = validate_question(&v, "owl:aaaa", "owl:bbbb").unwrap();
-        assert!(matches!(p.body, envelope::Body::Question { path: None, .. }));
+        assert!(matches!(
+            p.body,
+            envelope::Body::Question { path: None, .. }
+        ));
         let mut v = valid();
         v["body"]["path"] = json!(3);
         assert!(err_of(v).starts_with("bad schema"));
