@@ -56,6 +56,20 @@ works with redaction and logging; a real-harness run is documented and scripted.
 Exit: a colleague installs with one command, appears in `.agents/peers/` via PR, and answers a
 question from Claude Code without leaving the session.
 
+## M3.5 — Reachability across networks
+
+Added 2026-09-04 after the first cross-machine test: the only address owlpost can advertise is
+a host:port the asker must dial, which two people on different networks do not have without a
+shared VPN or Tailscale (`docs/concept.md` "Addressing — hard prerequisite", still an open
+question for the company). Blocks a pilot with anyone outside one office network.
+
+| Task | Deliverable |
+|---|---|
+| OWL-017 | Second transport over `iroh`: dial a peer by its ed25519 public key (hole punching, public or self-hosted relay fallback); iroh first, `endpoints` second; key-pinned accept; same HTTP contract, signatures, replay and rate rules; docs record the "relay sees metadata, never content" trade-off |
+
+Exit: two daemons behind two different NATs, contact books with empty `endpoints`, complete
+the ask → allow → draft → send → pull loop; `e2e-real.sh` runs it with `OWL_TRANSPORT=iroh`.
+
 ## M4 — Post-MVP (not yet tasked)
 
 - Codex, Kimi Code and opencode adapters (configuration packages; Kimi responder after the
@@ -64,7 +78,7 @@ question from Claude Code without leaving the session.
 - Lesson / bug-report message type with proposed memory rule.
 - Signed peer-file changes + CI check for the `repo` provider.
 - Statusline badge where the harness supports it.
-- Invite bundle / QR for unreachable hosts.
+- Invite bundle / QR for onboarding without a repo PR (reachability itself is OWL-017).
 
 ## Pilot (after M3)
 
