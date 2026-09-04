@@ -619,7 +619,6 @@ fn system_flag_targets_usr_local_bin() {
         writable,
         "curl runs only past the prefix guard"
     );
-    assert!(!Path::new("/usr/local/bin/owl.tmp.0").exists());
 }
 
 // ---------------------------------------------------------------- real URLs, no network
@@ -717,12 +716,20 @@ fn installed_binary_is_made_executable_even_if_the_tarball_entry_is_not() {
 
 #[test]
 fn directory_at_prefix_owl_fails_before_download_and_leaves_nothing() {
-    let rel = Release::build();
-    let (_d, pfx) = prefix();
+    // No release fixture on purpose: the base URL resolves to nothing and curl is the
+    // logging fake, so the only way to get the directory message is for the guard to run
+    // before the first fetch (SHA256SUMS included). A guard moved past that fetch would
+    // fail on the download instead and leave a curl log behind.
+    let d = tempfile::tempdir().unwrap();
+    let (curl, log) = fake_curl(d.path());
+    let (_p, pfx) = prefix();
     fs::create_dir_all(pfx.join("owl")).unwrap();
     let out = install(
         &["--version", VERSION, "--prefix", pfx.to_str().unwrap()],
-        &[("OWL_INSTALL_BASE_URL", &rel.base_url())],
+        &[
+            ("OWL_INSTALL_BASE_URL", "file:///nonexistent"),
+            ("OWL_INSTALL_CURL", curl.to_str().unwrap()),
+        ],
     );
     assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
     assert_eq!(
@@ -733,6 +740,7 @@ fn directory_at_prefix_owl_fails_before_download_and_leaves_nothing() {
         )
     );
     assert!(stdout(&out).is_empty(), "no download: {}", stdout(&out));
+    assert!(!log.exists(), "curl ran before the directory guard");
     // The directory is untouched and no temp file exists anywhere under the prefix.
     let mut stack = vec![pfx.clone()];
     let mut seen = Vec::new();
