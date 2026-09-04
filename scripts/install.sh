@@ -25,14 +25,24 @@
 #
 # Exit codes: 0 installed, 2 usage or unsupported environment, 1 download / checksum / install
 # failure. Every failure prints one `owl install: ...` line on stderr; nothing is left behind
-# in <prefix> when the checksum does not match.
+# in <prefix> on any failure (an existing directory at <prefix>/owl is refused before download).
 set -eu
 
 REPO="Krab00/owlpost"
 CURL="${OWL_INSTALL_CURL:-curl}"
 
 usage() {
-    sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'
+    cat <<'EOF'
+owl install: download a release of owl, verify its SHA-256 and install it
+
+usage: install.sh [--version <tag>] [--prefix <dir> | --system]
+   or: curl -fsSL https://raw.githubusercontent.com/Krab00/owlpost/main/scripts/install.sh | sh
+
+  --version <tag>   release tag to install, e.g. v0.1.0 (default: the latest release)
+  --prefix <dir>    directory that receives owl (default: ~/.local/bin)
+  --system          shorthand for --prefix /usr/local/bin
+  -h, --help        print this help
+EOF
 }
 
 die() {
@@ -94,6 +104,7 @@ fi
 mkdir -p "$prefix" 2>/dev/null || true
 [ -d "$prefix" ] && [ -w "$prefix" ] \
     || die "prefix ${prefix} is not writable (use --prefix <dir> you own, or sudo for --system)" 1
+[ ! -d "$prefix/owl" ] || die "could not write ${prefix}/owl: is a directory" 1
 
 # --- download --------------------------------------------------------------------------------
 if [ -n "$tag" ]; then
@@ -139,7 +150,7 @@ actual="$(sha256 "$tmp/$asset")"
     || die "checksum mismatch for ${asset}: expected ${expected}, got ${actual}" 1
 
 # --- install ---------------------------------------------------------------------------------
-tar -xzf "$tmp/$asset" -C "$tmp" owl || die "could not extract owl from ${asset}" 1
+tar -xzf "$tmp/$asset" -C "$tmp" owl 2>/dev/null || die "could not extract owl from ${asset}" 1
 cp "$tmp/owl" "$prefix/owl.tmp.$$" || die "could not write ${prefix}/owl" 1
 chmod +x "$prefix/owl.tmp.$$"
 mv -f "$prefix/owl.tmp.$$" "$prefix/owl" || die "could not write ${prefix}/owl" 1
