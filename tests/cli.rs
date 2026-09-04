@@ -702,5 +702,5 @@ fn update_dry_run_lists_steps() {
     assert!(s.contains("owl uninstall && owl install"), "{s}");
     let out = owl().args(["update", "--dry-run"]).output().unwrap();
     let s = String::from_utf8_lossy(&out.stdout);
-    assert!(s.contains("install.sh | sh"), "{s}");
+    assert!(s.contains("install.sh -o"), "{s}");
 }
