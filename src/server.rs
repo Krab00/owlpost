@@ -1,9 +1,14 @@
 //! Daemon HTTP API (§7): axum router, handlers, per-peer token bucket, replay window.
 //!
-//! Peer identity comes from the TLS layer: `PeerAcceptor` wraps axum-server's
+//! Peer identity comes from the transport layer: `PeerAcceptor` wraps axum-server's
 //! `RustlsAcceptor`, reads the client certificate after the handshake and attaches a
-//! `PeerId` extension to every request on that connection. Card routes accept `PeerId(None)`
-//! (unpinned clients); every `/v1/*` route requires a fingerprint.
+//! `PeerId` extension to every request on that connection; the iroh listener
+//! (`crate::iroh`) attaches the same extension from the connection's key. Card routes accept
+//! `PeerId(None)` (unpinned clients); every `/v1/*` route requires a fingerprint.
+//!
+//! `/v1/local/{fingerprint}/{*rest}` is the owner's own forward route: the CLI (a separate
+//! process, which must not bind a second iroh endpoint) asks the daemon to replay a request
+//! to a peer over iroh; a local failure is `502 {"error": "iroh: …"}`.
 //!
 //! Every rejected input is a `4xx` with a JSON `{"error": "..."}` body naming the problem.
 
@@ -18,10 +23,10 @@ use std::time::Instant;
 use axum::body::Bytes;
 use axum::extract::rejection::BytesRejection;
 use axum::extract::{DefaultBodyLimit, Extension, Path, State};
-use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::middleware::AddExtension;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{any, get, post};
 use axum::{Json, Router};
 use axum_server::accept::Accept;
 use axum_server::tls_rustls::RustlsAcceptor;
@@ -86,6 +91,9 @@ pub struct AppState {
     pub buckets: Mutex<HashMap<String, Bucket>>,
     /// Set by the daemon once the listener is bound; used for the card `url`.
     pub bound: OnceLock<SocketAddr>,
+    /// The daemon's iroh endpoint (set by the daemon; absent in unit tests): the card's
+    /// `iroh` block and the forward route read it.
+    pub iroh: OnceLock<iroh::Endpoint>,
     /// Daemon event channel: notifications today; the auto-accept scheduler (OWL-008)
     /// consumes the same `Question` events.
     pub on_spooled: Option<tokio::sync::mpsc::UnboundedSender<DaemonEvent>>,
@@ -111,6 +119,7 @@ impl AppState {
             seen: Mutex::new(seen),
             buckets: Mutex::new(HashMap::new()),
             bound: OnceLock::new(),
+            iroh: OnceLock::new(),
             on_spooled,
             started: Instant::now(),
         })
@@ -128,7 +137,7 @@ impl AppState {
     /// Fresh contact book on every call so `owl allow` / `owl deny` apply without a restart.
     // ponytail: the TLS allowed-key set is a snapshot from daemon start — a newly added
     // contact still needs a daemon restart to get through the handshake (reload in OWL-012).
-    fn contacts(&self) -> anyhow::Result<ContactBook> {
+    pub(crate) fn contacts(&self) -> anyhow::Result<ContactBook> {
         ContactBook::load(&self.home, &self.cwd)
     }
 }
@@ -213,17 +222,36 @@ impl IntoResponse for ApiError {
 
 type ApiResult<T> = Result<T, ApiError>;
 
-pub fn router(state: Arc<AppState>) -> Router {
+/// The §7 routes every listener serves.
+fn peer_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/.well-known/agent-card.json", get(card))
         .route("/.well-known/agent.json", get(card))
         .route("/v1/questions", post(post_question))
         .route("/v1/outbox", get(get_outbox))
         .route("/v1/outbox/{id}/ack", post(ack_outbox))
+}
+
+fn finish(routes: Router<Arc<AppState>>, state: Arc<AppState>) -> Router {
+    routes
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .with_state(state)
+}
+
+/// The mTLS listener's router: the peer routes plus the owner's forward route.
+pub fn router(state: Arc<AppState>) -> Router {
+    finish(
+        peer_routes().route("/v1/local/{fingerprint}/{*rest}", any(forward)),
+        state,
+    )
+}
+
+/// The iroh listener's router: the peer routes only. The forward route is not mounted, so
+/// it is `404` for every key over iroh, the owner's included.
+pub fn iroh_router(state: Arc<AppState>) -> Router {
+    finish(peer_routes(), state)
 }
 
 async fn not_found() -> ApiError {
@@ -274,6 +302,13 @@ pub fn card_json(state: &AppState) -> Value {
     } else {
         state.config.name.clone()
     };
+    // The iroh endpoint id is the identity key, so `iroh.id` repeats `owlpost.pubkey`.
+    let iroh = state.iroh.get().map(|ep| {
+        json!({
+            "id": identity::pubkey_string(&pk),
+            "relay": crate::iroh::home_relay(ep),
+        })
+    });
     json!({
         "name": name,
         "description": format!("owlpost agent of {name}: answers questions about their code"),
@@ -289,6 +324,7 @@ pub fn card_json(state: &AppState) -> Value {
             "responds": state.config.responder.enabled,
             "harness": state.config.responder.harness,
         },
+        "iroh": iroh,
     })
 }
 
@@ -577,6 +613,85 @@ async fn ack_outbox(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// The three peer paths the forward route replays (`v1/questions`, `v1/outbox`,
+/// `v1/outbox/{id}/ack`); anything else is `404`.
+pub fn forwardable(rest: &str) -> bool {
+    match rest {
+        "v1/questions" | "v1/outbox" => true,
+        _ => rest
+            .strip_prefix("v1/outbox/")
+            .and_then(|r| r.strip_suffix("/ack"))
+            .is_some_and(|id| {
+                !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+            }),
+    }
+}
+
+/// Request headers the forward route replays and response headers it returns.
+fn forwarded_header(name: &str) -> bool {
+    name.starts_with("x-owl-") || name == "content-type" || name == "retry-after"
+}
+
+fn iroh_unavailable(reason: impl std::fmt::Display) -> ApiError {
+    ApiError::new(StatusCode::BAD_GATEWAY, format!("iroh: {reason}"))
+}
+
+/// `ANY /v1/local/{fingerprint}/{*rest}` — owner only (the caller's key is this daemon's
+/// key). Replays method, `X-Owl-*` headers and body to the contact over iroh and returns
+/// the peer's status, headers and body verbatim. `502 {"error": "iroh: …"}` means the peer
+/// was not reached (no contact, no endpoint, dial timeout): the client tries `endpoints`.
+async fn forward(
+    State(state): State<Arc<AppState>>,
+    Extension(peer): Extension<PeerId>,
+    Path((fingerprint, rest)): Path<(String, String)>,
+    method: Method,
+    headers: HeaderMap,
+    body: Result<Bytes, BytesRejection>,
+) -> ApiResult<Response> {
+    let caller = require_peer(&peer)?;
+    if caller != state.fingerprint() {
+        return Err(ApiError::new(StatusCode::FORBIDDEN, "owner only"));
+    }
+    if !forwardable(&rest) {
+        return Err(ApiError::not_found());
+    }
+    let body = body_bytes(body)?;
+    let book = state.contacts().map_err(ApiError::storage)?;
+    let contact = book
+        .contacts
+        .iter()
+        .find(|c| c.fingerprint == fingerprint)
+        .ok_or_else(|| iroh_unavailable(format!("unknown contact {fingerprint}")))?;
+    let endpoint = state
+        .iroh
+        .get()
+        .ok_or_else(|| iroh_unavailable("no endpoint"))?;
+    let addr = crate::iroh::peer_addr(&contact.pubkey, state.config.relay_urls.as_deref())
+        .map_err(|e| iroh_unavailable(format!("{e:#}")))?;
+    let replay: HeaderMap = headers
+        .iter()
+        .filter(|(k, _)| forwarded_header(k.as_str()))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    let reply = crate::iroh::request(endpoint, addr, method, &format!("/{rest}"), replay, body)
+        .await
+        .map_err(|e| {
+            tracing::warn!(peer = %fingerprint, error = %format!("{e:#}"), "iroh forward failed");
+            iroh_unavailable(format!("{e:#}"))
+        })?;
+    let mut resp = (
+        StatusCode::from_u16(reply.status).unwrap_or(StatusCode::BAD_GATEWAY),
+        reply.body,
+    )
+        .into_response();
+    for (k, v) in reply.headers.iter() {
+        if forwarded_header(k.as_str()) {
+            resp.headers_mut().insert(k.clone(), v.clone());
+        }
+    }
+    Ok(resp)
+}
+
 /// TLS acceptor that tags each connection's service with the client's fingerprint.
 #[derive(Clone)]
 pub struct PeerAcceptor {
@@ -804,6 +919,7 @@ mod tests {
         assert_eq!(card["capabilities"]["pushNotifications"], false);
         assert_eq!(card["skills"], json!([]));
         assert_eq!(card["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(card["iroh"], Value::Null, "no endpoint outside the daemon");
         state.bound.set("127.0.0.1:4321".parse().unwrap()).unwrap();
         assert_eq!(card_json(&state)["url"], "https://127.0.0.1:4321/");
         cfg.endpoints = vec!["b.example.org:7411".into()];
@@ -820,5 +936,191 @@ mod tests {
         assert_eq!(card["url"], "https://b.example.org:7411/");
         assert_eq!(card["name"], "Bea");
         assert_eq!(card["owlpost"]["responds"], false);
+    }
+
+    /// The forward route's own refusals, without any network: owner check first, then the
+    /// path allow-list, then `502 iroh: …` for what the daemon cannot reach. Over the iroh
+    /// router the route does not exist at all.
+    #[tokio::test]
+    async fn forward_route_refuses_non_owners_bad_paths_and_unreachable_peers() {
+        use tower::ServiceExt;
+        let home = tempfile::tempdir().unwrap();
+        let owner = Identity::from_seed([3u8; 32]);
+        let peer = Identity::from_seed([4u8; 32]);
+        let dir = crate::contacts::local::dir(home.path());
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("bea.json"),
+            json!({
+                "name": "Bea",
+                "emails": [],
+                "pubkey": identity::pubkey_string(&peer.verifying_key()),
+                "endpoints": [],
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let state = Arc::new(
+            AppState::new(
+                home.path().to_path_buf(),
+                home.path().to_path_buf(),
+                Config::default(),
+                owner,
+                None,
+            )
+            .unwrap(),
+        );
+        let owner_fp = state.fingerprint();
+        let peer_fp = identity::fingerprint(&peer.verifying_key());
+        let call = |router: Router, who: PeerId, method: &str, uri: &str| {
+            let req = axum::http::Request::builder()
+                .method(method)
+                .uri(uri)
+                .extension(who)
+                .body(axum::body::Body::empty())
+                .unwrap();
+            async move {
+                let resp = router.oneshot(req).await.unwrap();
+                let status = resp.status().as_u16();
+                let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                let body: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+                (
+                    status,
+                    body.get("error")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                )
+            }
+        };
+        let path = format!("/v1/local/{peer_fp}/v1/outbox");
+        // Unpinned and non-owner callers: refused before the path is looked at.
+        assert_eq!(
+            call(router(state.clone()), PeerId(None), "GET", &path).await,
+            (401, "client certificate required".into())
+        );
+        assert_eq!(
+            call(
+                router(state.clone()),
+                PeerId(Some(peer_fp.clone())),
+                "GET",
+                &path
+            )
+            .await,
+            (403, "owner only".into())
+        );
+        // Owner, but not one of the three peer paths.
+        for bad in [
+            "v1/questions/x",
+            ".well-known/agent-card.json",
+            "v1/outbox/a/ack/",
+        ] {
+            let uri = format!("/v1/local/{peer_fp}/{bad}");
+            assert_eq!(
+                call(
+                    router(state.clone()),
+                    PeerId(Some(owner_fp.clone())),
+                    "GET",
+                    &uri
+                )
+                .await,
+                (404, "not found".into()),
+                "{bad}"
+            );
+        }
+        // Owner, good path, but the daemon cannot reach the peer: 502 naming why. A prefix
+        // or superstring of a known fingerprint is unknown too (exact match only).
+        let prefix = &peer_fp[..peer_fp.len() - 3];
+        for unknown in ["owl:nobody", prefix, &format!("{peer_fp}xyz")] {
+            assert_eq!(
+                call(
+                    router(state.clone()),
+                    PeerId(Some(owner_fp.clone())),
+                    "GET",
+                    &format!("/v1/local/{unknown}/v1/outbox")
+                )
+                .await,
+                (502, format!("iroh: unknown contact {unknown}")),
+                "{unknown}"
+            );
+        }
+        assert_eq!(
+            call(
+                router(state.clone()),
+                PeerId(Some(owner_fp.clone())),
+                "GET",
+                &path
+            )
+            .await,
+            (502, "iroh: no endpoint".into()),
+            "known contact, no endpoint in this state"
+        );
+        // Over the iroh listener the route does not exist, even for the owner.
+        assert_eq!(
+            call(
+                iroh_router(state.clone()),
+                PeerId(Some(owner_fp.clone())),
+                "GET",
+                &path
+            )
+            .await,
+            (404, "not found".into())
+        );
+        assert_eq!(
+            call(
+                iroh_router(state.clone()),
+                PeerId(Some(owner_fp.clone())),
+                "POST",
+                &path
+            )
+            .await,
+            (404, "not found".into())
+        );
+        // The peer routes themselves are on both routers.
+        assert_eq!(
+            call(
+                iroh_router(state.clone()),
+                PeerId(None),
+                "GET",
+                "/v1/outbox"
+            )
+            .await,
+            (401, "client certificate required".into())
+        );
+    }
+
+    #[test]
+    fn forwardable_is_exactly_the_three_peer_paths() {
+        assert!(forwardable("v1/questions"));
+        assert!(forwardable("v1/outbox"));
+        assert!(forwardable(
+            "v1/outbox/0191c7a0-0000-7000-8000-000000000000/ack"
+        ));
+        assert!(forwardable("v1/outbox/abc/ack"));
+        for bad in [
+            "",
+            "v1",
+            "v1/questions/",
+            "v1/questions/x",
+            "v1/outbox/",
+            "v1/outbox/abc",
+            "v1/outbox//ack",
+            "v1/outbox/../ack",
+            "v1/outbox/a b/ack",
+            "v1/outbox/abc/ack/",
+            "v1/local/owl:x/v1/questions",
+            ".well-known/agent-card.json",
+            "V1/questions",
+        ] {
+            assert!(!forwardable(bad), "{bad:?}");
+        }
+        assert!(forwarded_header("x-owl-signature"));
+        assert!(forwarded_header("content-type"));
+        assert!(forwarded_header("retry-after"));
+        assert!(!forwarded_header("authorization"));
+        assert!(!forwarded_header("host"));
+        assert!(!forwarded_header("xowl-signature"));
     }
 }

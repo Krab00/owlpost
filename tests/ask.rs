@@ -675,11 +675,16 @@ fn offline_exits_2_and_queues_nothing() {
         );
     }
 
-    // A contact with no endpoints at all is a user error (1), not "offline".
+    // A contact with no endpoints at all is valid since OWL-017 (iroh reaches it); with no
+    // local daemon to forward over iroh it is offline (2), naming the missing daemon.
     let home = asker_home(&a, &b, &[]);
     let out = ask(home.path(), &[]);
-    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
-    assert!(stderr(&out).contains("no endpoints"), "{}", stderr(&out));
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert_eq!(
+        stderr(&out).trim(),
+        "owl: offline: no endpoint of Bea reachable (iroh: no local daemon (daemon.addr missing))"
+    );
+    assert!(stdout(&out).is_empty());
 
     // Unknown peer: resolution fails before anything is sent (1).
     let out = owl(home.path(), home.path())
@@ -1315,21 +1320,35 @@ async fn unexpected_status_is_an_error_naming_it() {
     q.ts = envelope::unix_to_rfc3339(envelope::now_unix() - 3600);
     let env = Envelope::sign(&q, &a);
     let ident = Identity::from_seed([1; 32]);
-    let err = tokio::task::spawn_blocking(move || client::send_question(&ident, &contact, &env))
-        .await
-        .unwrap()
-        .unwrap_err()
-        .to_string();
+    let err = tokio::task::spawn_blocking(move || {
+        client::send_question(
+            &ident,
+            &contact,
+            &client::Iroh::Unavailable("none".into()),
+            &env,
+        )
+    })
+    .await
+    .unwrap()
+    .unwrap_err()
+    .to_string();
     assert_eq!(err, "peer returned 400 Bad Request: stale ts");
     // And the happy path through the library maps to Accepted with the question id.
     let contact = book.resolve("Bea").unwrap().clone();
     let q = question(&a, &b.id, QUESTION);
     let env = Envelope::sign(&q, &a);
     let ident = Identity::from_seed([1; 32]);
-    let out = tokio::task::spawn_blocking(move || client::send_question(&ident, &contact, &env))
-        .await
-        .unwrap()
-        .unwrap();
+    let out = tokio::task::spawn_blocking(move || {
+        client::send_question(
+            &ident,
+            &contact,
+            &client::Iroh::Unavailable("none".into()),
+            &env,
+        )
+    })
+    .await
+    .unwrap()
+    .unwrap();
     assert!(
         matches!(out, SendOutcome::Accepted { ref id } if *id == q.id),
         "{out:?}"

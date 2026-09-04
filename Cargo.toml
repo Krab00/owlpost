@@ -32,9 +32,20 @@ tower = "0.5"
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "json", "blocking"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# iroh: QUIC dialled by ed25519 key, hole punching + relay fallback (the only NAT traversal
+# option that needs no VPN/DNS); tls-ring keeps the single ring crypto stack. No `portmapper`
+# (SSDP multicast probes, firewall prompts) and no `metrics`.
+iroh = { version = "1.1.0", default-features = false, features = ["tls-ring"] }
+# hyper + hyper-util + http-body-util: serve the axum router and run an HTTP/1 client over an
+# iroh bi-stream; all three are already transitive deps of axum/reqwest (feature flags only).
+hyper = { version = "1", features = ["http1", "client", "server"] }
+hyper-util = { version = "0.1", features = ["tokio", "service"] }
+http-body-util = "0.1"
 
 [dev-dependencies]
 tempfile = "3"
+# iroh-relay (server): a plain-HTTP relay on 127.0.0.1:0 for the iroh tests; never n0's relays.
+iroh-relay = { version = "1.1.0", default-features = false, features = ["server", "tls-ring"] }
 
 [profile.release]
 # Release tarballs: strip symbols so the download stays small; debug builds are unaffected.

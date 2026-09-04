@@ -8,6 +8,7 @@ pub mod contacts;
 pub mod daemon;
 pub mod envelope;
 pub mod identity;
+pub mod iroh;
 pub mod notify;
 pub mod pull;
 pub mod runner;

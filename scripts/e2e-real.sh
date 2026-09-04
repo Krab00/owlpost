@@ -1,7 +1,7 @@
 #!/bin/bash
 # e2e-real.sh — the OWL-014 manual loop against a REAL harness on this machine (design §12).
 #
-#   OWL_HARNESS=claude|codex|opencode scripts/e2e-real.sh
+#   OWL_HARNESS=claude|codex|opencode [OWL_TRANSPORT=https|iroh] scripts/e2e-real.sh
 #
 # Two temp homes (Ana asks, Bea answers), two `owl daemon --foreground` processes on port 0,
 # a throwaway git repo as the project, the real harness named by OWL_HARNESS drafting Bea's
@@ -9,13 +9,17 @@
 # Never run by CI or `cargo test` — it needs a real, authenticated harness and a network-free
 # but live machine. Exit 2 = precondition failure (guards below), 1 = a step failed.
 #
+#   OWL_TRANSPORT  https (default): Bea's peer file carries her host:port, as before.
+#                  iroh: both peer files have empty `endpoints`; the daemons keep the default
+#                  `relay_urls` (n0's public relays), so the loop runs over iroh — needs
+#                  internet. Both daemons' `owl doctor` iroh lines are printed for the record.
 #   OWL_BIN        owl binary (default: target/debug/owl, built with `cargo build` if missing)
 #   OWL_E2E_KEEP   set to keep the temp homes and repo after the run
 set -euo pipefail
 
 usage_fail() {
   echo "e2e-real: $1" >&2
-  echo "usage: OWL_HARNESS=claude|codex|opencode scripts/e2e-real.sh" >&2
+  echo "usage: OWL_HARNESS=claude|codex|opencode [OWL_TRANSPORT=https|iroh] scripts/e2e-real.sh" >&2
   exit 2
 }
 
@@ -24,6 +28,11 @@ case "${OWL_HARNESS:-}" in
   "") usage_fail "OWL_HARNESS is unset; set it to the harness to drive (claude|codex|opencode)" ;;
   claude | codex | opencode) ;;
   *) usage_fail "OWL_HARNESS=${OWL_HARNESS} is not one of claude|codex|opencode" ;;
+esac
+TRANSPORT=${OWL_TRANSPORT:-https}
+case "$TRANSPORT" in
+  https | iroh) ;;
+  *) usage_fail "OWL_TRANSPORT=${TRANSPORT} is not one of https|iroh" ;;
 esac
 if ! command -v "$OWL_HARNESS" >/dev/null 2>&1; then
   usage_fail "harness binary '${OWL_HARNESS}' not found on PATH (OWL_HARNESS=${OWL_HARNESS})"
@@ -130,7 +139,11 @@ PIDS+=($!)
 wait_for 10 "Bea's daemon.addr" test -s "$B/daemon.addr"
 B_ADDR=$(tr -d '[:space:]' <"$B/daemon.addr")
 echo "Bea listens on $B_ADDR"
-write_config "$B" Bea bea@e2e.local "" "\"$B_ADDR\""
+if [ "$TRANSPORT" = https ]; then
+  write_config "$B" Bea bea@e2e.local "" "\"$B_ADDR\""
+else
+  echo "OWL_TRANSPORT=iroh: Bea's peer file gets no endpoints; Ana dials her key over iroh"
+fi
 echo "[bea] owl contact export > .agents/peers/bea.json"
 (cd "$REPO" && OWLPOST_HOME= "$OWL" --home "$B" contact export) >"$REPO/.agents/peers/bea.json"
 git -C "$REPO" -c user.email=dev@example.org -c user.name=Dev add .agents
@@ -140,6 +153,15 @@ step "start Ana's daemon (pull every 1 s)"
 (cd "$REPO" && OWLPOST_HOME= RUST_LOG=info "$OWL" --home "$A" daemon --foreground) >"$LOGDIR/ana-daemon.log" 2>&1 &
 PIDS+=($!)
 wait_for 10 "Ana's daemon.addr" test -s "$A/daemon.addr"
+
+if [ "$TRANSPORT" = iroh ]; then
+  step "iroh: wait for both daemons to reach a relay (doctor's iroh line)"
+  iroh_ok() { (cd "$REPO" && OWLPOST_HOME= "$OWL" --home "$1" doctor 2>/dev/null | grep -q '^ok   iroh: '); }
+  wait_for 30 "Bea's relay connection" iroh_ok "$B"
+  wait_for 30 "Ana's relay connection" iroh_ok "$A"
+  run bea "$B" doctor | grep ' iroh: ' || true
+  run ana "$A" doctor | grep ' iroh: ' || true
+fi
 
 # ---- the manual loop ---------------------------------------------------------------------
 step "Ana asks Bea"
