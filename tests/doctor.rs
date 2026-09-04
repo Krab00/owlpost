@@ -204,7 +204,15 @@ async fn doctor_reports_each_check() {
         .collect();
     assert_eq!(
         names,
-        ["key", "config", "endpoints", "harness", "daemon", "iroh", "pull"]
+        [
+            "key",
+            "config",
+            "endpoints",
+            "harness",
+            "daemon",
+            "iroh",
+            "pull"
+        ]
     );
     assert!(
         arr.iter()
@@ -249,7 +257,10 @@ async fn doctor_reports_each_check() {
         line(&stdout, "daemon").contains(&addr.to_string()),
         "{stdout}"
     );
-    assert_eq!(line(&stdout, "iroh"), "warn iroh: unknown (daemon unreachable)");
+    assert_eq!(
+        line(&stdout, "iroh"),
+        "warn iroh: unknown (daemon unreachable)"
+    );
     assert!(stderr.contains("1 check(s) failed"), "{stderr}");
     // --json carries the failure too, still exit 1.
     let out = owl(home).args(["--json", "doctor"]).output().unwrap();
@@ -300,7 +311,10 @@ async fn doctor_fails_on_foreign_daemon_and_missing_pieces() {
         "ok   endpoints: none configured (peers reach this daemon over iroh)",
         "{stdout}"
     );
-    assert_eq!(line(&stdout, "iroh"), "warn iroh: unknown (daemon unreachable)");
+    assert_eq!(
+        line(&stdout, "iroh"),
+        "warn iroh: unknown (daemon unreachable)"
+    );
     assert!(
         stdout
             .lines()

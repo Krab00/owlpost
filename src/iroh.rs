@@ -54,12 +54,14 @@ pub fn parse_relay_urls(urls: &[String]) -> anyhow::Result<Vec<RelayUrl>> {
 /// Binds the daemon's endpoint with `identity`'s key. `relay_urls = None` uses n0's public
 /// relays and DNS discovery; `Some(urls)` uses exactly those relays and no public discovery
 /// (an empty list = no relay at all: the endpoint is bound but unreachable from outside).
-pub async fn endpoint(identity: &Identity, relay_urls: Option<&[String]>) -> anyhow::Result<Endpoint> {
+pub async fn endpoint(
+    identity: &Identity,
+    relay_urls: Option<&[String]>,
+) -> anyhow::Result<Endpoint> {
     let builder = match relay_urls {
         None => Endpoint::builder(presets::N0),
-        Some(urls) => {
-            Endpoint::builder(presets::Minimal).relay_mode(RelayMode::custom(parse_relay_urls(urls)?))
-        }
+        Some(urls) => Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::custom(parse_relay_urls(urls)?)),
     };
     builder
         .secret_key(SecretKey::from_bytes(&identity.seed()))
@@ -187,10 +189,13 @@ pub async fn request(
         .await
         .map_err(|_| anyhow!("dial timeout after {}s", DIAL_TIMEOUT.as_secs()))?
         .map_err(|e| anyhow!("dial: {e}"))?;
-    let result = tokio::time::timeout(REQUEST_TIMEOUT, exchange(&conn, method, path, headers, body))
-        .await
-        .map_err(|_| anyhow!("request timeout after {}s", REQUEST_TIMEOUT.as_secs()))
-        .and_then(|r| r);
+    let result = tokio::time::timeout(
+        REQUEST_TIMEOUT,
+        exchange(&conn, method, path, headers, body),
+    )
+    .await
+    .map_err(|_| anyhow!("request timeout after {}s", REQUEST_TIMEOUT.as_secs()))
+    .and_then(|r| r);
     match result {
         Ok(reply) => {
             conn.close(CLOSE_DONE, b"done");
@@ -262,8 +267,11 @@ mod tests {
     #[test]
     fn relay_urls_parse_or_name_the_bad_entry() {
         assert!(parse_relay_urls(&[]).unwrap().is_empty());
-        let urls = parse_relay_urls(&["http://127.0.0.1:3340".into(), "https://relay.example.org/".into()])
-            .unwrap();
+        let urls = parse_relay_urls(&[
+            "http://127.0.0.1:3340".into(),
+            "https://relay.example.org/".into(),
+        ])
+        .unwrap();
         assert_eq!(urls.len(), 2);
         assert_eq!(urls[0].to_string(), "http://127.0.0.1:3340/");
         let err = parse_relay_urls(&["https://ok.example".into(), "not a url".into()])
@@ -293,7 +301,10 @@ mod tests {
 
     #[test]
     fn fingerprint_of_key_compares_bytes_not_strings() {
-        let (a, b) = (Identity::from_seed([1u8; 32]), Identity::from_seed([2u8; 32]));
+        let (a, b) = (
+            Identity::from_seed([1u8; 32]),
+            Identity::from_seed([2u8; 32]),
+        );
         let pk_a = identity::pubkey_string(&a.verifying_key());
         let pk_b = identity::pubkey_string(&b.verifying_key());
         // Decoys: a garbage pubkey, a superstring of A's pubkey string, a key one byte off.
@@ -315,9 +326,16 @@ mod tests {
             fingerprint_of_key(&book, b.verifying_key().as_bytes()).as_deref(),
             Some("owl:b")
         );
-        assert_eq!(fingerprint_of_key(&book, &off), None, "one bit off is unknown");
         assert_eq!(
-            fingerprint_of_key(&book, Identity::from_seed([3u8; 32]).verifying_key().as_bytes()),
+            fingerprint_of_key(&book, &off),
+            None,
+            "one bit off is unknown"
+        );
+        assert_eq!(
+            fingerprint_of_key(
+                &book,
+                Identity::from_seed([3u8; 32]).verifying_key().as_bytes()
+            ),
             None
         );
         assert_eq!(fingerprint_of_key(&ContactBook::default(), &off), None);
@@ -329,7 +347,10 @@ mod tests {
         let ep = endpoint(&id, Some(&[])).await.unwrap();
         assert_eq!(ep.id().as_bytes(), id.verifying_key().as_bytes());
         assert_eq!(ep.addr().relay_urls().count(), 0, "empty relay set");
-        assert!(ep.address_lookup().unwrap().is_empty(), "no public discovery");
+        assert!(
+            ep.address_lookup().unwrap().is_empty(),
+            "no public discovery"
+        );
         assert_eq!(home_relay(&ep), None);
         ep.close().await;
         // A custom relay list: exactly that relay, still no discovery, not connected yet.

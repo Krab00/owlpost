@@ -120,7 +120,8 @@ pub async fn spawn(home: &Path, config: Config) -> anyhow::Result<Running> {
             handle_event(&events_state, ev);
         }
     });
-    let endpoint = crate::iroh::endpoint(&state.identity, state.config.relay_urls.as_deref()).await?;
+    let endpoint =
+        crate::iroh::endpoint(&state.identity, state.config.relay_urls.as_deref()).await?;
     let _ = state.iroh.set(endpoint.clone());
     let accept = tokio::spawn(crate::iroh::accept_loop(endpoint.clone(), state.clone()));
     let app = crate::server::router(state.clone());

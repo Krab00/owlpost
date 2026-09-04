@@ -15,8 +15,8 @@ use serde_json::Value;
 
 use crate::cli::ExitError;
 use owlpost::config::Config;
-pub use owlpost::daemon::connect_addr;
 use owlpost::daemon::ADDR_FILE;
+pub use owlpost::daemon::connect_addr;
 use owlpost::envelope;
 use owlpost::identity::{self, Identity};
 use owlpost::pull::{self, STATUS_FILE};
@@ -637,7 +637,10 @@ mod tests {
             format!("ok   iroh: {hex}, relay http://127.0.0.1:3340/")
         );
         let bound = serde_json::json!({ "iroh": { "id": pubkey, "relay": null } });
-        assert_eq!(iroh_check(Some(&bound)).line(), "warn iroh: bound, no relay");
+        assert_eq!(
+            iroh_check(Some(&bound)).line(),
+            "warn iroh: bound, no relay"
+        );
         let no_relay_key = serde_json::json!({ "iroh": { "id": pubkey } });
         assert_eq!(
             iroh_check(Some(&no_relay_key)).line(),
@@ -653,7 +656,11 @@ mod tests {
             serde_json::json!({ "iroh": { "id": 5, "relay": "x" } }),
             serde_json::json!([]),
         ] {
-            assert_eq!(iroh_check(Some(&card)).line(), "warn iroh: not bound", "{card}");
+            assert_eq!(
+                iroh_check(Some(&card)).line(),
+                "warn iroh: not bound",
+                "{card}"
+            );
         }
         assert_eq!(
             iroh_check(None).line(),

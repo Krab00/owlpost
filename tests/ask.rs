@@ -1320,21 +1320,35 @@ async fn unexpected_status_is_an_error_naming_it() {
     q.ts = envelope::unix_to_rfc3339(envelope::now_unix() - 3600);
     let env = Envelope::sign(&q, &a);
     let ident = Identity::from_seed([1; 32]);
-    let err = tokio::task::spawn_blocking(move || client::send_question(&ident, &contact, &client::Iroh::Unavailable("none".into()), &env))
-        .await
-        .unwrap()
-        .unwrap_err()
-        .to_string();
+    let err = tokio::task::spawn_blocking(move || {
+        client::send_question(
+            &ident,
+            &contact,
+            &client::Iroh::Unavailable("none".into()),
+            &env,
+        )
+    })
+    .await
+    .unwrap()
+    .unwrap_err()
+    .to_string();
     assert_eq!(err, "peer returned 400 Bad Request: stale ts");
     // And the happy path through the library maps to Accepted with the question id.
     let contact = book.resolve("Bea").unwrap().clone();
     let q = question(&a, &b.id, QUESTION);
     let env = Envelope::sign(&q, &a);
     let ident = Identity::from_seed([1; 32]);
-    let out = tokio::task::spawn_blocking(move || client::send_question(&ident, &contact, &client::Iroh::Unavailable("none".into()), &env))
-        .await
-        .unwrap()
-        .unwrap();
+    let out = tokio::task::spawn_blocking(move || {
+        client::send_question(
+            &ident,
+            &contact,
+            &client::Iroh::Unavailable("none".into()),
+            &env,
+        )
+    })
+    .await
+    .unwrap()
+    .unwrap();
     assert!(
         matches!(out, SendOutcome::Accepted { ref id } if *id == q.id),
         "{out:?}"
