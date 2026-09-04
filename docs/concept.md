@@ -34,8 +34,11 @@ not a property of the peer-to-peer topology itself.
 
 ### Topology
 
-- **Pure peer-to-peer, no central server.** Each installed plugin runs a local daemon (`owl
-  daemon`) with an HTTPS listener.
+- **Peer-to-peer, no server that sees content.** Each installed plugin runs a local daemon
+  (`owl daemon`) with two listeners: HTTPS on a `host:port` and an iroh endpoint addressed
+  by the owner's public key. When two daemons cannot reach each other directly, iroh falls
+  back to a relay that forwards end-to-end encrypted QUIC; the relay learns which two keys
+  talked and when, never what was said (see Addressing).
 - **Best-effort delivery, no queue for questions.** A peer that is offline cannot receive a
   question — the asker gets an immediate "offline, try later". No sender-side retry, no
   delivery guarantee, no presence infrastructure, no heartbeats.
@@ -142,12 +145,25 @@ from fingerprint verification at add time.
   author. Every message carries an id and timestamp; receivers reject stale timestamps and
   already-seen ids (replay protection).
 
-### Addressing — hard prerequisite
+### Addressing — the key is the address
 
-Committing DHCP addresses is out; mDNS does not cross subnets. Each machine needs a **stable,
-resolvable hostname**: company VPN with DNS, or Tailscale/headscale MagicDNS. Check what the
-company has **before writing network code**. A contact has multiple endpoints (multiple
-machines), tried in order.
+Committing DHCP addresses is out; mDNS does not cross subnets; two people on different
+networks (home LAN and a corporate laptop, Poland and the US) have no `host:port` the other
+can dial. So the primary address of a peer is its **ed25519 public key**: the daemon's iroh
+endpoint is derived from the same key as the identity, and iroh (QUIC) finds a direct path by
+hole punching or, failing that, forwards through a relay. Nothing to install, no account, no
+port forwarding; a contact with an empty `endpoints` list is reachable. Peer authentication
+stays key-pinned on this path too: an incoming iroh connection exposes the remote key, and a
+key that is not in the contact book is refused before any request is read.
+
+Trade-off, stated rather than hidden: the relay is a third party. It carries only end-to-end
+encrypted traffic, but it sees **metadata** — which two keys connected and when, and the IP
+addresses involved. The default relays are n0's public ones; `config.json` `relay_urls` points
+both sides at a self-hosted relay (iroh's relay server is open source) so a company keeps even
+the metadata in-house. Users who refuse any relay keep the second transport: a contact's
+`endpoints` (`host:port` over mTLS — company VPN with DNS, Tailscale/headscale MagicDNS, a
+LAN), tried after iroh and still the faster path when they resolve. A contact has multiple
+endpoints (multiple machines), tried in order.
 
 ## Security requirements (non-negotiable)
 
@@ -246,7 +262,10 @@ on owners opting their notes in.
 
 ## Open questions
 
-- Which stable-DNS option exists in the company (VPN DNS vs deploying Tailscale/headscale)?
+- ~~Which stable-DNS option exists in the company?~~ Moot for reachability since the iroh
+  transport (peers are dialed by key); still relevant for whoever wants the relay-free
+  `endpoints` path. Open instead: does the company want a self-hosted relay (`relay_urls`)
+  so that no public relay sees who talks to whom?
 - Kimi headless read-only: does the `[tools]` allowlist / PreToolUse deny behave fail-closed
   under `kimi -p`? Needs a live test before enabling the responder on Kimi.
 - Custom statusline in Codex: track upstream FR openai/codex#17827.

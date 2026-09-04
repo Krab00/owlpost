@@ -10,7 +10,13 @@ disagree, fix the document first; the task's acceptance criteria are derived fro
   `ed25519-dalek`, `reqwest` (`rustls-tls`, `json`, no default features), `serde`,
   `serde_json`, `clap` (derive), `uuid` (v7), `sha2`, `data-encoding` (base32/base64),
   `regex`, `anyhow`, `thiserror`, `tracing` + `tracing-subscriber`, `tempfile` (dev).
-  Anything else needs a line in the PR explaining why the above cannot do it.
+  Since OWL-017: `iroh` (`tls-ring`, no default features) — QUIC dialed by ed25519 key with
+  hole punching and relay fallback, the only NAT-traversal option that needs no VPN, DNS or
+  port forwarding; `hyper` + `hyper-util` + `http-body-util` — serve the axum router and run
+  an HTTP/1 client over an iroh bi-stream (already transitive deps of axum/reqwest, only
+  feature flags added); `iroh-relay` (dev, `server`) — a plain-HTTP relay on `127.0.0.1:0`
+  so the iroh tests never touch n0's relays. Anything else needs a line in the PR explaining
+  why the above cannot do it.
 - CLI paths are synchronous (`std::fs`, blocking `reqwest` where needed); only `owl daemon`
   and `owl ask --wait` use the tokio runtime.
 - Lints: `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check`. CI runs build, test,
@@ -31,17 +37,20 @@ src/
     local.rs         $OWLPOST_HOME/contacts/*.json entries + policy overlays
   tls.rs             cert from key (rcgen), pinned client/server verifiers, client builder
   server.rs          axum router, handlers, rate limiter, replay window
-  client.rs          send question, fetch outbox, ack, probe card (multi-endpoint)
+  client.rs          send question, fetch outbox, ack (iroh first, then every endpoint)
+  iroh.rs            iroh endpoint from the identity key, accept loop (key check, hyper over
+                     each bi-stream), dial + one request per stream
   runner.rs          harness templates, prompt build, spawn, capture, redaction
   notify.rs          OS notifications
-  daemon.rs          run loop: server + pull loop + auto-accept scheduler + spool scan
+  daemon.rs          run loop: mTLS listener + iroh listener + pull loop + auto-accept
+                     scheduler + spool scan
   cli/
     mod.rs           shared output helpers (--json, --format)
     ask.rs inbox.rs show.rs draft.rs send.rs reject.rs edit.rs history.rs
     allow.rs deny.rs add.rs contact.rs card.rs whoami.rs init.rs install.rs watch.rs
 tests/
   common/mod.rs      spawn a daemon with a temp home on port 0, fixture repo with .agents/peers
-  spool.rs identity.rs contacts.rs tls.rs server.rs e2e.rs
+  spool.rs identity.rs contacts.rs tls.rs server.rs iroh.rs e2e.rs
   fixtures/fake-harness.sh   deterministic "LLM": echoes a canned answer, records its argv/stdin
 plugins/
   claude-code/       hooks.json, skills/owlpost/SKILL.md, commands/*.md, .claude-plugin/plugin.json
@@ -60,6 +69,7 @@ scripts/
   "emails": ["krzysiek@company.com"],
   "listen": "0.0.0.0:7411",
   "endpoints": ["krzysiek-mbp.tail1234.ts.net:7411"],
+  "relay_urls": ["https://relay.corp.example/"],
   "pull_interval_secs": 60,
   "outbox_ttl_days": 14,
   "rate_limit_per_peer_per_hour": 20,
@@ -97,6 +107,12 @@ scripts/
 - `projects` maps the `project` identifier used in questions (the normalised git remote, or a
   plain name) to a local checkout. A question for an unknown project is stored but `draft`
   refuses with `unknown project`.
+- `relay_urls` selects the iroh relays. Absent (the default `owl init` writes nothing for
+  it) = n0's public relays plus DNS discovery; a list = exactly those self-hosted relays and
+  no public discovery (both sides must list the same relay); `[]` = no relay at all — the
+  endpoint is bound but peers can only reach this daemon through `endpoints`. The test
+  fixture uses `[]` and a local relay, never the public ones. Every entry must parse as a URL.
+- `endpoints` may be empty: peers reach the daemon over iroh by its key.
 - Missing file → defaults; `owl init` writes it.
 
 ## 4. Identity
@@ -182,12 +198,26 @@ All routes require mTLS except the two card routes, which additionally accept **
 clients (so `owl add` can fetch the card of an unknown peer). Peer identity = fingerprint of the
 client certificate's public key.
 
+The same handlers are served a second time over **iroh** (ALPN `owl/1`): the daemon binds
+one iroh endpoint whose secret key is the identity seed, so its endpoint id is the owner's
+`pubkey`; every accepted connection's remote key is compared byte-for-byte with the contact
+book and an unknown key is closed (code 1, `unknown key`) before any stream is accepted;
+each bi-stream carries one HTTP/1 request via hyper, with `PeerId` set from the key. The
+card's `iroh` block reports `{ "id": <pubkey>, "relay": <home relay URL or null> }`
+(`null` outside the daemon). The forward route below is **not** mounted on the iroh listener.
+
 | Method + path | Auth | Request | Response |
 |---|---|---|---|
 | `GET /.well-known/agent-card.json` (and `/.well-known/agent.json`) | any TLS client | — | A2A-shaped card: `name`, `description`, `url`, `version`, `protocolVersion`, `capabilities: {streaming:false, pushNotifications:false}`, `skills: []`, `owlpost: { fingerprint, pubkey, protocol: 1, responds: bool, harness }` |
 | `POST /v1/questions` | pinned | payload body + signature header | `200` answer payload + signature header (responder cache hit); `202 {"status":"accepted","id"}`; `400` bad signature/schema/stale; `403 {"error":"unavailable"}` (never, responder disabled); `409` duplicate id; `429` rate limited (`Retry-After`) |
 | `GET /v1/outbox` | pinned | — | `200 [ {raw, sig}, … ]` answers addressed to the caller |
 | `POST /v1/outbox/{id}/ack` | pinned | — | `204`; `404` if not the caller's |
+| `ANY /v1/local/{fingerprint}/{*rest}` (mTLS listener only) | owner's own key (`403 owner only` for any other pinned key) | the request to replay; `rest` ∈ `v1/questions`, `v1/outbox`, `v1/outbox/{id}/ack`, else `404` | the peer's status, `X-Owl-*` / `Content-Type` / `Retry-After` headers and body verbatim; `502 {"error":"iroh: <reason>"}` when the daemon could not reach the peer over iroh (unknown contact, no endpoint, dial timeout 10 s, closed by peer) — the CLI treats exactly that as "try `endpoints`" |
+
+Transport order for `owl ask`, `owl ask --wait` and the daemon's pull loop: iroh first
+(the CLI through the forward route, the daemon from its own endpoint), then the contact's
+`endpoints` in order; a contact with empty `endpoints` is valid. Offline is reported only
+when every transport failed, with one `transport: reason` per attempt (`iroh: …` first).
 
 Rate limiting: token bucket per peer fingerprint, capacity and refill from the contact's
 `rate_limit_per_hour` or the global default. Card and outbox routes are not rate limited.
@@ -239,7 +269,7 @@ unavailable, `3` rate limited, `4` nothing to do (e.g. `watch` timeout).
 | `owl watch [--id <id>] [--timeout <secs>]` | block until a matching inbox record arrives; exit 4 on timeout |
 | `owl daemon [--foreground]` | run the listener + loops |
 | `owl install \| uninstall` | launchd plist (`~/Library/LaunchAgents/dev.owlpost.owl.plist`) or systemd user unit; start/stop |
-| `owl doctor` | check key, config, endpoints resolve, harness binaries present, daemon reachable |
+| `owl doctor` | check key, config, endpoints resolve (`ok endpoints: none configured (peers reach this daemon over iroh)` when empty), harness binaries present, daemon reachable, iroh (`ok iroh: <id short>, relay <url>` when the card reports a connected relay, `warn iroh: bound, no relay` when it does not, `warn iroh: unknown (daemon unreachable)` without a card) |
 
 Hook injection formats for `owl inbox --count --format …` (exact):
 
@@ -304,6 +334,7 @@ serves the test binary offline), `OWL_INSTALL_FAKE_SUM=1` (forces the checksum m
 | Unit | `cargo test` per module; temp homes via `tempfile` | no |
 | Integration | `tests/common` spawns `owl daemon` in-process on `127.0.0.1:0` with a temp home and a fixture repo containing `.agents/peers/`; two homes = two peers | no |
 | E2E (automated) | `tests/e2e.rs`: A asks B, B holds for consent, `allow`, `draft` with the fake harness, `send`, A's pull ingests, hook output asserted; plus unknown-key handshake refused, replay refused, rate limit trips | no |
+| iroh (automated) | `tests/iroh.rs`: the same loop over iroh with empty `endpoints` and an `iroh-relay` server on `127.0.0.1:0`; unknown key closed before any request; signature / replay / rate-limit statuses equal to the HTTPS suite; transport order (a decoy listener counts dials) | no |
 | E2E (manual) | `scripts/e2e-real.sh` with `OWL_HARNESS=claude\|codex\|opencode` runs the same script against a real harness on this machine; output saved under `target/e2e-real/` | yes, on demand |
 
 Rules: automated tests never call a real harness; every network test binds port 0; every test
@@ -319,7 +350,14 @@ Running the manual loop against a real harness:
 ```
 cargo build
 OWL_HARNESS=claude scripts/e2e-real.sh      # or codex | opencode
+OWL_TRANSPORT=iroh OWL_HARNESS=claude scripts/e2e-real.sh   # same loop over iroh
 ```
+
+`OWL_TRANSPORT` (default `https`, unchanged behaviour) selects how Ana reaches Bea: `https`
+writes Bea's `host:port` into her peer file; `iroh` leaves both peer files with empty
+`endpoints` and lets the two daemons use n0's public relays (the default `relay_urls`), so
+the run needs internet access and proves the key-addressed path end to end. The script
+prints both daemons' `owl doctor` iroh lines so the relay URL can be recorded.
 
 The script refuses to start (exit 2) when `OWL_HARNESS` is unset or not one of the three, or
 when that binary is not on `PATH`; it needs `git`. It creates two temp homes and a throwaway
