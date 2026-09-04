@@ -9,3 +9,8 @@
   show → cache hit) against a real harness: `OWL_HARNESS=claude|codex|opencode
   scripts/e2e-real.sh`. Logs under `target/e2e-real/<timestamp>/`; not run by CI or
   `cargo test` (design §12).
+- `install.sh` — the one-command installer from the README quickstart (`curl -fsSL
+  https://raw.githubusercontent.com/Krab00/owlpost/main/scripts/install.sh | sh`): picks the
+  target from `uname`, downloads the release tarball and `SHA256SUMS`, verifies, installs to
+  `~/.local/bin` (`--version <tag>`, `--prefix <dir>`, `--system`). Test hooks are listed in
+  its header; `tests/install_sh.rs` exercises every path offline through a `file://` base.
