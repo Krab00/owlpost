@@ -80,6 +80,14 @@ the ask → allow → draft → send → pull loop; `e2e-real.sh` runs it with `
 - Statusline badge where the harness supports it.
 - Invite bundle / QR for onboarding without a repo PR (reachability itself is OWL-017).
 
+## M3.6 — Second cross-machine test findings (2026-09-05)
+
+| Task | Deliverable |
+|---|---|
+| OWL-018 | `owl ask` without a path: repo-level questions, `path` optional in the envelope, runner prompt, listings and `/owlpost:ask` |
+| OWL-019 | Contact scopes named global (user book) / local (`.agents/peers/`); `owl add <peer-file> [--local]` implemented, `owl contact list --global\|--local`, `owl contact remove` |
+| OWL-020 | `/owlpost:contacts`: pick a recipient from the contact list in Claude Code (AskUserQuestion), then continue into the ask flow |
+
 ## Pilot (after M3)
 
 4–5 people, 2 weeks. Measure: questions asked, answered, median latency manual vs auto-accept,
