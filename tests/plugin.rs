@@ -273,7 +273,7 @@ fn skill_has_frontmatter_and_required_strings() {
 
 #[test]
 fn commands_have_descriptions() {
-    for name in ["inbox", "ask", "history", "me"] {
+    for name in ["inbox", "ask", "history", "me", "update"] {
         let rel = format!("commands/{name}.md");
         let (fm, body) = frontmatter(&rel);
         assert!(
