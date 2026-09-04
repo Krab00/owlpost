@@ -64,6 +64,7 @@ fn read_source(source: &str) -> anyhow::Result<String> {
         .map_err(|e| user_error(format!("reading peer file {source}: {e}")))
 }
 
+#[derive(Debug)]
 pub struct Peer {
     pub name: String,
     pub fingerprint: String,
@@ -163,7 +164,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_keeps_only_the_four_fields_in_order() {
+    fn validate_keeps_only_the_four_fields() {
         let text = serde_json::json!({
             "policy": {"mode": "auto"}, "source": "local", "fingerprint": "owl:fake",
             "endpoints": ["h:1"], "pubkey": pk(), "emails": ["a@x"], "name": " Ola ",
@@ -177,7 +178,7 @@ mod tests {
             identity::fingerprint(&Identity::from_seed([7; 32]).verifying_key())
         );
         let keys: Vec<&str> = p.json.as_object().unwrap().keys().map(String::as_str).collect();
-        assert_eq!(keys, ["name", "emails", "endpoints", "pubkey"]);
+        assert_eq!(keys, ["emails", "endpoints", "name", "pubkey"]);
         assert_eq!(p.json["name"], "Ola");
         assert_eq!(p.json["emails"], serde_json::json!(["a@x"]));
         assert_eq!(p.json["endpoints"], serde_json::json!(["h:1"]));

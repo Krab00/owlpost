@@ -236,13 +236,13 @@ fn contact(home: &Path, cmd: ContactCmd, json: bool) -> anyhow::Result<()> {
                 println!("{}", serde_json::to_string_pretty(&book.contacts)?);
             } else {
                 println!(
-                    "{:<20} {:<20} {:<7} POLICY",
+                    "{:<20} {:<20} {:<6} POLICY",
                     "NAME", "FINGERPRINT", "SOURCE"
                 );
                 for c in &book.contacts {
                     let mode = c.policy.as_ref().map_or("-", |p| p.mode.as_str());
                     println!(
-                        "{:<20} {:<20} {:<7} {mode}",
+                        "{:<20} {:<20} {:<6} {mode}",
                         c.name, c.fingerprint, c.source
                     );
                 }

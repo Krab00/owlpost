@@ -53,7 +53,7 @@ fn overlay(home: &Path, seed: u8, name: &str, mode: &str) {
             "emails": ["other@example.org"],
             "pubkey": pk(seed),
             "endpoints": ["other.example.org:1"],
-            "source": "local",
+            "source": "global",
             "policy": { "mode": mode, "scope": { "projects": ["*"] } },
             "added_at": "2026-09-01T10:00:00Z",
         })
@@ -75,12 +75,12 @@ fn repo_provider_finds_peers_from_subdir() {
     assert_eq!(maciek.endpoints, ["maciek.example.org:7411"]);
     assert_eq!(maciek.pubkey, pk(1));
     assert_eq!(maciek.fingerprint(), fp(1));
-    assert_eq!(maciek.source, "repo");
+    assert_eq!(maciek.source, "local");
     assert!(maciek.policy.is_none());
     let marek = book.resolve(&fp(2)).unwrap();
     assert_eq!(marek.name, "Marek");
-    assert_eq!(marek.source, "repo");
-    assert!(book.contacts.iter().all(|c| c.source == "repo"));
+    assert_eq!(marek.source, "local");
+    assert!(book.contacts.iter().all(|c| c.source == "local"));
 }
 
 #[test]
@@ -107,7 +107,7 @@ fn local_overlay_only_contributes_policy() {
     assert_eq!(c.name, "Maciek");
     assert_eq!(c.emails, ["maciek@company.com"]);
     assert_eq!(c.endpoints, ["maciek.example.org:7411"]);
-    assert_eq!(c.source, "repo");
+    assert_eq!(c.source, "local");
     assert_eq!(c.added_at, None, "overlay's added_at must not leak");
     assert_eq!(c.policy.as_ref().unwrap().mode, Mode::Auto);
     assert_eq!(book.policy_for(&fp(1)).unwrap().mode, Mode::Auto);
@@ -130,7 +130,7 @@ fn local_only_contact_is_full_contact() {
     assert_eq!(ola.name, "Ola");
     assert_eq!(ola.emails, ["other@example.org"]);
     assert_eq!(ola.endpoints, ["other.example.org:1"]);
-    assert_eq!(ola.source, "local");
+    assert_eq!(ola.source, "global");
     assert_eq!(ola.fingerprint(), fp(3));
     assert_eq!(ola.added_at.as_deref(), Some("2026-09-01T10:00:00Z"));
     assert_eq!(ola.policy.as_ref().unwrap().mode, Mode::Manual);
@@ -138,14 +138,14 @@ fn local_only_contact_is_full_contact() {
     let dir = home.join("contacts");
     std::fs::write(
         dir.join("lying.json"),
-        format!(r#"{{"name":"Liar","pubkey":"{}","source":"repo"}}"#, pk(4)),
+        format!(r#"{{"name":"Liar","pubkey":"{}","source":"local"}}"#, pk(4)),
     )
     .unwrap();
     let book = ContactBook::load(&home, &sub).unwrap();
-    assert_eq!(book.resolve("Liar").unwrap().source, "local");
-    // Repo entries are listed before local ones.
+    assert_eq!(book.resolve("Liar").unwrap().source, "global");
+    // Local (repo) entries are listed before global ones.
     let sources: Vec<&str> = book.contacts.iter().map(|c| c.source.as_str()).collect();
-    assert_eq!(sources, ["repo", "repo", "local", "local"]);
+    assert_eq!(sources, ["local", "local", "global", "global"]);
 }
 
 #[test]
@@ -251,7 +251,7 @@ fn set_policy_writes_overlay() {
     keys.sort_unstable();
     assert_eq!(keys, ["added_at", "policy", "pubkey", "source"], "{v}");
     assert_eq!(v["pubkey"], pk(1));
-    assert_eq!(v["source"], "local");
+    assert_eq!(v["source"], "global");
     assert_eq!(v["policy"]["mode"], "auto");
     assert_eq!(v["policy"]["rate_limit_per_hour"], 20);
     assert_eq!(v["policy"]["scope"]["projects"], serde_json::json!(["*"]));
@@ -404,7 +404,7 @@ fn git_file_marks_worktree_root() {
     );
     let book = ContactBook::load(&home, &sub).unwrap();
     assert_eq!(book.contacts.len(), 2);
-    assert!(book.contacts.iter().all(|c| c.source == "repo"));
+    assert!(book.contacts.iter().all(|c| c.source == "local"));
 }
 
 #[test]
@@ -446,7 +446,7 @@ fn set_policy_on_slug_named_local_contact_writes_fp_file() {
     assert_eq!(v["emails"], serde_json::json!(["ola@example.org"]));
     assert_eq!(v["endpoints"], serde_json::json!(["ola.example.org:7411"]));
     assert_eq!(v["pubkey"], pk(3));
-    assert_eq!(v["source"], "local");
+    assert_eq!(v["source"], "global");
     assert_eq!(v["policy"]["mode"], "auto");
     assert!(v.get("fingerprint").is_none(), "{v}");
     assert!(dir.join("ola.json").exists(), "slug file left alone");
