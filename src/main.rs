@@ -288,8 +288,7 @@ fn contact(home: &Path, cmd: ContactCmd, json: bool) -> anyhow::Result<()> {
                 .into_iter()
                 .find(|(_, c)| c.fingerprint == found)
                 .expect("resolved from the same list");
-            std::fs::remove_file(&path)
-                .with_context(|| format!("removing {}", path.display()))?;
+            std::fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
             println!("removed {} ({scope})", c.name);
         }
     }

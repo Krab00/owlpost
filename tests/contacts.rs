@@ -492,3 +492,624 @@ fn contacts_are_ordered_by_filename() {
     let names: Vec<&str> = book.contacts.iter().map(|c| c.name.as_str()).collect();
     assert_eq!(names, ["Zoe", "Adam", "Bea", "Yara"]);
 }
+
+// ---------- OWL-019: scopes, `owl add`, `contact list --global|--local`, `contact remove` ----------
+
+const OWL: &str = env!("CARGO_BIN_EXE_owl");
+
+/// Runs `owl --home <home> <args>` from `cwd`, optionally feeding `stdin`.
+fn owl(home: &Path, cwd: &Path, args: &[&str], stdin: Option<&str>) -> std::process::Output {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let mut cmd = Command::new(OWL);
+    cmd.arg("--home")
+        .arg(home)
+        .args(args)
+        .current_dir(cwd)
+        .stdin(if stdin.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = cmd.spawn().unwrap();
+    if let Some(s) = stdin {
+        child.stdin.take().unwrap().write_all(s.as_bytes()).unwrap();
+    }
+    child.wait_with_output().unwrap()
+}
+
+fn out(o: &std::process::Output) -> String {
+    String::from_utf8_lossy(&o.stdout).into_owned()
+}
+
+fn err(o: &std::process::Output) -> String {
+    String::from_utf8_lossy(&o.stderr).into_owned()
+}
+
+/// Table rows of `owl contact list` (header skipped), whitespace-split.
+fn list_rows(home: &Path, cwd: &Path, extra: &[&str]) -> Vec<Vec<String>> {
+    let o = owl(home, cwd, &[&["contact", "list"][..], extra].concat(), None);
+    assert_eq!(o.status.code(), Some(0), "{}", err(&o));
+    out(&o)
+        .lines()
+        .skip(1)
+        .map(|l| l.split_whitespace().map(str::to_string).collect())
+        .collect()
+}
+
+fn read_json(path: &Path) -> serde_json::Value {
+    serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+}
+
+/// A temp dir with nothing git-like above it (the tempdir root itself).
+fn plain_dir(base: &Path) -> PathBuf {
+    let d = base.join("plain");
+    std::fs::create_dir_all(&d).unwrap();
+    d
+}
+
+// ----- AC1 -----
+
+#[test]
+fn add_file_writes_global_slug_and_lists_as_global() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let (_root, sub) = fixture_repo(tmp.path());
+    let file = tmp.path().join("ola.json");
+    std::fs::write(&file, peer_json("Ola Nowak", "ola@company.com", 3)).unwrap();
+    let o = owl(&home, &sub, &["add", file.to_str().unwrap()], None);
+    assert_eq!(o.status.code(), Some(0), "{}", err(&o));
+    assert_eq!(out(&o), format!("added Ola Nowak {} (global)\n", fp(3)));
+    let path = home.join("contacts").join("ola-nowak.json");
+    let v = read_json(&path);
+    assert_eq!(
+        v,
+        serde_json::json!({
+            "name": "Ola Nowak",
+            "emails": ["ola@company.com"],
+            "pubkey": pk(3),
+            "endpoints": ["ola nowak.example.org:7411"],
+        })
+    );
+    assert!(v.get("policy").is_none(), "adding never sets a policy");
+    assert!(!home.join("contacts").join("ola-nowak.json.tmp").exists());
+    let rows = list_rows(&home, &sub, &[]);
+    assert_eq!(rows.len(), 3, "{rows:?}");
+    assert_eq!(rows[2], ["Ola", "Nowak", &fp(3), "global", "-"]);
+    // `contact show` JSON carries the scope too.
+    let o = owl(&home, &sub, &["contact", "show", "Ola"], None);
+    let v: serde_json::Value = serde_json::from_str(&out(&o)).unwrap();
+    assert_eq!(v["source"], "global");
+    assert_eq!(v["fingerprint"], fp(3));
+}
+
+#[test]
+fn add_local_writes_into_repo_peers_and_lists_as_local() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let (root, sub) = fixture_repo(tmp.path());
+    let file = tmp.path().join("ola.json");
+    std::fs::write(&file, peer_json("Ola", "ola@company.com", 3)).unwrap();
+    // From a nested subdir: the file lands at the git root.
+    let o = owl(
+        &home,
+        &sub,
+        &["add", file.to_str().unwrap(), "--local"],
+        None,
+    );
+    assert_eq!(o.status.code(), Some(0), "{}", err(&o));
+    assert_eq!(out(&o), format!("added Ola {} (local)\n", fp(3)));
+    let path = root.join(".agents/peers/ola.json");
+    assert_eq!(read_json(&path)["pubkey"], pk(3));
+    assert!(!home.join("contacts").exists(), "global book untouched");
+    let rows = list_rows(&home, &sub, &[]);
+    assert_eq!(rows.len(), 3, "{rows:?}");
+    assert_eq!(rows[2], ["Ola", &fp(3), "local", "-"]);
+}
+
+#[test]
+fn add_reads_inline_json_and_stdin() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let cwd = plain_dir(tmp.path());
+    // Inline JSON as one argument (leading whitespace allowed).
+    let inline = format!("  {}", peer_json("Ola", "ola@x.org", 3));
+    let o = owl(&home, &cwd, &["add", &inline], None);
+    assert_eq!(o.status.code(), Some(0), "{}", err(&o));
+    assert_eq!(out(&o), format!("added Ola {} (global)\n", fp(3)));
+    assert!(home.join("contacts/ola.json").exists());
+    // `-` reads stdin.
+    let o = owl(
+        &home,
+        &cwd,
+        &["add", "-"],
+        Some(&peer_json("Bea", "bea@x.org", 4)),
+    );
+    assert_eq!(o.status.code(), Some(0), "{}", err(&o));
+    assert_eq!(out(&o), format!("added Bea {} (global)\n", fp(4)));
+    assert!(home.join("contacts/bea.json").exists());
+    // Only `name` and `pubkey`: optional lists stay absent in the written file.
+    let o = owl(
+        &home,
+        &cwd,
+        &["add", &format!(r#"{{"name":"Cy","pubkey":"{}"}}"#, pk(5))],
+        None,
+    );
+    assert_eq!(o.status.code(), Some(0), "{}", err(&o));
+    let v = read_json(&home.join("contacts/cy.json"));
+    assert_eq!(v, serde_json::json!({"name": "Cy", "pubkey": pk(5)}));
+    let rows = list_rows(&home, &cwd, &[]);
+    let names: Vec<&str> = rows.iter().map(|r| r[0].as_str()).collect();
+    assert_eq!(names, ["Bea", "Cy", "Ola"]);
+    assert!(rows.iter().all(|r| r[2] == "global"), "{rows:?}");
+}
+
+#[test]
+fn add_missing_path_is_a_user_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let cwd = plain_dir(tmp.path());
+    let o = owl(&home, &cwd, &["add", "nope.json"], None);
+    assert_eq!(o.status.code(), Some(1));
+    assert!(
+        err(&o).contains("reading peer file nope.json"),
+        "{}",
+        err(&o)
+    );
+    assert!(!home.join("contacts").exists());
+}
+
+// ----- AC2 -----
+
+#[test]
+fn add_refuses_pubkey_already_in_either_scope_and_writes_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let (root, sub) = fixture_repo(tmp.path());
+    // Peer 1 lives in the local scope (fixture repo).
+    let dup_local = peer_json("Maciek Again", "again@x.org", 1);
+    for flags in [&[][..], &["--local"][..]] {
+        let o = owl(
+            &home,
+            &sub,
+            &[&["add", &dup_local][..], flags].concat(),
+            None,
+        );
+        assert_eq!(o.status.code(), Some(1), "{flags:?}");
+        assert_eq!(err(&o), "owl: already a contact: Maciek (local)\n");
+        assert!(!home.join("contacts").exists(), "{flags:?}");
+        assert!(!root.join(".agents/peers/maciek-again.json").exists());
+    }
+    // Peer 3 lives in the global scope.
+    let o = owl(
+        &home,
+        &sub,
+        &["add", &peer_json("Ola", "ola@x.org", 3)],
+        None,
+    );
+    assert_eq!(o.status.code(), Some(0), "{}", err(&o));
+    let dup_global = peer_json("Ola Two", "two@x.org", 3);
+    for flags in [&[][..], &["--local"][..]] {
+        let o = owl(
+            &home,
+            &sub,
+            &[&["add", &dup_global][..], flags].concat(),
+            None,
+        );
+        assert_eq!(o.status.code(), Some(1), "{flags:?}");
+        assert_eq!(err(&o), "owl: already a contact: Ola (global)\n");
+        assert!(!home.join("contacts/ola-two.json").exists());
+        assert!(!root.join(".agents/peers/ola-two.json").exists());
+    }
+    // Same slug for a *new* key: the existing file is never replaced.
+    let o = owl(
+        &home,
+        &sub,
+        &["add", &peer_json("Ola", "ola2@x.org", 4)],
+        None,
+    );
+    assert_eq!(o.status.code(), Some(1), "{}", err(&o));
+    assert!(
+        err(&o).contains("ola.json") && err(&o).contains("already exists"),
+        "{}",
+        err(&o)
+    );
+    assert_eq!(read_json(&home.join("contacts/ola.json"))["pubkey"], pk(3));
+    // A new key under a new name is fine (the duplicate check is by key, not by name).
+    let o = owl(
+        &home,
+        &sub,
+        &["add", &peer_json("Ola B", "ola2@x.org", 4)],
+        None,
+    );
+    assert_eq!(o.status.code(), Some(0), "{}", err(&o));
+    assert_eq!(out(&o), format!("added Ola B {} (global)\n", fp(4)));
+}
+
+#[test]
+fn add_rejects_missing_or_invalid_fields_naming_the_field() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let (root, sub) = fixture_repo(tmp.path());
+    let cases = [
+        (format!(r#"{{"pubkey":"{}"}}"#, pk(3)), "`name`"),
+        (r#"{"name":"Ola"}"#.to_string(), "`pubkey`"),
+        (format!(r#"{{"name":"","pubkey":"{}"}}"#, pk(3)), "`name`"),
+        (
+            format!(r#"{{"name":["Ola"],"pubkey":"{}"}}"#, pk(3)),
+            "`name`",
+        ),
+        (
+            r#"{"name":"Ola","pubkey":"ed25519:AAAA"}"#.to_string(),
+            "`pubkey`",
+        ),
+        (
+            r#"{"name":"Ola","pubkey":"garbage"}"#.to_string(),
+            "`pubkey`",
+        ),
+        (
+            format!(r#"{{"name":"Ola","pubkey":"{}","emails":"x"}}"#, pk(3)),
+            "`emails`",
+        ),
+        (
+            format!(r#"{{"name":"Ola","pubkey":"{}","endpoints":[1]}}"#, pk(3)),
+            "`endpoints`",
+        ),
+        ("{not json".to_string(), "not valid JSON"),
+        ("[]".to_string(), "must be a JSON object"),
+        ("\"x\"".to_string(), "must be a JSON object"),
+    ];
+    for (text, needle) in &cases {
+        for (flags, via_stdin) in [(&[][..], false), (&["--local"][..], false), (&[][..], true)] {
+            // Only text starting with `{` is inline JSON; anything else is a path.
+            if !via_stdin && !text.starts_with('{') {
+                continue;
+            }
+            let args: Vec<&str> = if via_stdin {
+                vec!["add", "-"]
+            } else {
+                vec!["add", text]
+            };
+            let o = owl(
+                &home,
+                &sub,
+                &[&args[..], flags].concat(),
+                via_stdin.then_some(text.as_str()),
+            );
+            assert_eq!(
+                o.status.code(),
+                Some(1),
+                "{text} {flags:?} stdin={via_stdin}"
+            );
+            assert!(err(&o).contains(needle), "{text}: {}", err(&o));
+        }
+    }
+    assert!(!home.join("contacts").exists(), "nothing written to global");
+    let mut peers: Vec<_> = std::fs::read_dir(root.join(".agents/peers"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    peers.sort();
+    assert_eq!(
+        peers,
+        ["maciek.json", "marek.json"],
+        "nothing written to local"
+    );
+}
+
+#[test]
+fn add_local_outside_a_git_repo_is_an_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let cwd = plain_dir(tmp.path());
+    let o = owl(
+        &home,
+        &cwd,
+        &["add", &peer_json("Ola", "o@x", 3), "--local"],
+        None,
+    );
+    assert_eq!(o.status.code(), Some(1));
+    let e = err(&o);
+    assert!(e.contains("--local") && e.contains("git repository"), "{e}");
+    assert!(!cwd.join(".agents").exists());
+    assert!(!home.join("contacts").exists());
+}
+
+#[test]
+fn add_blocked_by_directory_at_destination_leaves_no_tmp() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let (root, sub) = fixture_repo(tmp.path());
+    // Global: a directory sits where `ola.json` must go.
+    std::fs::create_dir_all(home.join("contacts/ola.json")).unwrap();
+    let o = owl(&home, &sub, &["add", &peer_json("Ola", "o@x", 3)], None);
+    assert_eq!(o.status.code(), Some(1));
+    assert!(err(&o).contains("ola.json"), "{}", err(&o));
+    assert!(home.join("contacts/ola.json").is_dir(), "left alone");
+    assert!(
+        !home.join("contacts/ola.json.tmp").exists(),
+        "no temp file left"
+    );
+    // Local: same for `.agents/peers/ola.json`.
+    std::fs::create_dir_all(root.join(".agents/peers/ola.json")).unwrap();
+    let o = owl(
+        &home,
+        &sub,
+        &["add", &peer_json("Ola", "o@x", 3), "--local"],
+        None,
+    );
+    assert_eq!(o.status.code(), Some(1));
+    assert!(!root.join(".agents/peers/ola.json.tmp").exists());
+    assert!(root.join(".agents/peers/ola.json").is_dir());
+}
+
+// ----- AC3 -----
+
+#[test]
+fn contact_list_scope_flags_list_exactly_one_scope() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let (_root, sub) = fixture_repo(tmp.path());
+    overlay(&home, 3, "Ola", "manual"); // global contact
+    overlay(&home, 1, "Wrong", "auto"); // policy overlay for local Maciek
+    let all = list_rows(&home, &sub, &[]);
+    assert_eq!(
+        all,
+        [
+            vec!["Maciek", &fp(1), "local", "auto"],
+            vec!["Marek", &fp(2), "local", "-"],
+            vec!["Ola", &fp(3), "global", "manual"],
+        ]
+    );
+    let global = list_rows(&home, &sub, &["--global"]);
+    assert_eq!(global, [["Ola", &fp(3), "global", "manual"]]);
+    let local = list_rows(&home, &sub, &["--local"]);
+    assert_eq!(
+        local,
+        [
+            ["Maciek", &fp(1), "local", "auto"],
+            ["Marek", &fp(2), "local", "-"],
+        ]
+    );
+    // --json honours the filter too.
+    let o = owl(&home, &sub, &["contact", "list", "--local", "--json"], None);
+    let v: serde_json::Value = serde_json::from_str(&out(&o)).unwrap();
+    let sources: Vec<&str> = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["source"].as_str().unwrap())
+        .collect();
+    assert_eq!(sources, ["local", "local"]);
+    let o = owl(
+        &home,
+        &sub,
+        &["contact", "list", "--global", "--json"],
+        None,
+    );
+    let v: serde_json::Value = serde_json::from_str(&out(&o)).unwrap();
+    assert_eq!(v.as_array().unwrap().len(), 1);
+    assert_eq!(v[0]["name"], "Ola");
+    // Outside a repo: --local is an empty table; --global lists every global file, and the
+    // overlay is a full contact now (no local Maciek to overlay), so it shows as "Wrong".
+    let cwd = plain_dir(tmp.path());
+    assert!(list_rows(&home, &cwd, &["--local"]).is_empty());
+    assert_eq!(
+        list_rows(&home, &cwd, &["--global"]),
+        [
+            ["Wrong", &fp(1), "global", "auto"],
+            ["Ola", &fp(3), "global", "manual"]
+        ]
+    );
+}
+
+#[test]
+fn contact_list_global_and_local_together_is_a_usage_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let (_root, sub) = fixture_repo(tmp.path());
+    for order in [["--global", "--local"], ["--local", "--global"]] {
+        let o = owl(
+            &home,
+            &sub,
+            &[&["contact", "list"][..], &order[..]].concat(),
+            None,
+        );
+        assert_eq!(o.status.code(), Some(2), "{order:?}: {}", err(&o));
+        assert!(out(&o).is_empty());
+        let e = err(&o);
+        assert!(e.contains("--global") && e.contains("--local"), "{e}");
+    }
+}
+
+// ----- AC4 -----
+
+#[test]
+fn contact_remove_deletes_the_global_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let (root, sub) = fixture_repo(tmp.path());
+    let o = owl(
+        &home,
+        &sub,
+        &["add", &peer_json("Ola Nowak", "ola@x.org", 3)],
+        None,
+    );
+    assert_eq!(o.status.code(), Some(0), "{}", err(&o));
+    overlay(&home, 4, "Bea", "never"); // a fingerprint-named global file
+    let path = home.join("contacts/ola-nowak.json");
+    assert!(path.exists());
+    // By name prefix.
+    let o = owl(&home, &sub, &["contact", "remove", "ola"], None);
+    assert_eq!(o.status.code(), Some(0), "{}", err(&o));
+    assert_eq!(out(&o), "removed Ola Nowak (global)\n");
+    assert!(!path.exists());
+    // By fingerprint, file named by fingerprint.
+    let o = owl(&home, &sub, &["contact", "remove", &fp(4)], None);
+    assert_eq!(o.status.code(), Some(0), "{}", err(&o));
+    assert_eq!(out(&o), "removed Bea (global)\n");
+    assert!(
+        !home
+            .join("contacts")
+            .join(format!("{}.json", fp(4)))
+            .exists()
+    );
+    // Local files untouched, global gone from the list.
+    assert!(root.join(".agents/peers/maciek.json").exists());
+    assert!(root.join(".agents/peers/marek.json").exists());
+    assert_eq!(list_rows(&home, &sub, &[]).len(), 2);
+    // Removing again: unknown peer, exit 1, no scope hint.
+    let o = owl(&home, &sub, &["contact", "remove", "ola"], None);
+    assert_eq!(o.status.code(), Some(1));
+    assert!(err(&o).contains("no contact matches"), "{}", err(&o));
+    assert!(!err(&o).contains("--local"), "{}", err(&o));
+}
+
+#[test]
+fn contact_remove_local_deletes_the_repo_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let (root, sub) = fixture_repo(tmp.path());
+    overlay(&home, 1, "", "auto"); // policy overlay for Maciek lives in global
+    let o = owl(
+        &home,
+        &sub,
+        &["contact", "remove", "maciek@company.com", "--local"],
+        None,
+    );
+    assert_eq!(o.status.code(), Some(0), "{}", err(&o));
+    assert_eq!(out(&o), "removed Maciek (local)\n");
+    assert!(!root.join(".agents/peers/maciek.json").exists());
+    assert!(root.join(".agents/peers/marek.json").exists());
+    assert!(
+        home.join("contacts")
+            .join(format!("{}.json", fp(1)))
+            .exists(),
+        "--local never touches the global book"
+    );
+    // Ambiguous prefix in the scope is an error and deletes nothing.
+    std::fs::write(
+        root.join(".agents/peers/mario.json"),
+        peer_json("Mario", "mario@x.org", 5),
+    )
+    .unwrap();
+    let o = owl(&home, &sub, &["contact", "remove", "mar", "--local"], None);
+    assert_eq!(o.status.code(), Some(1));
+    assert!(err(&o).contains("ambiguous"), "{}", err(&o));
+    assert!(root.join(".agents/peers/marek.json").exists());
+    assert!(root.join(".agents/peers/mario.json").exists());
+}
+
+#[test]
+fn contact_remove_hints_the_other_scope_in_both_directions() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let (root, sub) = fixture_repo(tmp.path());
+    overlay(&home, 3, "Ola", "manual");
+    // Local peer, default (global) scope → hint `use --local`.
+    let o = owl(&home, &sub, &["contact", "remove", "Maciek"], None);
+    assert_eq!(o.status.code(), Some(1));
+    assert_eq!(err(&o), "owl: Maciek is a local contact; use --local\n");
+    assert!(root.join(".agents/peers/maciek.json").exists());
+    // Global peer, --local → hint `drop --local`.
+    let o = owl(&home, &sub, &["contact", "remove", "Ola", "--local"], None);
+    assert_eq!(o.status.code(), Some(1));
+    assert_eq!(err(&o), "owl: Ola is a global contact; drop --local\n");
+    assert!(
+        home.join("contacts")
+            .join(format!("{}.json", fp(3)))
+            .exists()
+    );
+    // A global policy overlay for a local contact is not a global contact: removing the
+    // local peer without --local still hints, and the overlay stays.
+    overlay(&home, 1, "", "auto");
+    let o = owl(&home, &sub, &["contact", "remove", &fp(1)], None);
+    assert_eq!(o.status.code(), Some(1));
+    assert_eq!(err(&o), "owl: Maciek is a local contact; use --local\n");
+    assert!(
+        home.join("contacts")
+            .join(format!("{}.json", fp(1)))
+            .exists()
+    );
+}
+
+#[test]
+fn contact_remove_local_outside_a_git_repo_is_an_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let cwd = plain_dir(tmp.path());
+    overlay(&home, 3, "Ola", "manual");
+    let o = owl(&home, &cwd, &["contact", "remove", "Ola", "--local"], None);
+    assert_eq!(o.status.code(), Some(1));
+    assert!(err(&o).contains("git repository"), "{}", err(&o));
+    assert!(
+        home.join("contacts")
+            .join(format!("{}.json", fp(3)))
+            .exists()
+    );
+}
+
+// ----- library-level scope helpers -----
+
+#[test]
+fn load_scope_filters_the_merged_book() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let (_root, sub) = fixture_repo(tmp.path());
+    overlay(&home, 3, "Ola", "manual");
+    overlay(&home, 1, "Wrong", "auto");
+    let g = ContactBook::load_scope(&home, &sub, "global").unwrap();
+    let names: Vec<&str> = g.contacts.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, ["Ola"]);
+    let l = ContactBook::load_scope(&home, &sub, "local").unwrap();
+    let names: Vec<&str> = l.contacts.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, ["Maciek", "Marek"]);
+    assert_eq!(
+        l.resolve("Maciek").unwrap().policy.as_ref().unwrap().mode,
+        Mode::Auto
+    );
+    assert!(
+        ContactBook::load_scope(&home, &sub, "other")
+            .unwrap()
+            .contacts
+            .is_empty()
+    );
+}
+
+#[test]
+fn scope_files_returns_paths_and_skips_overlays() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let (root, sub) = fixture_repo(tmp.path());
+    overlay(&home, 3, "Ola", "manual");
+    overlay(&home, 1, "Wrong", "auto");
+    let g = ContactBook::scope_files(&home, &sub, "global").unwrap();
+    let got: Vec<(&Path, &str)> = g
+        .iter()
+        .map(|(p, c)| (p.as_path(), c.name.as_str()))
+        .collect();
+    let ola = home.join("contacts").join(format!("{}.json", fp(3)));
+    assert_eq!(got, [(ola.as_path(), "Ola")]);
+    assert_eq!(g[0].1.source, "global");
+    let l = ContactBook::scope_files(&home, &sub, "local").unwrap();
+    let got: Vec<(&Path, &str)> = l
+        .iter()
+        .map(|(p, c)| (p.as_path(), c.name.as_str()))
+        .collect();
+    let (m1, m2) = (
+        root.join(".agents/peers/maciek.json"),
+        root.join(".agents/peers/marek.json"),
+    );
+    assert_eq!(got, [(m1.as_path(), "Maciek"), (m2.as_path(), "Marek")]);
+    assert!(l.iter().all(|(_, c)| c.source == "local"));
+    // Outside a repo: global keeps the overlay too (nothing to overlay), local is an error.
+    let cwd = plain_dir(tmp.path());
+    let g = ContactBook::scope_files(&home, &cwd, "global").unwrap();
+    assert_eq!(g.len(), 2);
+    let e = ContactBook::scope_files(&home, &cwd, "local")
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("git repository"), "{e}");
+}

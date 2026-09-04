@@ -41,6 +41,13 @@ pub fn run(home: &Path, source: &str, local: bool) -> anyhow::Result<()> {
     };
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     let name = format!("{}.json", peer.slug);
+    // Same slug, different key: never replace another person's file.
+    if dir.join(&name).is_file() {
+        return Err(user_error(format!(
+            "{} already exists (a different key); remove it first with `owl contact remove`",
+            dir.join(&name).display()
+        )));
+    }
     let mut bytes = serde_json::to_vec_pretty(&peer.json)?;
     bytes.push(b'\n');
     write_atomic(&dir, &name, &bytes)?;
@@ -120,9 +127,7 @@ pub fn validate(text: &str) -> anyhow::Result<Peer> {
 fn string_list(obj: &Map<String, Value>, field: &str) -> anyhow::Result<Option<Vec<Value>>> {
     match obj.get(field) {
         None => Ok(None),
-        Some(Value::Array(items)) if items.iter().all(Value::is_string) => {
-            Ok(Some(items.clone()))
-        }
+        Some(Value::Array(items)) if items.iter().all(Value::is_string) => Ok(Some(items.clone())),
         Some(_) => Err(user_error(format!(
             "peer file field `{field}` must be an array of strings"
         ))),
@@ -177,7 +182,13 @@ mod tests {
             p.fingerprint,
             identity::fingerprint(&Identity::from_seed([7; 32]).verifying_key())
         );
-        let keys: Vec<&str> = p.json.as_object().unwrap().keys().map(String::as_str).collect();
+        let keys: Vec<&str> = p
+            .json
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
         assert_eq!(keys, ["emails", "endpoints", "name", "pubkey"]);
         assert_eq!(p.json["name"], "Ola");
         assert_eq!(p.json["emails"], serde_json::json!(["a@x"]));
@@ -188,7 +199,13 @@ mod tests {
     #[test]
     fn validate_optional_lists_absent_stay_absent() {
         let p = validate(&format!(r#"{{"name":"Ola","pubkey":"{}"}}"#, pk())).unwrap();
-        let keys: Vec<&str> = p.json.as_object().unwrap().keys().map(String::as_str).collect();
+        let keys: Vec<&str> = p
+            .json
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
         assert_eq!(keys, ["name", "pubkey"]);
     }
 
@@ -198,18 +215,51 @@ mod tests {
             ("{not json".into(), "not valid JSON"),
             ("[]".into(), "must be a JSON object"),
             (r#""x""#.into(), "must be a JSON object"),
-            (format!(r#"{{"pubkey":"{}"}}"#, pk()), "lacks the `name` field"),
-            (format!(r#"{{"name":"","pubkey":"{}"}}"#, pk()), "`name` is empty"),
-            (format!(r#"{{"name":"  ","pubkey":"{}"}}"#, pk()), "`name` is empty"),
-            (format!(r#"{{"name":7,"pubkey":"{}"}}"#, pk()), "`name` must be a string"),
-            (format!(r#"{{"name":"!!!","pubkey":"{}"}}"#, pk()), "no letters or digits"),
+            (
+                format!(r#"{{"pubkey":"{}"}}"#, pk()),
+                "lacks the `name` field",
+            ),
+            (
+                format!(r#"{{"name":"","pubkey":"{}"}}"#, pk()),
+                "`name` is empty",
+            ),
+            (
+                format!(r#"{{"name":"  ","pubkey":"{}"}}"#, pk()),
+                "`name` is empty",
+            ),
+            (
+                format!(r#"{{"name":7,"pubkey":"{}"}}"#, pk()),
+                "`name` must be a string",
+            ),
+            (
+                format!(r#"{{"name":"!!!","pubkey":"{}"}}"#, pk()),
+                "no letters or digits",
+            ),
             (r#"{"name":"Ola"}"#.into(), "lacks the `pubkey` field"),
-            (r#"{"name":"Ola","pubkey":5}"#.into(), "`pubkey` must be a string"),
-            (r#"{"name":"Ola","pubkey":"ed25519:AAAA"}"#.into(), "`pubkey` is invalid"),
-            (r#"{"name":"Ola","pubkey":"AAAA"}"#.into(), "`pubkey` is invalid"),
-            (format!(r#"{{"name":"Ola","pubkey":"{}","emails":"a@x"}}"#, pk()), "`emails` must be an array of strings"),
-            (format!(r#"{{"name":"Ola","pubkey":"{}","emails":[1]}}"#, pk()), "`emails` must be an array of strings"),
-            (format!(r#"{{"name":"Ola","pubkey":"{}","endpoints":{{}}}}"#, pk()), "`endpoints` must be an array of strings"),
+            (
+                r#"{"name":"Ola","pubkey":5}"#.into(),
+                "`pubkey` must be a string",
+            ),
+            (
+                r#"{"name":"Ola","pubkey":"ed25519:AAAA"}"#.into(),
+                "`pubkey` is invalid",
+            ),
+            (
+                r#"{"name":"Ola","pubkey":"AAAA"}"#.into(),
+                "`pubkey` is invalid",
+            ),
+            (
+                format!(r#"{{"name":"Ola","pubkey":"{}","emails":"a@x"}}"#, pk()),
+                "`emails` must be an array of strings",
+            ),
+            (
+                format!(r#"{{"name":"Ola","pubkey":"{}","emails":[1]}}"#, pk()),
+                "`emails` must be an array of strings",
+            ),
+            (
+                format!(r#"{{"name":"Ola","pubkey":"{}","endpoints":{{}}}}"#, pk()),
+                "`endpoints` must be an array of strings",
+            ),
         ];
         for (text, needle) in cases {
             let err = validate(&text).unwrap_err();

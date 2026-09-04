@@ -96,7 +96,10 @@ fn parse(path: &Path, source: &str) -> anyhow::Result<Contact> {
 
 /// Load every `*.json` in `dir`; malformed files are skipped with a warning on stderr.
 fn load_dir(dir: &Path, source: &str) -> Vec<Contact> {
-    load_dir_paths(dir, source).into_iter().map(|(_, c)| c).collect()
+    load_dir_paths(dir, source)
+        .into_iter()
+        .map(|(_, c)| c)
+        .collect()
 }
 
 /// [`load_dir`] keeping each contact's file path (for `owl contact remove`).
