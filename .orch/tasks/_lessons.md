@@ -73,3 +73,6 @@ Round 1 found two real bugs the AC-shaped tests could not see: the contact book 
 
 ## OWL-020 (2026-09-05)
 Code and tests correct in round 1; the only gap was a data-modality criterion (SKILL.md + README must name the new command) that no test pinned, so the two docs mutants survived and test-reviewer returned GAPS. Rule: every "docs/table lists X" criterion gets one `contains()` assert in `tests/plugin.rs` alongside the code change — a data-modality AC is still a mutant target. Process: the fix was two asserts, one extra round; ask the implementer up front to guard every doc string the AC names.
+
+## OWL-021 (2026-09-05)
+Correct in round 1 (18/20 mutants RED). The two survivors were a substring-match weakness: `/owlpost:contact` is a prefix of `/owlpost:contacts`, so removing the shorter name from the README/SKILL.md went unnoticed by `contains()`. Rule: when a directory-driven test greps names that can prefix each other, match a delimited token (closing backtick, `|`, or end of line), and mutant-check the shortest name of every prefix pair. Handed to OWL-022 to close in the same test file.
