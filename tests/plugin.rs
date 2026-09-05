@@ -273,7 +273,7 @@ fn skill_has_frontmatter_and_required_strings() {
 
 #[test]
 fn commands_have_descriptions() {
-    for name in ["inbox", "ask", "history", "me", "update", "add"] {
+    for name in ["inbox", "ask", "history", "me", "update", "add", "contacts"] {
         let rel = format!("commands/{name}.md");
         let (fm, body) = frontmatter(&rel);
         assert!(
@@ -301,6 +301,42 @@ fn commands_have_descriptions() {
     assert!(
         !ask.contains("If any part is missing, ask the user"),
         "must not demand a path: {ask}"
+    );
+}
+
+// ---------- OWL-020: /owlpost:contacts ----------
+
+#[test]
+fn contacts_command_is_an_argless_picker_over_the_ask_flow() {
+    let (fm, body) = frontmatter("commands/contacts.md");
+    // AC1: no required argument — the picker takes none at all.
+    assert!(
+        fm_value(&fm, "argument-hint").is_none_or(|h| h.trim_matches('"').trim().is_empty()),
+        "contacts.md must not require an argument: {fm}"
+    );
+    assert!(!body.contains("$ARGUMENTS"), "contacts.md must not read $ARGUMENTS");
+    assert!(
+        fm_value(&fm, "allowed-tools")
+            .is_some_and(|t| t.contains("Bash(owl contact:*)") && t.contains("Bash(owl ask:*)")),
+        "{fm}"
+    );
+    // The picker is the AskUserQuestion widget over `owl contact list --json`, the card is
+    // `owl contact show`, and the question path is delegated to ask.md by reference.
+    for needle in [
+        "AskUserQuestion",
+        "owl contact list --json",
+        "owl contact show",
+        "commands/ask.md",
+        "/owlpost:add",
+    ] {
+        assert!(body.contains(needle), "contacts.md body lacks {needle:?}");
+    }
+    // A contact without a policy shows as `-`, matching the plain table.
+    assert!(body.contains("`-`"), "contacts.md must map a missing policy to `-`");
+    // One confirmation only: the body must not restate ask.md's approval step.
+    assert!(
+        !body.contains("Ask for explicit approval"),
+        "contacts.md must not duplicate ask.md's confirmation rule"
     );
 }
 

@@ -24,6 +24,10 @@ Suggest `owl ask` when:
   in the repo, its docs, or the commit history;
 - the user asks "who should I ask about `<path>`".
 
+When the user wants to ask a peer but does not name one (or is unsure of the spelling),
+start with `/owlpost:contacts`: it lists the contact book as arrow-key options, and the pick
+continues into the `/owlpost:ask` flow or just shows the contact's card.
+
 Do not ask a peer for anything answerable from the checkout. Prefer reading the code first.
 
 ## How to run `owl ask`
