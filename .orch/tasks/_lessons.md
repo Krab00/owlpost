@@ -82,3 +82,7 @@ Correct in round 1; the only GAPS was a brittle pin ("in one line and\nstop" —
 
 ## OWL-023 (2026-09-05)
 Clean round 1 (14/15 verifier mutants RED; the survivor was the design-doc sentence, which no test reads — same class as OWL-020/021: a data-modality doc criterion without a guard). Third recurrence of "AC-named doc string unguarded by a test" (OWL-020 SKILL/README, OWL-021 contact/contacts prefix, OWL-023 §9) → candidate for standing_checks_extra: "every doc literal an AC names has a single-line contains() test, mutant-checked". Also: a flag that selects an output shape needs a fixture per (flag × config × count) cell; the implementer's 2×5×2 grid is the model.
+
+## OWL-024 (2026-09-05)
+Clean round 1 (59/62 applied mutants RED, test-reviewer OK). The three survivors were all statements outside the AC text: an empty first e-mail kept in the resource URI, and two doc sentences that restate an AC-pinned rule elsewhere (the `-` policy placeholder in contacts.md, the "run at once" step in the SKILL how-to). Rule: when a rule is stated twice in the docs, pin both statements or delete one — a second unpinned copy drifts. Process: the design decision (MCP resources instead of a terminal picker) took the whole session; the picker was built twice (tmux pane, then a desktop window) before checking what the host can actually render everywhere — for any UI-in-Claude-Code task, first read the Claude Code docs for the native surface (`@` resources, `/` prompts, AskUserQuestion) and design to it, before writing a script that needs a second terminal.
+
