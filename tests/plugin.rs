@@ -381,7 +381,7 @@ fn skill_has_frontmatter_and_required_strings() {
         "owl reject",
         "owl show",
         "owlpost:<peer>:<question id>",
-        // OWL-020 AC4: the picker is the entry point when no peer is named.
+        // OWL-024: the contact table is the entry point when no peer is named.
         "/owlpost:contacts",
         // OWL-022 AC3: the consent step of the answer loop.
         "owl allow",
@@ -530,19 +530,20 @@ fn wrapped_subcommand(name: &str) -> &str {
 }
 
 /// OWL-021 AC1: every `owl --help` subcommand except `daemon` (a service; install/uninstall/
-/// doctor cover it) has `commands/<name>.md`; `contact` has both `contacts.md` (the OWL-020
-/// picker over `contact list`) and `contact.md` (`show|export|remove`). The reverse holds
-/// too: every command file wraps a real subcommand, `me` and `contacts` being the two
-/// renamed ones.
+/// doctor cover it) and `mcp` (OWL-024: a stdio server started by `.mcp.json`) has
+/// `commands/<name>.md`; `contact` has both `contacts.md` (the OWL-024 table over
+/// `contact list`) and `contact.md` (`show|export|remove`). The reverse holds too: every
+/// command file wraps a real subcommand, `me` and `contacts` being the two renamed ones.
 #[test]
 fn every_subcommand_has_a_command() {
     let subs = help_subcommands(&[]);
     assert!(subs.contains(&"daemon".to_string()), "{subs:?}");
+    assert!(subs.contains(&"mcp".to_string()), "{subs:?}");
     assert!(subs.contains(&"contact".to_string()), "{subs:?}");
     let names = command_names();
     for sub in &subs {
-        if sub == "daemon" {
-            assert!(!names.contains(sub), "daemon must not get a command file");
+        if sub == "daemon" || sub == "mcp" {
+            assert!(!names.contains(sub), "{sub} must not get a command file");
             continue;
         }
         assert!(names.contains(sub), "commands/{sub}.md is missing");
@@ -638,7 +639,7 @@ fn commands_have_descriptions() {
         }
 
         // A wrapper of a subcommand with positionals must pass `$ARGUMENTS` through — except
-        // the arg-less picker, which the OWL-020 test pins to take none.
+        // the arg-less contact table, which the OWL-024 test pins to take none.
         let sub = wrapped.split(' ').next().unwrap();
         if takes_arguments(sub) && name != "contacts" && name != "me" {
             assert!(
@@ -688,6 +689,16 @@ fn commands_have_descriptions() {
         !ask.contains("If any part is missing, ask the user"),
         "must not demand a path: {ask}"
     );
+    // OWL-024 AC6: the command is the approval; no confirmation step.
+    assert!(
+        ask.contains("Do not ask for confirmation: the command is the approval."),
+        "{ask}"
+    );
+    assert!(
+        !ask.contains("Ask for explicit approval"),
+        "ask.md must not confirm: {ask}"
+    );
+    assert!(!ask.contains("AskUserQuestion"), "{ask}");
 }
 
 /// OWL-021 AC3: the commands that send something or change trust confirm once, with the
@@ -918,51 +929,160 @@ fn inbox_command_walks_states_with_pickers() {
     }
 }
 
-// ---------- OWL-020: /owlpost:contacts ----------
+// ---------- OWL-024: contacts as MCP resources ----------
 
+/// The hint line `contacts.md` ends with, verbatim.
+const MENTION_HINT: &str =
+    "Type @ and the contact's name, e.g. @owl:to://<first contact's uri>, then the question.";
+
+/// AC5: `.mcp.json` declares exactly the stdio server `owl` running `owl mcp`.
 #[test]
-fn contacts_command_is_an_argless_picker_over_the_ask_flow() {
+fn mcp_json_starts_owl_mcp() {
+    let mcp = json(".mcp.json");
+    let servers = mcp["mcpServers"].as_object().expect("mcpServers object");
+    assert_eq!(servers.len(), 1, "{mcp}");
+    let owl = &servers["owl"];
+    assert_eq!(owl["type"], "stdio", "{owl}");
+    assert_eq!(owl["command"], "owl", "{owl}");
+    assert_eq!(owl["args"], json!(["mcp"]), "{owl}");
+}
+
+/// AC6: `contacts.md` is a table over `owl contact list --json` ending with the mention
+/// hint; no picker, no `owl ask`, only the `contact` pattern allowed.
+#[test]
+fn contacts_command_lists_and_points_at_mentions() {
     let (fm, body) = frontmatter("commands/contacts.md");
-    // AC1: no required argument — the picker takes none at all.
     assert!(
         fm_value(&fm, "argument-hint").is_none_or(|h| h.trim_matches('"').trim().is_empty()),
-        "contacts.md must not require an argument: {fm}"
+        "contacts.md must not take an argument: {fm}"
     );
     assert!(
         !body.contains("$ARGUMENTS"),
         "contacts.md must not read $ARGUMENTS"
     );
-    assert!(
-        fm_value(&fm, "allowed-tools")
-            .is_some_and(|t| t.contains("Bash(owl contact:*)") && t.contains("Bash(owl ask:*)")),
+    assert_eq!(
+        fm_value(&fm, "allowed-tools"),
+        Some("Bash(owl contact:*)"),
         "{fm}"
     );
-    // The picker is the AskUserQuestion widget over `owl contact list --json`, the card is
-    // `owl contact show`, and the question path is delegated to ask.md by reference.
     for needle in [
-        "AskUserQuestion",
         "owl contact list --json",
-        "owl contact show",
-        "commands/ask.md",
-        "/owlpost:add",
+        "@owl:to://",
+        MENTION_HINT,
+        "No contacts yet — run /owlpost:add with a colleague's peer file.",
+        "`-`",
     ] {
         assert!(body.contains(needle), "contacts.md body lacks {needle:?}");
     }
-    // A contact without a policy shows as `-`, matching the plain table.
-    assert!(
-        body.contains("`-`"),
-        "contacts.md must map a missing policy to `-`"
+    assert_eq!(
+        body.matches("owl contact ").count(),
+        1,
+        "contacts.md runs only `owl contact list --json`: {body}"
     );
-    // AC4: the README command table lists the command and its file.
-    let readme = read("README.md");
-    for needle in ["commands/contacts.md", "/owlpost:contacts"] {
-        assert!(readme.contains(needle), "README.md lacks {needle:?}");
+    for forbidden in ["AskUserQuestion", "owl ask", "contact-pick", "picker"] {
+        assert!(
+            !body.contains(forbidden) && !fm.contains(forbidden),
+            "contacts.md must not mention {forbidden:?}"
+        );
     }
-    // One confirmation only: the body must not restate ask.md's approval step.
+}
+
+/// AC7: the skill's "Mentioned contact" section and the no-confirmation rule; the README
+/// rows, the mention example and the `.mcp.json` note.
+#[test]
+fn skill_and_readme_document_mentions() {
+    let (_, skill) = frontmatter("skills/owlpost/SKILL.md");
+    let mentioned = section(&skill, "## Mentioned contact");
+    for needle in [
+        "@owl:to://",
+        "owl ask --peer <fingerprint>",
+        "the mention is the approval",
+        "`.mcp.json` starts `owl mcp`",
+        "whole repository",
+        "Several mentions send the same question to each contact",
+    ] {
+        assert!(
+            mentioned.contains(needle),
+            "SKILL.md Mentioned contact lacks {needle:?}"
+        );
+    }
     assert!(
-        !body.contains("Ask for explicit approval"),
-        "contacts.md must not duplicate ask.md's confirmation rule"
+        skill.contains("`/owlpost:ask` does not: the command itself is the approval."),
+        "SKILL.md lacks the no-confirmation rule"
     );
+    assert!(
+        !skill.contains("as `/owlpost:ask`\ndoes."),
+        "SKILL.md must not say /owlpost:ask confirms"
+    );
+    // The inbox keeps its `AskUserQuestion` pickers (OWL-022); the contact one is gone.
+    assert!(
+        !skill.contains("arrow-key"),
+        "SKILL.md still describes the contact picker"
+    );
+    for line in skill.lines().filter(|l| l.contains("/owlpost:contacts")) {
+        assert!(!line.contains("picker"), "{line}");
+    }
+
+    let readme = read("README.md");
+    let row = |file: &str| {
+        readme
+            .lines()
+            .find(|l| l.contains(&format!("`commands/{file}.md`")))
+            .unwrap_or_else(|| panic!("README.md {file} row"))
+            .to_string()
+    };
+    let contacts = row("contacts");
+    assert!(contacts.contains("`/owlpost:contacts`"), "{contacts}");
+    assert!(contacts.contains("@owl:to://"), "{contacts}");
+    assert!(!contacts.contains("picker"), "{contacts}");
+    let ask = row("ask");
+    assert!(ask.contains("the command is the approval"), "{ask}");
+    assert!(!ask.contains("confirms first"), "{ask}");
+    let mention = section(&readme, "## Mention a contact");
+    for needle in [
+        "`@owl:to://ana-kowalska.ana@acme.pl",
+        "`.mcp.json`",
+        "starts `owl mcp`",
+        "`owl` on `PATH`",
+    ] {
+        assert!(
+            mention.contains(needle),
+            "README Mention a contact lacks {needle:?}"
+        );
+    }
+    assert!(readme.contains("| MCP server | `.mcp.json` |"), "{readme}");
+}
+
+/// AC8: the design doc lists `owl mcp` in the §9 CLI table and `cli/mcp.rs` in §2.
+#[test]
+fn design_doc_lists_owl_mcp() {
+    let doc = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/docs/technical-design.md"
+    ))
+    .unwrap();
+    let layout = section(&doc, "## 2. Module layout");
+    assert!(
+        layout.contains("    mcp.rs           `owl mcp`"),
+        "§2 lacks cli/mcp.rs"
+    );
+    let cli = section(&doc, "## 9. CLI contract");
+    let row = cli
+        .lines()
+        .find(|l| l.starts_with("| `owl mcp` |"))
+        .expect("§9 owl mcp row");
+    for needle in [
+        "stdio",
+        "resources only",
+        "to://<name-slug>.<first e-mail>",
+        "re-read per request",
+        "`.mcp.json`",
+    ] {
+        assert!(
+            row.contains(needle),
+            "§9 owl mcp row lacks {needle:?}: {row}"
+        );
+    }
 }
 
 // ---------- AC5 helper ----------
