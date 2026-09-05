@@ -46,18 +46,19 @@ Suggest `owl ask` when:
 - the user asks "who should I ask about `<path>`".
 
 When the user wants to ask a peer but does not name one (or is unsure of the spelling),
-point them at `/owlpost:contacts`: it prints the book as a table and the hint to type `@`
-and the contact's name, which is the typeahead over the `owl` MCP resources (see
-"Mentioned contact" below).
+point them at `/owlpost:contacts`: it prints the book as a table and the hint to mention a
+contact through the `owl` MCP resources (see "Mentioned contact" below).
 
 Do not ask a peer for anything answerable from the checkout. Prefer reading the code first.
 
 ## Mentioned contact
 
-The plugin's `.mcp.json` starts `owl mcp`, which serves every contact as a resource
-`to://<name-slug>.<email>` of the `owl` server; Claude Code lists them in the `@` typeahead
-and attaches the picked one to the prompt. An attached `@owl:to://…` resource in the user's
-prompt is the peer: its content is `{"name","fingerprint","emails"}`.
+`owl mcp` (registered in Claude Code at user scope by `owl setup` / `owl update`) serves
+every contact as a resource `to://<name-slug>.<email>` of the `owl` server; Claude Code
+lists them in the `@` typeahead and attaches the picked one to the prompt. To mention one,
+type @owl: and the start of the name (or e-mail), pick with the arrows, then type the
+question. An attached `@owl:to://…` resource in the user's prompt is the peer: its content
+is `{"name","fingerprint","emails"}`.
 
 - The rest of the prompt is `[path] <question>` (a path when a word contains `/` or a file
   extension and is not a question word; otherwise the whole text is the question).

@@ -261,3 +261,40 @@ pub async fn assert_error(
     assert_eq!(body.get("error").and_then(|e| e.as_str()), Some(error));
     headers
 }
+
+/// A fake `claude` (and `cargo`) on a temp `PATH` for the `owl setup` / `owl update` /
+/// `owl doctor` MCP registration tests: every call appends `<name> <argv>` to `calls.log`
+/// and exits 0, except `claude mcp get owl`, which exits `get_exit` (0 = registered).
+/// Returns the bin directory (to be the whole `PATH`) and the log path.
+pub fn fake_claude(dir: &Path, get_exit: i32) -> (std::path::PathBuf, std::path::PathBuf) {
+    let bin = dir.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let log = dir.join("calls.log");
+    for name in ["claude", "cargo"] {
+        let script = bin.join(name);
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\necho \"{name} $*\" >> '{}'\n\
+                 [ \"$1 $2 $3\" = \"mcp get owl\" ] && exit {get_exit}\nexit 0\n",
+                log.display()
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+    (bin, log)
+}
+
+/// The lines of a `fake_claude` log (empty when nothing ran).
+pub fn fake_calls(log: &Path) -> Vec<String> {
+    std::fs::read_to_string(log)
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_string)
+        .collect()
+}

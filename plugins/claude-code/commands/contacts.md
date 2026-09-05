@@ -12,8 +12,7 @@ No arguments. This command only lists; a contact is asked by mentioning it in th
    If the array is empty, print one line: "No contacts yet — run /owlpost:add with a colleague's peer file." and stop.
 2. Print the book as ONE table, sorted by name, with the columns name, e-mails, fingerprint,
    source and policy; a contact without `policy` shows `-` in the policy column.
-3. End with exactly this hint, `<first contact's uri>` being the first row's resource URI as
-   `owl mcp` serves it: the name lower-cased with every run of non-alphanumerics as one `-`,
-   then `.` and the first e-mail (no e-mail: the slug alone), for example
-   `ana-kowalska.ana@acme.pl`:
-   Type @ and the contact's name, e.g. @owl:to://<first contact's uri>, then the question.
+3. End with exactly this hint, on one line:
+   Type @owl: and the start of the name, pick the contact, then type the question.
+   The picked contact is inserted as a mention of the shape `@owl:to://<name-slug>.<email>`
+   (the `owl` MCP server's resource URI, for example `@owl:to://ana-kowalska.ana@acme.pl`).
