@@ -314,7 +314,10 @@ fn contacts_command_is_an_argless_picker_over_the_ask_flow() {
         fm_value(&fm, "argument-hint").is_none_or(|h| h.trim_matches('"').trim().is_empty()),
         "contacts.md must not require an argument: {fm}"
     );
-    assert!(!body.contains("$ARGUMENTS"), "contacts.md must not read $ARGUMENTS");
+    assert!(
+        !body.contains("$ARGUMENTS"),
+        "contacts.md must not read $ARGUMENTS"
+    );
     assert!(
         fm_value(&fm, "allowed-tools")
             .is_some_and(|t| t.contains("Bash(owl contact:*)") && t.contains("Bash(owl ask:*)")),
@@ -332,7 +335,10 @@ fn contacts_command_is_an_argless_picker_over_the_ask_flow() {
         assert!(body.contains(needle), "contacts.md body lacks {needle:?}");
     }
     // A contact without a policy shows as `-`, matching the plain table.
-    assert!(body.contains("`-`"), "contacts.md must map a missing policy to `-`");
+    assert!(
+        body.contains("`-`"),
+        "contacts.md must map a missing policy to `-`"
+    );
     // One confirmation only: the body must not restate ask.md's approval step.
     assert!(
         !body.contains("Ask for explicit approval"),
