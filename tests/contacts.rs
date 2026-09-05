@@ -1304,6 +1304,31 @@ fn contact_remove_propagates_a_failed_unlink() {
 }
 
 #[test]
+fn contact_remove_local_failed_unlink_is_not_masked_by_the_scope_hint() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let (root, sub) = fixture_repo(tmp.path());
+    let peers = root.join(".agents/peers");
+    std::fs::set_permissions(&peers, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let o = owl(
+        &home,
+        &sub,
+        &["contact", "remove", "Maciek", "--local"],
+        None,
+    );
+    std::fs::set_permissions(&peers, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(o.status.code(), Some(1), "{}", err(&o));
+    let e = err(&o);
+    assert!(e.contains("removing") && e.contains("maciek.json"), "{e}");
+    assert!(
+        !e.contains("use --local"),
+        "the real error, not the scope hint: {e}"
+    );
+    assert!(peers.join("maciek.json").exists(), "guard engaged");
+}
+
+#[test]
 fn add_rejects_mixed_type_lists() {
     let tmp = tempfile::tempdir().unwrap();
     let home = tmp.path().join("home");
