@@ -291,7 +291,11 @@ fn command_names() -> Vec<String> {
 /// each as a two-space-indented word at the start of a line, up to the next blank line.
 fn help_subcommands(args: &[&str]) -> Vec<String> {
     let out = Command::new(OWL).args(args).arg("--help").output().unwrap();
-    assert!(out.status.success(), "owl {args:?} --help: {:?}", out.status);
+    assert!(
+        out.status.success(),
+        "owl {args:?} --help: {:?}",
+        out.status
+    );
     let text = String::from_utf8(out.stdout).unwrap();
     let rest = text
         .split_once("\nCommands:\n")
@@ -301,14 +305,14 @@ fn help_subcommands(args: &[&str]) -> Vec<String> {
         .lines()
         .take_while(|l| !l.trim().is_empty())
         .filter(|l| l.starts_with("  ") && !l.starts_with("   "))
-        .map(|l| l.trim_start().split_whitespace().next().unwrap().to_string())
+        .map(|l| l.split_whitespace().next().unwrap().to_string())
         .filter(|n| n != "help")
         .collect();
     names.sort();
     names
 }
 
-/// `owl <sub> --help` output, cached per call site (the binary is cheap; no cache needed).
+/// `owl <sub> --help` output.
 fn help(sub: &str) -> String {
     let out = Command::new(OWL).arg(sub).arg("--help").output().unwrap();
     assert!(out.status.success(), "owl {sub} --help: {:?}", out.status);
@@ -351,19 +355,28 @@ fn every_subcommand_has_a_command() {
         }
         assert!(names.contains(sub), "commands/{sub}.md is missing");
     }
-    assert!(names.contains(&"contacts".to_string()), "commands/contacts.md");
+    assert!(
+        names.contains(&"contacts".to_string()),
+        "commands/contacts.md"
+    );
     // `contact.md` covers the non-list subcommands by name.
     let (_, contact) = frontmatter("commands/contact.md");
     for sub in help_subcommands(&["contact"]) {
         if sub == "list" {
             assert!(contact.contains("/owlpost:contacts"), "{contact}");
         } else {
-            assert!(contact.contains(&format!("`{sub}")), "contact.md lacks {sub}: {contact}");
+            assert!(
+                contact.contains(&format!("`{sub}")),
+                "contact.md lacks {sub}: {contact}"
+            );
         }
     }
     for name in &names {
         let sub = wrapped_subcommand(name).split(' ').next().unwrap();
-        assert!(subs.contains(&sub.to_string()), "commands/{name}.md wraps no subcommand");
+        assert!(
+            subs.contains(&sub.to_string()),
+            "commands/{name}.md wraps no subcommand"
+        );
     }
 }
 
@@ -389,10 +402,14 @@ fn commands_have_descriptions() {
         assert!(!body.trim().is_empty(), "{rel}: empty body");
 
         let wrapped = wrapped_subcommand(&name);
-        let tools = fm_value(&fm, "allowed-tools").unwrap_or_else(|| panic!("{rel}: no allowed-tools"));
+        let tools =
+            fm_value(&fm, "allowed-tools").unwrap_or_else(|| panic!("{rel}: no allowed-tools"));
         let primary = format!("Bash(owl {wrapped}:*)");
         let entries: Vec<&str> = tools.split(',').map(str::trim).collect();
-        assert!(entries.contains(&primary.as_str()), "{rel}: allowed-tools lacks {primary}: {tools}");
+        assert!(
+            entries.contains(&primary.as_str()),
+            "{rel}: allowed-tools lacks {primary}: {tools}"
+        );
         for entry in entries {
             if entry == primary {
                 continue;
@@ -403,17 +420,28 @@ fn commands_have_descriptions() {
             let x = entry
                 .strip_prefix("Bash(owl ")
                 .and_then(|r| r.strip_suffix(":*)"))
-                .unwrap_or_else(|| panic!("{rel}: allowed-tools entry {entry:?} is not an owl pattern"));
+                .unwrap_or_else(|| {
+                    panic!("{rel}: allowed-tools entry {entry:?} is not an owl pattern")
+                });
             let first = x.split(' ').next().unwrap();
-            assert!(subs.contains(&first.to_string()), "{rel}: {entry} is not an owl subcommand");
-            assert!(body.contains(&format!("owl {x}")), "{rel}: {entry} allowed but `owl {x}` never used in the body");
+            assert!(
+                subs.contains(&first.to_string()),
+                "{rel}: {entry} is not an owl subcommand"
+            );
+            assert!(
+                body.contains(&format!("owl {x}")),
+                "{rel}: {entry} allowed but `owl {x}` never used in the body"
+            );
         }
 
         // A wrapper of a subcommand with positionals must pass `$ARGUMENTS` through — except
         // the arg-less picker, which the OWL-020 test pins to take none.
         let sub = wrapped.split(' ').next().unwrap();
         if takes_arguments(sub) && name != "contacts" && name != "me" {
-            assert!(body.contains("$ARGUMENTS"), "{rel}: `owl {sub}` takes arguments but the body never mentions $ARGUMENTS");
+            assert!(
+                body.contains("$ARGUMENTS"),
+                "{rel}: `owl {sub}` takes arguments but the body never mentions $ARGUMENTS"
+            );
             assert!(
                 fm_value(&fm, "argument-hint").is_some_and(|h| !h.trim_matches('"').is_empty()),
                 "{rel}: `owl {sub}` takes arguments but there is no argument-hint"
@@ -422,12 +450,19 @@ fn commands_have_descriptions() {
     }
     // The set of arg-taking subcommands the rule above derives from `--help`, pinned so a
     // clap change that drops the `Arguments:` section is noticed.
-    let with_args: Vec<&str> = ["card", "contact", "add", "allow", "deny", "ask", "show", "draft", "edit", "send", "reject"].to_vec();
+    let with_args: Vec<&str> = [
+        "card", "contact", "add", "allow", "deny", "ask", "show", "draft", "edit", "send", "reject",
+    ]
+    .to_vec();
     for sub in &subs {
         if sub == "daemon" {
             continue;
         }
-        assert_eq!(takes_arguments(sub), with_args.contains(&sub.as_str()), "owl {sub} --help argument detection");
+        assert_eq!(
+            takes_arguments(sub),
+            with_args.contains(&sub.as_str()),
+            "owl {sub} --help argument detection"
+        );
     }
 
     let (fm, ask) = frontmatter("commands/ask.md");
@@ -484,9 +519,18 @@ fn readme_and_skill_list_every_command() {
     let readme = read("README.md");
     let (_, skill) = frontmatter("skills/owlpost/SKILL.md");
     for name in command_names() {
-        assert!(readme.contains(&format!("`commands/{name}.md`")), "README.md lacks commands/{name}.md");
-        assert!(readme.contains(&format!("/owlpost:{name}")), "README.md lacks /owlpost:{name}");
-        assert!(skill.contains(&format!("/owlpost:{name}")), "SKILL.md lacks /owlpost:{name}");
+        assert!(
+            readme.contains(&format!("`commands/{name}.md`")),
+            "README.md lacks commands/{name}.md"
+        );
+        assert!(
+            readme.contains(&format!("/owlpost:{name}")),
+            "README.md lacks /owlpost:{name}"
+        );
+        assert!(
+            skill.contains(&format!("/owlpost:{name}")),
+            "SKILL.md lacks /owlpost:{name}"
+        );
     }
 }
 
