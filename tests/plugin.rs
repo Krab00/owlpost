@@ -259,6 +259,8 @@ fn skill_has_frontmatter_and_required_strings() {
         "owl reject",
         "owl show",
         "owlpost:<peer>:<question id>",
+        // OWL-020 AC4: the picker is the entry point when no peer is named.
+        "/owlpost:contacts",
     ] {
         assert!(body.contains(needle), "SKILL.md body lacks {needle:?}");
     }
@@ -339,6 +341,11 @@ fn contacts_command_is_an_argless_picker_over_the_ask_flow() {
         body.contains("`-`"),
         "contacts.md must map a missing policy to `-`"
     );
+    // AC4: the README command table lists the command and its file.
+    let readme = read("README.md");
+    for needle in ["commands/contacts.md", "/owlpost:contacts"] {
+        assert!(readme.contains(needle), "README.md lacks {needle:?}");
+    }
     // One confirmation only: the body must not restate ask.md's approval step.
     assert!(
         !body.contains("Ask for explicit approval"),
