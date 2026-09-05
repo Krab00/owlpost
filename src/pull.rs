@@ -620,6 +620,21 @@ mod tests {
                 envelope::question_hash("proj", Some("src/x.rs"), "why?")
             );
         }
+        // OWL-018: a repo-level question hashes over the empty path and shows `-`.
+        let mut no_path = q.clone();
+        no_path.body = Body::Question {
+            project: "proj".into(),
+            path: None,
+            question: "why?".into(),
+        };
+        let env_np = Envelope::sign(&no_path, &a);
+        let ask = open_ask("q2", &rec(&env_np, "waiting", "x", Value::Null)).unwrap();
+        assert_eq!(ask.path, "-");
+        assert_eq!(ask.hash, envelope::question_hash("proj", None, "why?"));
+        assert_ne!(
+            ask.hash,
+            envelope::question_hash("proj", Some("src/x.rs"), "why?")
+        );
         // Not a payload, or an answer payload: skipped.
         let garbage = Record {
             raw: "{not json".into(),

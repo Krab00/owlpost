@@ -176,9 +176,23 @@ async fn daemon_notifies_on_question_and_answer() {
     let lines = wait_for_lines(&log, 6);
     assert_eq!(lines[5], "owlpost|Maciek asks about ?");
 
+    // OWL-018: a repo-level question (no path) is announced with `-` in the path slot.
+    let no_path = owlpost::envelope::Payload::question(
+        &common::fp(&maciek),
+        &common::fp(&bea),
+        common::PROJECT,
+        None,
+        question_text,
+    );
+    let env = owlpost::envelope::Envelope::sign(&no_path, &maciek);
+    let resp = post_envelope(&client(Some(&maciek), &bea), &d, &env).await;
+    assert_eq!(resp.status().as_u16(), 202);
+    let lines = wait_for_lines(&log, 7);
+    assert_eq!(lines[6], "owlpost|Maciek asks about -");
+
     // No further lines appear on their own.
     std::thread::sleep(Duration::from_millis(300));
-    assert_eq!(wait_for_lines(&log, 6).len(), 6);
+    assert_eq!(wait_for_lines(&log, 7).len(), 7);
     d.running.shutdown();
 
     // Same script, same peer, `notify = false`: the daemon spawns nothing for either event.
@@ -205,8 +219,8 @@ async fn daemon_notifies_on_question_and_answer() {
     );
     std::thread::sleep(Duration::from_millis(500));
     assert_eq!(
-        wait_for_lines(&log, 6).len(),
-        6,
+        wait_for_lines(&log, 7).len(),
+        7,
         "notify=false must stay silent"
     );
     quiet.running.shutdown();
