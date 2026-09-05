@@ -48,6 +48,7 @@ src/
     mod.rs           shared output helpers (--json, --format)
     ask.rs inbox.rs show.rs draft.rs send.rs reject.rs edit.rs history.rs
     allow.rs deny.rs add.rs contact.rs card.rs whoami.rs init.rs install.rs watch.rs
+    mcp.rs           `owl mcp`: MCP server over stdio, the contact book as `to://` resources
 tests/
   common/mod.rs      spawn a daemon with a temp home on port 0, fixture repo with .agents/peers
   spool.rs identity.rs contacts.rs tls.rs server.rs iroh.rs e2e.rs
@@ -296,6 +297,7 @@ unavailable, `3` rate limited, `4` nothing to do (e.g. `watch` timeout).
 | `owl watch [--id <id>] [--timeout <secs>]` | block until a matching inbox record arrives; exit 4 on timeout |
 | `owl daemon [--foreground]` | run the listener + loops |
 | `owl install \| uninstall` | launchd plist (`~/Library/LaunchAgents/dev.owlpost.owl.plist`) or systemd user unit; start/stop |
+| `owl mcp` | MCP server over stdio (JSON-RPC 2.0, one object per line): the merged contact book as resources only (no tools, no prompts), one per contact, URI `to://<name-slug>.<first e-mail>` (`to://<name-slug>` without e-mail, `.<fingerprint without owl:>` appended on a collision), `resources/read` → `{"name","fingerprint","emails"}`; the book is re-read per request; started by the Claude Code plugin's `.mcp.json` for `@owl:to://…` mentions |
 | `owl doctor` | check key, config, endpoints resolve (`ok endpoints: none configured (peers reach this daemon over iroh)` when empty), harness binaries present, daemon reachable, iroh (`ok iroh: <id short>, relay <url>` when the card reports a connected relay, `warn iroh: bound, no relay` when it does not, `warn iroh: unknown (daemon unreachable)` without a card) |
 
 Hook injection formats for `owl inbox --count --format …` (exact):
