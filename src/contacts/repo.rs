@@ -1,4 +1,5 @@
-//! Repo provider: `<git root>/.agents/peers/*.json`.
+//! Local scope (source `"local"`): `<git root>/.agents/peers/*.json`, shared with the team
+//! via PR. The module keeps its historical name; the user-facing scope is "local".
 
 use std::path::{Path, PathBuf};
 
@@ -11,6 +12,10 @@ pub fn find_git_root(cwd: &Path) -> Option<PathBuf> {
         .map(Path::to_path_buf)
 }
 
+pub fn peers_dir(root: &Path) -> PathBuf {
+    root.join(".agents").join("peers")
+}
+
 pub fn load(root: &Path) -> Vec<Contact> {
-    load_dir(&root.join(".agents").join("peers"), "repo")
+    load_dir(&peers_dir(root), "local")
 }

@@ -1,24 +1,22 @@
 ---
 description: Add a colleague's peer file (pasted JSON or a path) to your global contacts
-argument-hint: "<peer json | path/to/peer.json>"
-allowed-tools: Bash(owl contact:*), Bash(owl allow:*), Read, Write
+argument-hint: "<peer json | path/to/peer.json> [--local]"
+allowed-tools: Bash(owl add:*), Bash(owl contact:*), Bash(owl allow:*), Read
 ---
 
 Arguments: "$ARGUMENTS"
 
 The argument is either a path to a peer file or the peer JSON pasted inline (the output of the
-colleague's `owl contact export` / `/owlpost:me`). It must contain `name` and `pubkey`
-(`ed25519:<base64>`); `emails` and `endpoints` are optional lists. If a field is missing or
-the JSON does not parse, say which and stop.
+colleague's `owl contact export` / `/owlpost:me`). A trailing `--local` means the contact
+goes into this repository's `.agents/peers/` (shared with the team via PR) instead of the
+global book in `$OWLPOST_HOME/contacts/`.
 
-1. Run `owl contact list --json` and stop with a message if a contact with the same `pubkey`
-   already exists.
-2. Write the JSON to `$OWLPOST_HOME/contacts/<slug>.json` (default
-   `~/.config/owlpost/contacts/`), `<slug>` = the name lowercased, non-alphanumerics replaced
-   by `-`. Keep only `name`, `pubkey`, `emails`, `endpoints`.
-3. Run `owl contact show <name>` and show the name and fingerprint.
+1. Run `owl add` with the argument: a path as `owl add <path>`, pasted JSON via stdin as
+   `owl add -` (pass the JSON exactly as pasted). Append `--local` when asked for. `owl add`
+   validates `name`, `pubkey`, `emails`, `endpoints`, refuses a pubkey that is already a
+   contact in either scope, and prints `added <name> <fingerprint> (global|local)`.
+2. On a non-zero exit, show the error line (it names the missing or invalid field, or the
+   existing contact) and stop.
+3. Show the user the name and fingerprint from the `added` line.
 4. Remind the user to confirm the fingerprint with the colleague out-of-band before
    `owl allow <name>`; offer to run it once they confirm.
-
-Note: this writes the file directly until `owl add <file>` is implemented (OWL-019); then
-this command becomes a wrapper around it.

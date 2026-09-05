@@ -340,7 +340,10 @@ async fn ask_accepted_writes_ask_record() {
     assert_eq!(rec.state, "waiting");
     assert!(!rec.seen);
     assert_eq!(rec.meta["peer"], fp(&b.id));
-    assert_eq!(rec.meta["hash"], question_hash(PROJECT, PATH, QUESTION));
+    assert_eq!(
+        rec.meta["hash"],
+        question_hash(PROJECT, Some(PATH), QUESTION)
+    );
     // The stored raw/sig is the exact signed question, verifiable with A's key.
     let q = Envelope {
         raw: rec.raw.clone(),
@@ -356,7 +359,7 @@ async fn ask_accepted_writes_ask_record() {
         q.body,
         Body::Question {
             project: PROJECT.into(),
-            path: PATH.into(),
+            path: Some(PATH.into()),
             question: QUESTION.into()
         }
     );
@@ -381,6 +384,128 @@ async fn ask_accepted_writes_ask_record() {
     let qid2 = v.get("id").and_then(Value::as_str).unwrap().to_string();
     assert_ne!(qid2, qid);
     assert_eq!(ids(&spool, Dir::Asks).len(), 2);
+    b.running.shutdown();
+}
+
+/// OWL-018 AC1: `owl ask <peer> "<question>"` with no path is accepted, stored without a
+/// path (key omitted on the wire, hash over the empty path), and the responder's `owl show`,
+/// `owl inbox` print `-` where the path would be.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn ask_without_path() {
+    let a = id(1);
+    let b = spawn_daemon(2, true, &[Peer::new(&a, "Ana", manual())]).await;
+    let home = asker_home(&a, &b.id, &[&b.addr.to_string()]);
+    let out = owl(home.path(), home.path())
+        .args(["ask", "Bea", QUESTION, "--project", PROJECT])
+        .output()
+        .unwrap();
+    let qid = accepted_id(&out);
+    assert!(stderr(&out).is_empty(), "stderr: {}", stderr(&out));
+
+    let spool = Spool::new(home.path()).unwrap();
+    let rec = spool.get(Dir::Asks, &qid).unwrap().expect("asks/<id>.json");
+    assert_eq!(rec.state, "waiting");
+    assert_eq!(rec.meta["hash"], question_hash(PROJECT, None, QUESTION));
+    assert_ne!(
+        rec.meta["hash"],
+        question_hash(PROJECT, Some(PATH), QUESTION),
+        "the repo-level question is a different cache key"
+    );
+    assert_eq!(
+        payload(&rec).body,
+        Body::Question {
+            project: PROJECT.into(),
+            path: None,
+            question: QUESTION.into()
+        }
+    );
+    assert!(
+        !rec.raw.contains("\"path\""),
+        "omitted on the wire: {}",
+        rec.raw
+    );
+
+    // B spooled the very same bytes and prints `-` for the path.
+    let b_rec = b
+        .spool()
+        .get(Dir::Inbox, &qid)
+        .unwrap()
+        .expect("in B's inbox");
+    assert_eq!(b_rec.raw, rec.raw);
+    let show = owl(b.home(), b.home())
+        .args(["show", &qid])
+        .output()
+        .unwrap();
+    assert_eq!(show.status.code(), Some(0), "stderr: {}", stderr(&show));
+    let shown = stdout(&show);
+    assert!(shown.contains("\npath:     -\n"), "{shown}");
+    assert!(
+        shown.contains(&format!("\nproject:  {PROJECT}\n")),
+        "{shown}"
+    );
+    let shown: Value = serde_json::from_str(&stdout(
+        &owl(b.home(), b.home())
+            .args(["show", &qid, "--json"])
+            .output()
+            .unwrap(),
+    ))
+    .unwrap();
+    assert_eq!(shown["path"], "-");
+    assert_eq!(shown["payload"]["body"].get("path"), None);
+    let inbox = owl(b.home(), b.home())
+        .args(["inbox", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(inbox.status.code(), Some(0), "stderr: {}", stderr(&inbox));
+    let rows: Value = serde_json::from_str(&stdout(&inbox)).unwrap();
+    assert_eq!(rows[0]["id"], qid.as_str());
+    assert_eq!(rows[0]["path"], "-");
+
+    // Negative twin: the question itself is still required, nothing is sent.
+    let out = owl(home.path(), home.path())
+        .args(["ask", "Bea", "--project", PROJECT])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        stderr(&out).contains("missing <question>"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(
+        !stderr(&out).contains("missing <path>"),
+        "the path is not required any more: {}",
+        stderr(&out)
+    );
+    assert_eq!(ids(&spool, Dir::Asks), std::slice::from_ref(&qid));
+    // Positive twin: with a path the question still carries it.
+    let out = owl(home.path(), home.path())
+        .args(["ask", "Bea", PATH, "Why that file?", "--project", PROJECT])
+        .output()
+        .unwrap();
+    let qid2 = accepted_id(&out);
+    let rec2 = spool.get(Dir::Asks, &qid2).unwrap().unwrap();
+    assert_eq!(
+        payload(&rec2).body,
+        Body::Question {
+            project: PROJECT.into(),
+            path: Some(PATH.into()),
+            question: "Why that file?".into()
+        }
+    );
+    assert_eq!(
+        rec2.meta["hash"],
+        question_hash(PROJECT, Some(PATH), "Why that file?")
+    );
+    let show = owl(b.home(), b.home())
+        .args(["show", &qid2])
+        .output()
+        .unwrap();
+    assert!(
+        stdout(&show).contains(&format!("\npath:     {PATH}\n")),
+        "{}",
+        stdout(&show)
+    );
     b.running.shutdown();
 }
 
@@ -478,8 +603,8 @@ async fn cache_hit_skips_network() {
     let (a, b) = (id(1), id(2));
     let home = asker_home(&a, &b, &[&closed_port()]);
     let spool = Spool::new(home.path()).unwrap();
-    let hash = question_hash(PROJECT, PATH, QUESTION);
-    let q = Payload::question(&fp(&a), &fp(&b), PROJECT, PATH, QUESTION);
+    let hash = question_hash(PROJECT, Some(PATH), QUESTION);
+    let q = Payload::question(&fp(&a), &fp(&b), PROJECT, Some(PATH), QUESTION);
     let env = Envelope::sign(&Payload::answer(&q, "Cached answer.", "fake", 0, true), &b);
     spool.cache_put(&hash, &record(&env, "pending")).unwrap();
 
@@ -531,8 +656,8 @@ async fn cache_hit_skips_network() {
 #[test]
 fn corrupt_cache_entries_fall_through() {
     let (a, b) = (id(1), id(2));
-    let hash = question_hash(PROJECT, PATH, QUESTION);
-    let q = Payload::question(&fp(&a), &fp(&b), PROJECT, PATH, QUESTION);
+    let hash = question_hash(PROJECT, Some(PATH), QUESTION);
+    let q = Payload::question(&fp(&a), &fp(&b), PROJECT, Some(PATH), QUESTION);
     let question_env = Envelope::sign(&q, &a);
     let answer_env = Envelope::sign(&Payload::answer(&q, "Cached answer.", "fake", 0, true), &b);
     let mut junk_raw = record(&answer_env, "pending");
@@ -590,7 +715,7 @@ fn corrupt_cache_entries_fall_through() {
 #[test]
 fn unreadable_cache_entries_fall_through() {
     let (a, b) = (id(1), id(2));
-    let hash = question_hash(PROJECT, PATH, QUESTION);
+    let hash = question_hash(PROJECT, Some(PATH), QUESTION);
     for what in ["a directory", "bytes that are not a record"] {
         let home = asker_home(&a, &b, &[&closed_port()]);
         let spool = Spool::new(home.path()).unwrap();
@@ -637,8 +762,8 @@ async fn no_cache_sends_to_a_live_peer_despite_a_hit() {
     let b = spawn_daemon(2, true, &[Peer::new(&a, "Ana", manual())]).await;
     let home = asker_home(&a, &b.id, &[&b.addr.to_string()]);
     let spool = Spool::new(home.path()).unwrap();
-    let hash = question_hash(PROJECT, PATH, QUESTION);
-    let q = Payload::question(&fp(&a), &fp(&b.id), PROJECT, PATH, QUESTION);
+    let hash = question_hash(PROJECT, Some(PATH), QUESTION);
+    let q = Payload::question(&fp(&a), &fp(&b.id), PROJECT, Some(PATH), QUESTION);
     let env = Envelope::sign(
         &Payload::answer(&q, "Cached answer.", "fake", 0, true),
         &b.id,
@@ -789,7 +914,7 @@ async fn wait_returns_answer() {
     );
 
     let spool = Spool::new(home.path()).unwrap();
-    let hash = question_hash(PROJECT, PATH, QUESTION);
+    let hash = question_hash(PROJECT, Some(PATH), QUESTION);
     let inbox = spool
         .get(Dir::Inbox, &aid)
         .unwrap()
@@ -912,7 +1037,7 @@ fn assert_answered_via_wait(out: &Output, peer: &FakePeer, home: &Path) -> (Stri
     assert_eq!(inbox.state, "pending");
     assert_eq!(inbox.meta["in_reply_to"], qid);
     let cached = spool
-        .cache_get(&question_hash(PROJECT, PATH, QUESTION))
+        .cache_get(&question_hash(PROJECT, Some(PATH), QUESTION))
         .unwrap()
         .expect("cached");
     assert_eq!(cached.raw, inbox.raw);
@@ -1036,7 +1161,7 @@ async fn wait_times_out_with_exit_4_and_keeps_the_ask_waiting() {
 
     // An answer to a DIFFERENT question in B's outbox is not ours: still a timeout.
     let bs = b.spool();
-    let other_q = Payload::question(&fp(&a), &fp(&b.id), PROJECT, PATH, "other?");
+    let other_q = Payload::question(&fp(&a), &fp(&b.id), PROJECT, Some(PATH), "other?");
     let other = Envelope::sign(
         &Payload::answer(&other_q, "not yours", "fake", 0, false),
         &b.id,
@@ -1180,10 +1305,10 @@ async fn rate_limited_429_with_and_without_retry_after() {
 async fn answer_200_without_signature_header_is_a_clean_error() {
     let a = id(1);
     let b = id(2);
-    let hash = question_hash(PROJECT, PATH, QUESTION);
+    let hash = question_hash(PROJECT, Some(PATH), QUESTION);
     // The responder cache is shared across peers (§7): the 200 body may answer C's question.
     let c = id(3);
-    let earlier = Payload::question(&fp(&c), &fp(&b), PROJECT, PATH, QUESTION);
+    let earlier = Payload::question(&fp(&c), &fp(&b), PROJECT, Some(PATH), QUESTION);
     let ans = Payload::answer(&earlier, "From the responder cache.", "fake", 1, false);
     let env = Envelope::sign(&ans, &b);
 
@@ -1250,10 +1375,10 @@ async fn answer_200_without_signature_header_is_a_clean_error() {
 async fn answer_200_is_verified_stored_and_cached() {
     let a = id(1);
     let b = spawn_daemon(2, true, &[Peer::new(&a, "Ana", manual())]).await;
-    let hash = question_hash(PROJECT, PATH, QUESTION);
+    let hash = question_hash(PROJECT, Some(PATH), QUESTION);
     // B's responder cache holds the answer to an earlier, equivalent question from C.
     let c = id(3);
-    let earlier = Payload::question(&fp(&c), &fp(&b.id), PROJECT, PATH, QUESTION);
+    let earlier = Payload::question(&fp(&c), &fp(&b.id), PROJECT, Some(PATH), QUESTION);
     let ans = Payload::answer(&earlier, "From the responder cache.", "fake", 1, false);
     let env = Envelope::sign(&ans, &b.id);
     b.spool()
@@ -1562,7 +1687,7 @@ async fn file_with_peer_skips_blame_and_sends() {
         payload(&rec).body,
         Body::Question {
             project: PROJECT.into(),
-            path: "src/nowhere.rs".into(),
+            path: Some("src/nowhere.rs".into()),
             question: "Why?".into()
         }
     );

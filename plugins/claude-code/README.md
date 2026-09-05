@@ -7,7 +7,7 @@ The Claude Code harness adapter for owlpost (`docs/concept.md` "Harness adapters
 |---|---|---|
 | Hooks | `hooks/hooks.json`, `hooks/owl-count.sh` | On `SessionStart`, `UserPromptSubmit` and `PostToolUse` runs `owl inbox --count --format claude` (5 s timeout) and injects the unseen-question counter line. Silent no-op when `owl` is missing or fails. |
 | Skill | `skills/owlpost/SKILL.md` | When to ask a peer, how to run `owl ask`, how to react to the counter, the answer loop, the memory rule. |
-| Commands | `commands/inbox.md`, `commands/ask.md`, `commands/history.md`, `commands/me.md`, `commands/update.md`, `commands/add.md` | `/owlpost:inbox`, `/owlpost:ask <peer> <path> <question>`, `/owlpost:history`, `/owlpost:me`, `/owlpost:update`, `/owlpost:add <peer json|file>`. |
+| Commands | `commands/inbox.md`, `commands/ask.md`, `commands/history.md`, `commands/me.md`, `commands/update.md`, `commands/add.md` | `/owlpost:inbox`, `/owlpost:ask <peer> <path> <question>`, `/owlpost:history`, `/owlpost:me`, `/owlpost:update`, `/owlpost:add <peer json|file> [--local]`. |
 | Manifests | `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json` | Plugin metadata; a one-plugin marketplace so the directory can be added from a local path. |
 
 ## Requirements
@@ -15,7 +15,8 @@ The Claude Code harness adapter for owlpost (`docs/concept.md` "Harness adapters
 - `owl` on `PATH` (`cargo install --path .` from the repo root, or the release binary).
   The hook prints nothing when `owl` is not found, so the plugin loads without it but the
   counter stays silent.
-- An initialised home: `owl init`, then contacts via `owl add` / `owl allow`.
+- An initialised home: `owl init`, then contacts via `owl add <peer-file>` (global book;
+  `--local` for the repo's `.agents/peers/`) and `owl allow`.
 - The `owl daemon` running as a service so questions and answers actually flow:
   `owl install` registers the launchd/systemd unit (`owl install --dry-run` shows what it
   would write). Check with `owl doctor`.

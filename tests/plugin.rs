@@ -90,7 +90,7 @@ fn seed(home: &Path, me: &Identity, maciek: &Identity, n: usize, seen: bool) {
             seen,
             received_at: envelope::rfc3339_now(),
             draft: None,
-            meta: json!({ "peer": p.from, "hash": envelope::question_hash(project, path, question) }),
+            meta: json!({ "peer": p.from, "hash": envelope::question_hash(project, path.as_deref(), question) }),
         };
         spool.put(Dir::Inbox, &p.id, &rec).unwrap();
     }
@@ -282,8 +282,26 @@ fn commands_have_descriptions() {
         );
         assert!(!body.trim().is_empty(), "{rel}: empty body");
     }
-    let (_, ask) = frontmatter("commands/ask.md");
+    let (fm, ask) = frontmatter("commands/ask.md");
     assert!(ask.contains("$ARGUMENTS"), "ask.md must read $ARGUMENTS");
+    // OWL-018 AC4: the path is optional; both invocations are documented.
+    assert_eq!(
+        fm_value(&fm, "argument-hint"),
+        Some("\"<peer> [path] <question...>\"")
+    );
+    assert!(ask.contains("`<peer> [path] <question...>`"), "{ask}");
+    assert!(
+        ask.contains("`owl ask <peer> \"<question>\"`"),
+        "the no-path invocation: {ask}"
+    );
+    assert!(
+        ask.contains("`owl ask --file <path> --peer <peer> \"<question>\"`"),
+        "the with-path invocation: {ask}"
+    );
+    assert!(
+        !ask.contains("If any part is missing, ask the user"),
+        "must not demand a path: {ask}"
+    );
 }
 
 // ---------- AC5 helper ----------

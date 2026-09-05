@@ -39,7 +39,9 @@ pub enum Kind {
 pub enum Body {
     Question {
         project: String,
-        path: String,
+        /// Omitted on the wire when the question is about the repository as a whole.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
         question: String,
     },
     Answer {
@@ -52,7 +54,13 @@ pub enum Body {
 
 impl Payload {
     /// New question payload with a fresh UUIDv7 id and the current UTC timestamp.
-    pub fn question(from: &str, to: &str, project: &str, path: &str, question: &str) -> Payload {
+    pub fn question(
+        from: &str,
+        to: &str,
+        project: &str,
+        path: Option<&str>,
+        question: &str,
+    ) -> Payload {
         Payload {
             v: 1,
             id: uuid::Uuid::now_v7().to_string(),
@@ -63,7 +71,7 @@ impl Payload {
             in_reply_to: None,
             body: Body::Question {
                 project: project.into(),
-                path: path.into(),
+                path: path.map(str::to_string),
                 question: question.into(),
             },
         }
@@ -127,7 +135,10 @@ impl Envelope {
 }
 
 /// SHA-256 hex of `project\npath\nnorm(question)`; norm = trim, collapse whitespace, lowercase.
-pub fn question_hash(project: &str, path: &str, question: &str) -> String {
+/// A missing path hashes as the empty string, so a repo-level question never collides with the
+/// same question about a file.
+pub fn question_hash(project: &str, path: Option<&str>, question: &str) -> String {
+    let path = path.unwrap_or_default();
     let norm = question
         .split_whitespace()
         .collect::<Vec<_>>()
@@ -290,7 +301,7 @@ mod tests {
             in_reply_to: None,
             body: Body::Question {
                 project: "github.com/company/monorepo".into(),
-                path: "src/auth/session.rs".into(),
+                path: Some("src/auth/session.rs".into()),
                 question: "Why is the refresh token rotated on every read?".into(),
             },
         }
@@ -325,7 +336,7 @@ mod tests {
 
     #[test]
     fn question_constructor_fills_uuid_v7_and_timestamp() {
-        let p = Payload::question("owl:a", "owl:b", "proj", "p.rs", "why?");
+        let p = Payload::question("owl:a", "owl:b", "proj", Some("p.rs"), "why?");
         let u = uuid::Uuid::parse_str(&p.id).unwrap();
         assert_eq!(u.get_version_num(), 7);
         assert!(is_fresh(&p.ts, now_unix(), 5), "ts={}", p.ts);
@@ -391,9 +402,9 @@ mod tests {
 
     #[test]
     fn question_hash_normalises() {
-        let a = question_hash("p", "f", "  Why  X? ");
-        let b = question_hash("p", "f", "why x?");
-        let c = question_hash("p", "f", "why y?");
+        let a = question_hash("p", Some("f"), "  Why  X? ");
+        let b = question_hash("p", Some("f"), "why x?");
+        let c = question_hash("p", Some("f"), "why y?");
         assert_eq!(a, b);
         assert_ne!(a, c);
         assert_eq!(a.len(), 64);
@@ -402,17 +413,17 @@ mod tests {
                 .all(|ch| ch.is_ascii_hexdigit() && !ch.is_ascii_uppercase())
         );
         assert_ne!(
-            question_hash("p2", "f", "why x?"),
+            question_hash("p2", Some("f"), "why x?"),
             a,
             "project is part of the hash"
         );
         assert_ne!(
-            question_hash("p", "f2", "why x?"),
+            question_hash("p", Some("f2"), "why x?"),
             a,
             "path is part of the hash"
         );
         assert_eq!(
-            question_hash("p", "f", "why\tx?\n"),
+            question_hash("p", Some("f"), "why\tx?\n"),
             a,
             "all whitespace collapses"
         );
@@ -421,6 +432,55 @@ mod tests {
             a,
             "001767e04e6a17cd5059b7e8132c2b100099becb5f5e85cacef6cb69e73c5975"
         );
+    }
+
+    /// OWL-018 AC3: a repo-level question hashes as the empty path — stable, normalised the
+    /// same way, and never equal to the same question about a file.
+    #[test]
+    fn question_hash_without_path_is_stable_and_distinct() {
+        let none = question_hash("p", None, "why x?");
+        assert_eq!(none, question_hash("p", None, "  Why \tX? \n"));
+        assert_ne!(none, question_hash("p", Some("f"), "why x?"));
+        assert_ne!(none, question_hash("p2", None, "why x?"));
+        assert_eq!(
+            none,
+            question_hash("p", Some(""), "why x?"),
+            "None and the empty path are the same key"
+        );
+        // Pinned: SHA-256("p\n\nwhy x?")
+        assert_eq!(
+            none,
+            "a4ebf08f97de160963f99fec4925a88637f5bc246e2836b4d5754a86bbce1c08"
+        );
+    }
+
+    /// OWL-018: a question without a path omits the key on the wire, a payload without the
+    /// key parses as `None`, and an explicit `"path": null` parses the same way.
+    #[test]
+    fn question_without_path_omits_the_key_on_the_wire() {
+        let mut q = fixed_question();
+        q.body = Body::Question {
+            project: "github.com/company/monorepo".into(),
+            path: None,
+            question: "How long is your README?".into(),
+        };
+        let json = String::from_utf8(q.to_signed_bytes()).unwrap();
+        assert_eq!(
+            json,
+            r#"{"v":1,"id":"0191c7a0-0000-7000-8000-000000000000","type":"question","from":"owl:aaaaaaaaaaaaaaaa","to":"owl:bbbbbbbbbbbbbbbb","ts":"2026-09-01T10:00:00Z","in_reply_to":null,"body":{"project":"github.com/company/monorepo","question":"How long is your README?"}}"#
+        );
+        let back: Payload = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, q);
+        let with_null = json.replace(
+            r#""project":"github.com/company/monorepo","#,
+            r#""project":"github.com/company/monorepo","path":null,"#,
+        );
+        assert_ne!(with_null, json);
+        let back: Payload = serde_json::from_str(&with_null).unwrap();
+        assert_eq!(back, q);
+        // The constructor threads `None` through unchanged.
+        let p = Payload::question("owl:a", "owl:b", "proj", None, "why?");
+        assert!(matches!(p.body, Body::Question { path: None, .. }), "{p:?}");
     }
 
     #[test]
