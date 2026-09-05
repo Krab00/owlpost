@@ -14,6 +14,7 @@ pub mod inbox;
 pub mod install;
 pub mod reject;
 pub mod send;
+pub mod setup;
 pub mod show;
 pub mod update;
 pub mod watch;

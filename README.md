@@ -16,6 +16,7 @@ Works across harnesses: Claude Code first, Codex / Kimi Code / opencode next.
 - [Architecture](docs/architecture.md) — components, flows, trust model, protocol
 - [Technical design](docs/technical-design.md) — crate layout, data formats, CLI and HTTP contracts, testing
 - [Plan](docs/plan.md) — milestones and the task backlog driven by `/orch`
+- [User guide](docs/guide.md) — every command end to end, `owl` and `/owlpost:` side by side
 
 Status: pre-alpha, private. Rust, single static binary `owl`.
 
@@ -30,6 +31,9 @@ person and repository, 6–7 whenever you like.
    ```
    curl -fsSL https://raw.githubusercontent.com/Krab00/owlpost/main/scripts/install.sh | sh
    ```
+
+   Then `owl setup --name "Your Name" --email you@company.com` does steps 2–3 and installs the
+   Claude Code plugin in one go (`--dry-run` lists the steps); or step by step:
 
 2. **`owl init`** — creates your key and config under `~/.config/owlpost` and prints your fingerprint
    (`owl init --name "Your Name" --email you@company.com`).

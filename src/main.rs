@@ -130,6 +130,18 @@ enum Cmd {
     Uninstall,
     /// Check key, config, endpoints, harnesses, daemon
     Doctor,
+    /// One-shot first install: init (if no key), install the daemon, install the Claude Code plugin
+    Setup {
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        email: Vec<String>,
+        /// Marketplace source for `claude plugin marketplace add` (a local plugin dir or owner/repo)
+        #[arg(long, value_name = "DIR|REPO")]
+        plugin_source: Option<String>,
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Update the owl binary, restart the daemon, reinstall the Claude Code plugin
     Update {
         /// Build from this checkout with `cargo install` instead of downloading a release
@@ -161,28 +173,6 @@ enum ContactCmd {
         #[arg(long)]
         local: bool,
     },
-}
-
-fn init(home: &Path, name: Option<String>, emails: Vec<String>) -> anyhow::Result<()> {
-    // Check the key BEFORE touching config so a refused init leaves the home untouched.
-    if home.join("key").exists() {
-        anyhow::bail!(
-            "key already exists at {} — refusing to overwrite",
-            home.join("key").display()
-        );
-    }
-    let mut cfg = config::Config::load(home)?;
-    if let Some(n) = name {
-        cfg.name = n;
-    }
-    if !emails.is_empty() {
-        cfg.emails = emails;
-    }
-    cfg.save(home)?;
-    let id = identity::Identity::generate();
-    id.save(home)?;
-    println!("{}", identity::fingerprint(&id.verifying_key()));
-    Ok(())
 }
 
 fn whoami(home: &Path, json: bool) -> anyhow::Result<()> {
@@ -309,7 +299,7 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     let home = config::home_dir(cli.home.as_deref());
     let result = match cli.cmd {
-        Cmd::Init { name, email } => init(&home, name, email),
+        Cmd::Init { name, email } => cli::setup::init(&home, name, email),
         Cmd::Whoami => whoami(&home, cli.json),
         Cmd::Contact { cmd } => contact(&home, cmd, cli.json),
         Cmd::Add { source, local } => cli::add::run(&home, &source, local),
@@ -360,6 +350,20 @@ fn main() -> ExitCode {
         Cmd::Install { dry_run } => cli::install::install(&home, dry_run),
         Cmd::Uninstall => cli::install::uninstall(),
         Cmd::Doctor => cli::doctor::run(&home, cli.json),
+        Cmd::Setup {
+            name,
+            email,
+            plugin_source,
+            dry_run,
+        } => cli::setup::run_setup(
+            &home,
+            cli::setup::Opts {
+                name,
+                emails: email,
+                plugin_source,
+                dry_run,
+            },
+        ),
         Cmd::Update { source, dry_run } => {
             cli::update::run_update(&home, source.as_deref(), dry_run)
         }
