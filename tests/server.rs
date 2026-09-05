@@ -514,6 +514,13 @@ async fn bad_inputs_are_4xx_never_500() {
         matches!(spooled.body, Body::Question { path: None, .. }),
         "{spooled:?}"
     );
+    assert_eq!(
+        rec.meta["hash"],
+        question_hash(PROJECT, None, "why?"),
+        "spooled under the None-path hash"
+    );
+    assert_ne!(rec.meta["hash"], question_hash(PROJECT, Some(PATH), "why?"));
+    assert_ne!(rec.meta["hash"], question_hash(PROJECT, Some("-"), "why?"));
     // Only the three accepted questions ever reached the spool.
     assert_eq!(inbox_ids(&b).len(), 3);
     // Bad ack ids are 404, not 500.
@@ -715,6 +722,33 @@ async fn cache_hit_returns_answer() {
     let resp = post_envelope(&cl, &b, &signed(&a, &b.id, "something else?")).await;
     assert_eq!(resp.status(), 202);
     assert_eq!(inbox_ids(&b).len(), 1);
+
+    // OWL-018: a repo-level question hits the cache only under the None-path hash; the same
+    // words about a file are a different key and get spooled.
+    let repo_text = "How long is your README?";
+    let repo_q = Payload::question(&fp(&a), &b.fp(), PROJECT, None, repo_text);
+    let repo_ans = Payload::answer(&repo_q, "About 80 lines.", "fake", 0, false);
+    let repo_env = Envelope::sign(&repo_ans, &b.id);
+    b.spool()
+        .cache_put(
+            &question_hash(PROJECT, None, repo_text),
+            &record(&repo_env.raw, &repo_env.sig, "cached"),
+        )
+        .unwrap();
+    let ask = Envelope::sign(
+        &Payload::question(&fp(&a), &b.fp(), PROJECT, None, repo_text),
+        &a,
+    );
+    let resp = post_envelope(&cl, &b, &ask).await;
+    assert_eq!(resp.status(), 200, "None-path hash hit");
+    assert_eq!(resp.text().await.unwrap(), repo_env.raw);
+    let twin = Envelope::sign(
+        &Payload::question(&fp(&a), &b.fp(), PROJECT, Some(PATH), repo_text),
+        &a,
+    );
+    let resp = post_envelope(&cl, &b, &twin).await;
+    assert_eq!(resp.status(), 202, "the with-path twin is a different key");
+    assert_eq!(inbox_ids(&b).len(), 2);
     b.running.shutdown();
 
     // Policy is checked before the cache (architecture §3.2). Same cached hash, four peers:
