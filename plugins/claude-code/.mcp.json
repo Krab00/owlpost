@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "owl": {
+      "type": "stdio",
+      "command": "owl",
+      "args": ["mcp"]
+    }
+  }
+}
