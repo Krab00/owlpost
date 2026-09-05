@@ -22,8 +22,8 @@ const CLAUDE_TWO: &str = r#"{"hookSpecificOutput":{"hookEventName":"UserPromptSu
 const EVENTS: [&str; 3] = ["SessionStart", "UserPromptSubmit", "PostToolUse"];
 /// OWL-023 AC1 literals: the arm sentence, alone and after the two-question counter.
 const ARM: &str = "owlpost: arm the inbox watch (see /owlpost:watch)";
-const CLAUDE_ARM_ZERO: &str = r#"{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"owlpost: arm the inbox watch (see /owlpost:watch)"}}"#;
-const CLAUDE_ARM_TWO: &str = r#"{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"owlpost: 2 new questions (Maciek 2). Say \"show owlpost inbox\" or run `owl inbox`. owlpost: arm the inbox watch (see /owlpost:watch)"}}"#;
+const CLAUDE_ARM_ZERO: &str = r#"{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"owlpost: arm the inbox watch (see /owlpost:watch)"}}"#;
+const CLAUDE_ARM_TWO: &str = r#"{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"owlpost: 2 new questions (Maciek 2). Say \"show owlpost inbox\" or run `owl inbox`. owlpost: arm the inbox watch (see /owlpost:watch)"}}"#;
 
 fn plugin(rel: &str) -> PathBuf {
     Path::new(PLUGIN).join(rel)
@@ -191,14 +191,22 @@ fn hook_script_forwards_session_start_and_reads_plugin_json() {
     let empty = home_with(0, false);
     assert_silent(&run_hook(owl, empty.path()), "0 records, no flag");
     assert_eq!(
-        stdout(run_hook_args(owl, empty.path(), &["--session-start"])),
+        stdout(run_hook_args(
+            owl,
+            empty.path(),
+            &["--hook-event", "SessionStart", "--session-start"]
+        )),
         format!("{CLAUDE_ARM_ZERO}\n")
     );
     // 2 unseen: counter alone on the plain hooks, counter + arm at session start.
     let two = home_with(2, false);
     assert_eq!(stdout(run_hook(owl, two.path())), format!("{CLAUDE_TWO}\n"));
     assert_eq!(
-        stdout(run_hook_args(owl, two.path(), &["--session-start"])),
+        stdout(run_hook_args(
+            owl,
+            two.path(),
+            &["--hook-event", "SessionStart", "--session-start"]
+        )),
         format!("{CLAUDE_ARM_TWO}\n")
     );
     let spool = Spool::new(two.path()).unwrap();
@@ -209,37 +217,64 @@ fn hook_script_forwards_session_start_and_reads_plugin_json() {
         std::fs::write(home.path().join("plugin.json"), r#"{"watch": false}"#).unwrap();
     }
     assert_eq!(
-        stdout(run_hook_args(owl, two.path(), &["--session-start"])),
-        format!("{CLAUDE_TWO}\n")
+        stdout(run_hook_args(
+            owl,
+            two.path(),
+            &["--hook-event", "SessionStart", "--session-start"]
+        )),
+        format!(
+            "{}\n",
+            CLAUDE_TWO.replace("UserPromptSubmit", "SessionStart")
+        )
     );
     assert_silent(
-        &run_hook_args(owl, empty.path(), &["--session-start"]),
+        &run_hook_args(
+            owl,
+            empty.path(),
+            &["--hook-event", "SessionStart", "--session-start"],
+        ),
         "watch off, 0 records",
     );
     // `{"watch": true}` restores the arm sentence.
     std::fs::write(empty.path().join("plugin.json"), r#"{"watch": true}"#).unwrap();
     assert_eq!(
-        stdout(run_hook_args(owl, empty.path(), &["--session-start"])),
+        stdout(run_hook_args(
+            owl,
+            empty.path(),
+            &["--hook-event", "SessionStart", "--session-start"]
+        )),
         format!("{CLAUDE_ARM_ZERO}\n")
     );
     // The script stays a no-op with the flag when owl is missing or fails.
     let without_owl = path_dir(false);
     assert_silent(
-        &run_hook_args(without_owl.path(), empty.path(), &["--session-start"]),
+        &run_hook_args(
+            without_owl.path(),
+            empty.path(),
+            &["--hook-event", "SessionStart", "--session-start"],
+        ),
         "no owl on PATH",
     );
     let file = tempfile::tempdir().unwrap();
     let file = file.path().join("home");
     std::fs::write(&file, b"").unwrap();
     assert_silent(
-        &run_hook_args(owl, &file, &["--session-start"]),
+        &run_hook_args(
+            owl,
+            &file,
+            &["--hook-event", "SessionStart", "--session-start"],
+        ),
         "owl failing",
     );
     // An uninitialised home (no key, no config) counts 0 without failing, so the arm line
     // still goes out: arming is gated on the stored choice only, not on `owl init`.
     let dir = tempfile::tempdir().unwrap();
     assert_eq!(
-        stdout(run_hook_args(owl, dir.path(), &["--session-start"])),
+        stdout(run_hook_args(
+            owl,
+            dir.path(),
+            &["--hook-event", "SessionStart", "--session-start"]
+        )),
         format!("{CLAUDE_ARM_ZERO}\n")
     );
 }
@@ -300,10 +335,13 @@ fn manifests_parse_and_register_hooks() {
         assert_eq!(cmds.len(), 1, "{event}: one command hook");
         assert_eq!(cmds[0]["type"], "command", "{event}");
         // OWL-023 AC2: `--session-start` on SessionStart only.
-        let expected = if event == "SessionStart" {
-            "${CLAUDE_PLUGIN_ROOT}/hooks/owl-count.sh --session-start"
-        } else {
-            "${CLAUDE_PLUGIN_ROOT}/hooks/owl-count.sh"
+        // The line's hookEventName must match the event or Claude Code rejects the hook output.
+        let expected = match event {
+            "SessionStart" => {
+                "${CLAUDE_PLUGIN_ROOT}/hooks/owl-count.sh --hook-event SessionStart --session-start"
+            }
+            "PostToolUse" => "${CLAUDE_PLUGIN_ROOT}/hooks/owl-count.sh --hook-event PostToolUse",
+            _ => "${CLAUDE_PLUGIN_ROOT}/hooks/owl-count.sh",
         };
         assert_eq!(cmds[0]["command"], expected, "{event}");
         assert_eq!(cmds[0]["timeout"], 5, "{event}: 5 s timeout");
