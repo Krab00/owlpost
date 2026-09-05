@@ -7,14 +7,14 @@ The Claude Code harness adapter for owlpost (`docs/concept.md` "Harness adapters
 |---|---|---|
 | Hooks | `hooks/hooks.json`, `hooks/owl-count.sh` | On `SessionStart`, `UserPromptSubmit` and `PostToolUse` runs `owl inbox --count --format claude` (5 s timeout) and injects the unseen-question counter line. Silent no-op when `owl` is missing or fails. |
 | Skill | `skills/owlpost/SKILL.md` | When to ask a peer, how to run `owl ask`, the mentioned contact, how to react to the counter, the answer loop, the memory rule. |
-| MCP server | `.mcp.json` | Starts `owl mcp` (stdio) so every contact is an `@owl:to://…` resource in the `@` typeahead; see "Mention a contact" below. |
+| MCP server | `owl mcp`, registered at user scope by `owl setup` / `owl update` | Serves every contact as an `@owl:to://…` resource in the `@` typeahead (stdio); see "Mention a contact" below. |
 | Commands | `commands/<name>.md`, one per `owl` subcommand (all except `daemon`) | `/owlpost:<name>` runs `owl <name>` with the arguments and offers the next step; see the table below. |
 | Manifests | `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json` | Plugin metadata; a one-plugin marketplace so the directory can be added from a local path. |
 
 ## Commands
 
 Every `owl` subcommand except `daemon` (a service: `install`, `uninstall` and `doctor`
-cover it) and `mcp` (started by `.mcp.json`, not by hand) is one `commands/<name>.md`. Each is a thin wrapper: run the command with the
+cover it) and `mcp` (started by Claude Code, not by hand) is one `commands/<name>.md`. Each is a thin wrapper: run the command with the
 arguments, show the output, offer the natural next step. `send`, `allow`, `deny`, `reject`
 and `uninstall` ask for one explicit confirmation with `AskUserQuestion` before running.
 `allowed-tools` in each file is limited to its own `owl <sub>:*` pattern (plus the `owl`
@@ -48,13 +48,21 @@ patterns of the next steps a file runs itself); `tests/plugin.rs` pins the rule.
 
 ## Mention a contact
 
-Type `@` and the contact's name in the prompt: the `owl` MCP server lists every contact of
-the merged book as a resource `to://<name-slug>.<email>`, so the typeahead offers
-`owl:to://ana-kowalska.ana@acme.pl` next to the files. Pick it and type the question, for
+Type `@owl:` and the start of the contact's name (or e-mail, or domain) in the prompt, for
+example `@owl:krz`: the `owl` MCP server lists every contact of the merged book as a
+resource `to://<name-slug>.<email>`, so the typeahead ranks `owl:to://krzysztof-…` near the
+top; `@owl:` alone lists the whole book. Pick with the arrows and type the question, for
 example `@owl:to://ana-kowalska.ana@acme.pl src/auth/session.rs why does this retry?`; the
-skill runs `owl ask --peer <fingerprint>` at once, the mention is the approval. `.mcp.json`
-at the plugin root starts `owl mcp` over stdio (it needs `owl` on `PATH`, like the hooks);
-the server is resources-only, so it adds no tools to the model context.
+skill runs `owl ask --peer <fingerprint>` at once, the mention is the approval. (`@krz`
+without the `owl:` prefix never beats files and connectors: that ranking is Claude Code's.)
+
+The server is registered in Claude Code at user scope by `owl setup` and `owl update`
+(idempotent: `mcp server owl already registered` when it is there), or by hand with
+`claude mcp add --scope user owl -- owl mcp`. It runs `owl mcp` over stdio, so it needs
+`owl` on `PATH` like the hooks; it is resources-only and adds no tools to the model
+context. `owl doctor` reports it as the `mcp` check (`warn` with the `claude mcp add` line
+when it is missing). The plugin bundles no server of its own: one bundled through a plugin
+is named `plugin:owlpost:owl`, and that prefix sinks the contacts in the typeahead ranking.
 
 ## Requirements
 
@@ -69,7 +77,8 @@ the server is resources-only, so it adds no tools to the model context.
 
 ## Install
 
-In one go (also creates the identity and installs the daemon): `owl setup`, or
+In one go (also creates the identity, installs the daemon and registers the `owl` MCP
+server): `owl setup`, or
 `owl setup --plugin-source /absolute/path/to/owlpost/plugins/claude-code` from a checkout.
 
 By hand from a local checkout:

@@ -1,6 +1,7 @@
 //! AC5: `owl doctor` prints one line per check and exits 0 with a running daemon, exits 1 with
 //! `fail` on the daemon line once the daemon is stopped. The pull line reads the pull loop's
-//! `daemon.status` (OWL-008).
+//! `daemon.status` (OWL-008). The mcp line (OWL-025) asks a fake `claude` on a PATH of its
+//! own whether the `owl` server is registered; it warns, never fails.
 
 mod common;
 
@@ -11,7 +12,9 @@ use owlpost::daemon;
 use owlpost::envelope::{now_unix, unix_to_rfc3339};
 use owlpost::pull::{self, PullStatus, STATUS_FILE};
 
-use common::{spawn_daemon_with, write_contact};
+use common::{fake_claude, spawn_daemon_with, write_contact};
+
+const MCP_ADD: &str = "claude mcp add --scope user owl -- owl mcp";
 
 /// The pull loop's first tick runs right after spawn; bounded wait (≤ 5 s) for its status file.
 fn wait_for_status(home: &Path) {
@@ -25,9 +28,13 @@ fn wait_for_status(home: &Path) {
     }
 }
 
-fn owl(home: &Path) -> Command {
+/// `owl doctor` with `PATH` = exactly `bin` (a `fake_claude` dir, or an empty one).
+fn owl_on(home: &Path, bin: &Path) -> Command {
     let mut c = Command::new(env!("CARGO_BIN_EXE_owl"));
-    c.env_remove("OWLPOST_HOME").arg("--home").arg(home);
+    c.env_remove("OWLPOST_HOME")
+        .env("PATH", bin)
+        .arg("--home")
+        .arg(home);
     c
 }
 
@@ -77,6 +84,9 @@ fn config_for_doctor(cfg: &mut owlpost::config::Config) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn doctor_reports_each_check() {
+    // A fake `claude` reporting the `owl` MCP server as registered, on a PATH of its own.
+    let fake = tempfile::tempdir().unwrap();
+    let (bin, _) = fake_claude(fake.path(), 0);
     // A local relay (never n0's) so the iroh line is the connected `ok` form.
     let (relay_url, _relay) = common::relay().await;
     let d = spawn_daemon_with(1, &[], |cfg| {
@@ -88,7 +98,7 @@ async fn doctor_reports_each_check() {
     daemon::write_addr_file(d.home(), d.addr).unwrap();
     wait_for_status(d.home());
 
-    let out = owl(d.home()).arg("doctor").output().unwrap();
+    let out = owl_on(d.home(), &bin).arg("doctor").output().unwrap();
     let (stdout, stderr) = text(&out);
     assert_eq!(
         out.status.code(),
@@ -102,6 +112,7 @@ async fn doctor_reports_each_check() {
             ("ok", "config"),
             ("ok", "endpoints"),
             ("ok", "harness"),
+            ("ok", "mcp"),
             ("ok", "daemon"),
             ("ok", "iroh"),
             ("ok", "pull"),
@@ -110,6 +121,12 @@ async fn doctor_reports_each_check() {
         "{stdout}"
     );
     assert!(line(&stdout, "key").contains(&d.fp()), "{stdout}");
+    // OWL-025 AC4: the mcp line, verbatim, with the fake `claude mcp get owl` exiting 0.
+    assert_eq!(
+        line(&stdout, "mcp"),
+        "ok   mcp: owl registered in Claude Code (user scope)",
+        "{stdout}"
+    );
     // AC6: the connected iroh line, verbatim: iroh's short id (hex of the first five key
     // bytes) and the relay URL the daemon reported in its card.
     let short: String = d.id.verifying_key().as_bytes()[..5]
@@ -148,9 +165,60 @@ async fn doctor_reports_each_check() {
     );
     assert!(stderr.is_empty(), "{stderr}");
 
+    // OWL-025 AC4: `claude mcp get owl` exits 1 → warn ending with the fix; no `claude` on
+    // PATH → `warn mcp: claude not on PATH`. Neither is a failure: exit stays 0, and --json
+    // carries the same check.
+    let missing = tempfile::tempdir().unwrap();
+    let (missing_bin, log) = fake_claude(missing.path(), 1);
+    let out = owl_on(d.home(), &missing_bin)
+        .arg("doctor")
+        .output()
+        .unwrap();
+    let (stdout, stderr) = text(&out);
+    assert_eq!(out.status.code(), Some(0), "{stdout}\n{stderr}");
+    assert!(line(&stdout, "mcp").starts_with("warn mcp: "), "{stdout}");
+    assert!(line(&stdout, "mcp").ends_with(MCP_ADD), "{stdout}");
+    assert_eq!(
+        common::fake_calls(&log),
+        ["claude mcp get owl"],
+        "doctor only asks, never registers"
+    );
+    let out = owl_on(d.home(), &missing_bin)
+        .args(["--json", "doctor"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    let json: serde_json::Value = serde_json::from_str(&text(&out).0).unwrap();
+    let mcp = json
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c.get("check").and_then(|v| v.as_str()) == Some("mcp"))
+        .expect("mcp check in --json");
+    assert_eq!(mcp.get("status").and_then(|v| v.as_str()), Some("warn"));
+    assert!(
+        mcp.get("detail")
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| s.ends_with(MCP_ADD)),
+        "{mcp}"
+    );
+    let empty = tempfile::tempdir().unwrap();
+    let out = owl_on(d.home(), empty.path())
+        .arg("doctor")
+        .output()
+        .unwrap();
+    let (stdout, _) = text(&out);
+    assert_eq!(out.status.code(), Some(0), "{stdout}");
+    assert_eq!(
+        line(&stdout, "mcp"),
+        "warn mcp: claude not on PATH",
+        "{stdout}"
+    );
+    assert_eq!(heads(&stdout)[4], ("warn".to_string(), "mcp".to_string()));
+
     // Without the status file the last line is a warning, not a failure (exit 0).
     std::fs::remove_file(d.home().join(STATUS_FILE)).unwrap();
-    let out = owl(d.home()).arg("doctor").output().unwrap();
+    let out = owl_on(d.home(), &bin).arg("doctor").output().unwrap();
     let (stdout, _) = text(&out);
     assert_eq!(out.status.code(), Some(0));
     assert!(
@@ -169,7 +237,7 @@ async fn doctor_reports_each_check() {
         },
     )
     .unwrap();
-    let out = owl(d.home()).arg("doctor").output().unwrap();
+    let out = owl_on(d.home(), &bin).arg("doctor").output().unwrap();
     // The age is measured at print time, so a slow runner may read 12s or more: pin the
     // prefix, the counters and a tolerant age window instead of the exact second.
     let (stdout, _) = text(&out);
@@ -179,7 +247,7 @@ async fn doctor_reports_each_check() {
     let mut cfg = owlpost::config::Config::load(d.home()).unwrap();
     cfg.pull_interval_secs = 5;
     cfg.save(d.home()).unwrap();
-    let out = owl(d.home()).arg("doctor").output().unwrap();
+    let out = owl_on(d.home(), &bin).arg("doctor").output().unwrap();
     let (stdout, _) = text(&out);
     assert_eq!(
         out.status.code(),
@@ -194,7 +262,10 @@ async fn doctor_reports_each_check() {
     cfg.save(d.home()).unwrap();
 
     // --json: one object per check with the same content.
-    let out = owl(d.home()).args(["--json", "doctor"]).output().unwrap();
+    let out = owl_on(d.home(), &bin)
+        .args(["--json", "doctor"])
+        .output()
+        .unwrap();
     assert_eq!(out.status.code(), Some(0));
     let json: serde_json::Value = serde_json::from_str(&text(&out).0).unwrap();
     let arr = json.as_array().expect("array");
@@ -209,6 +280,7 @@ async fn doctor_reports_each_check() {
             "config",
             "endpoints",
             "harness",
+            "mcp",
             "daemon",
             "iroh",
             "pull"
@@ -216,10 +288,11 @@ async fn doctor_reports_each_check() {
     );
     assert!(
         arr.iter()
-            .all(|c| c.get("status").and_then(|v| v.as_str()) == Some("ok"))
+            .all(|c| c.get("status").and_then(|v| v.as_str()) == Some("ok")),
+        "{json}"
     );
     assert!(
-        arr[4]
+        arr[5]
             .get("detail")
             .and_then(|v| v.as_str())
             .is_some_and(|s| s.contains("reachable")),
@@ -232,7 +305,7 @@ async fn doctor_reports_each_check() {
     let common::TestDaemon { dir, running, .. } = d;
     running.wait().await.unwrap();
     let home = dir.path();
-    let out = owl(home).arg("doctor").output().unwrap();
+    let out = owl_on(home, &bin).arg("doctor").output().unwrap();
     let (stdout, stderr) = text(&out);
     assert_eq!(
         out.status.code(),
@@ -246,6 +319,7 @@ async fn doctor_reports_each_check() {
             ("ok", "config"),
             ("ok", "endpoints"),
             ("ok", "harness"),
+            ("ok", "mcp"),
             ("fail", "daemon"),
             ("warn", "iroh"),
             ("ok", "pull"),
@@ -263,11 +337,14 @@ async fn doctor_reports_each_check() {
     );
     assert!(stderr.contains("1 check(s) failed"), "{stderr}");
     // --json carries the failure too, still exit 1.
-    let out = owl(home).args(["--json", "doctor"]).output().unwrap();
+    let out = owl_on(home, &bin)
+        .args(["--json", "doctor"])
+        .output()
+        .unwrap();
     assert_eq!(out.status.code(), Some(1));
     let json: serde_json::Value = serde_json::from_str(&text(&out).0).unwrap();
     assert_eq!(
-        json.get(4)
+        json.get(5)
             .and_then(|c| c.get("status"))
             .and_then(|v| v.as_str()),
         Some("fail")
@@ -275,18 +352,21 @@ async fn doctor_reports_each_check() {
 
     // No daemon.addr at all: fail names the missing file.
     std::fs::remove_file(home.join("daemon.addr")).unwrap();
-    let out = owl(home).arg("doctor").output().unwrap();
+    let out = owl_on(home, &bin).arg("doctor").output().unwrap();
     assert_eq!(out.status.code(), Some(1));
     assert!(line(&text(&out).0, "daemon").contains("daemon.addr missing"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn doctor_fails_on_foreign_daemon_and_missing_pieces() {
+    // A fake `claude` reporting the `owl` MCP server as registered, on a PATH of its own.
+    let fake = tempfile::tempdir().unwrap();
+    let (bin, _) = fake_claude(fake.path(), 0);
     // daemon.addr points at somebody else's daemon: reachable, but not ours (pin mismatch).
     let mine = spawn_daemon_with(1, &[], config_for_doctor).await;
     let other = spawn_daemon_with(2, &[], config_for_doctor).await;
     daemon::write_addr_file(mine.home(), other.addr).unwrap();
-    let out = owl(mine.home()).arg("doctor").output().unwrap();
+    let out = owl_on(mine.home(), &bin).arg("doctor").output().unwrap();
     let (stdout, _) = text(&out);
     assert_eq!(out.status.code(), Some(1), "{stdout}");
     let daemon_line = line(&stdout, "daemon");
@@ -301,7 +381,7 @@ async fn doctor_fails_on_foreign_daemon_and_missing_pieces() {
     // harness lines for the default set, daemon fails, iroh unknown, pull warns — and the
     // harness line for `fake` still resolves.
     let empty = tempfile::tempdir().unwrap();
-    let out = owl(empty.path()).arg("doctor").output().unwrap();
+    let out = owl_on(empty.path(), &bin).arg("doctor").output().unwrap();
     let (stdout, _) = text(&out);
     assert_eq!(out.status.code(), Some(1), "{stdout}");
     assert!(line(&stdout, "key").starts_with("fail"), "{stdout}");
@@ -327,7 +407,7 @@ async fn doctor_fails_on_foreign_daemon_and_missing_pieces() {
     // Broken config → fail on the config line; an unresolvable endpoint → fail.
     let broken = tempfile::tempdir().unwrap();
     std::fs::write(broken.path().join("config.json"), "{nope").unwrap();
-    let out = owl(broken.path()).arg("doctor").output().unwrap();
+    let out = owl_on(broken.path(), &bin).arg("doctor").output().unwrap();
     let (stdout, _) = text(&out);
     assert!(line(&stdout, "config").starts_with("fail"), "{stdout}");
     assert!(line(&stdout, "config").contains("parsing"), "{stdout}");
@@ -336,7 +416,7 @@ async fn doctor_fails_on_foreign_daemon_and_missing_pieces() {
     cfg.endpoints = vec!["noport".into()];
     cfg.save(broken.path()).unwrap();
     write_contact(broken.path(), &common::Peer::new(&common::id(3), "X", None));
-    let out = owl(broken.path()).arg("doctor").output().unwrap();
+    let out = owl_on(broken.path(), &bin).arg("doctor").output().unwrap();
     let (stdout, _) = text(&out);
     assert!(line(&stdout, "config").starts_with("ok"), "{stdout}");
     assert!(

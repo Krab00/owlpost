@@ -297,8 +297,8 @@ unavailable, `3` rate limited, `4` nothing to do (e.g. `watch` timeout).
 | `owl watch [--id <id>] [--timeout <secs>]` | block until a matching inbox record arrives; exit 4 on timeout |
 | `owl daemon [--foreground]` | run the listener + loops |
 | `owl install \| uninstall` | launchd plist (`~/Library/LaunchAgents/dev.owlpost.owl.plist`) or systemd user unit; start/stop |
-| `owl mcp` | MCP server over stdio (JSON-RPC 2.0, one object per line): the merged contact book as resources only (no tools, no prompts), one per contact, URI `to://<name-slug>.<first e-mail>` (`to://<name-slug>` without e-mail, `.<fingerprint without owl:>` appended on a collision), `resources/read` → `{"name","fingerprint","emails"}`; the book is re-read per request; started by the Claude Code plugin's `.mcp.json` for `@owl:to://…` mentions |
-| `owl doctor` | check key, config, endpoints resolve (`ok endpoints: none configured (peers reach this daemon over iroh)` when empty), harness binaries present, daemon reachable, iroh (`ok iroh: <id short>, relay <url>` when the card reports a connected relay, `warn iroh: bound, no relay` when it does not, `warn iroh: unknown (daemon unreachable)` without a card) |
+| `owl mcp` | MCP server over stdio (JSON-RPC 2.0, one object per line): the merged contact book as resources only (no tools, no prompts), one per contact, URI `to://<name-slug>.<first e-mail>` (`to://<name-slug>` without e-mail, `.<fingerprint without owl:>` appended on a collision), `resources/read` → `{"name","fingerprint","emails"}`; the book is re-read per request; registered in Claude Code at user scope by `owl setup` / `owl update` (`claude mcp add --scope user owl -- owl mcp`, skipped with `mcp server owl already registered` when `claude mcp get owl` succeeds) for `@owl:to://…` mentions, checked by `owl doctor` |
+| `owl doctor` | check key, config, endpoints resolve (`ok endpoints: none configured (peers reach this daemon over iroh)` when empty), harness binaries present, daemon reachable, iroh (`ok iroh: <id short>, relay <url>` when the card reports a connected relay, `warn iroh: bound, no relay` when it does not, `warn iroh: unknown (daemon unreachable)` without a card), mcp (`ok mcp: owl registered in Claude Code (user scope)` when `claude mcp get owl` exits 0, `warn mcp: claude not on PATH`, else `warn` ending with the fix `claude mcp add --scope user owl -- owl mcp`; never `fail`) |
 
 Hook injection formats for `owl inbox --count --format …` (exact):
 
@@ -356,6 +356,14 @@ Answer in at most 300 words.
 - Text never includes the question body — only "<name> asks about <path>" or "answer from <name>".
 - `owl install` writes the launchd plist / systemd unit running `owl daemon` with the current
   home, loads it, and prints the status. `--dry-run` prints the unit instead.
+- `owl setup` (init if needed, `owl install`, the Claude Code plugin) and `owl update`
+  (binary, daemon, plugin reinstall) end, when `claude` is on PATH, with the user-scope
+  registration of the MCP server: `claude mcp add --scope user owl -- owl mcp` when
+  `claude mcp get owl` fails, `mcp server owl already registered` when it succeeds; `--dry-run`
+  prints `would run: claude mcp add --scope user owl -- owl mcp` (or the already-registered
+  line) after the `would run: claude plugin …` lines. The plugin bundles no server of its
+  own: a plugin-bundled server is named `plugin:owlpost:owl`, which sinks the contacts in
+  the `@` typeahead. `owl doctor` reports the registration as the `mcp` check (§9).
 
 Release and install (OWL-015): `.github/workflows/release.yml` runs on a `v*` tag (the tag must
 equal the Cargo.toml version) and on `workflow_dispatch` as a dry run. It builds `owl` for

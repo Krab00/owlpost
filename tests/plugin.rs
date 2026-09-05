@@ -530,7 +530,7 @@ fn wrapped_subcommand(name: &str) -> &str {
 }
 
 /// OWL-021 AC1: every `owl --help` subcommand except `daemon` (a service; install/uninstall/
-/// doctor cover it) and `mcp` (OWL-024: a stdio server started by `.mcp.json`) has
+/// doctor cover it) and `mcp` (OWL-024: a stdio server Claude Code starts itself) has
 /// `commands/<name>.md`; `contact` has both `contacts.md` (the OWL-024 table over
 /// `contact list`) and `contact.md` (`show|export|remove`). The reverse holds too: every
 /// command file wraps a real subcommand, `me` and `contacts` being the two renamed ones.
@@ -933,18 +933,33 @@ fn inbox_command_walks_states_with_pickers() {
 
 /// The hint line `contacts.md` ends with, verbatim.
 const MENTION_HINT: &str =
-    "Type @ and the contact's name, e.g. @owl:to://<first contact's uri>, then the question.";
+    "Type @owl: and the start of the name, pick the contact, then type the question.";
+const MCP_ADD: &str = "claude mcp add --scope user owl -- owl mcp";
 
-/// AC5: `.mcp.json` declares exactly the stdio server `owl` running `owl mcp`.
+fn design_doc() -> String {
+    std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/docs/technical-design.md"
+    ))
+    .unwrap()
+}
+
+/// OWL-025 AC1: the plugin bundles no MCP server (a bundled one is named
+/// `plugin:owlpost:owl`, which sinks the contacts in the `@` typeahead); the server is
+/// registered at user scope by `owl setup` / `owl update`, and no doc says `.mcp.json`.
 #[test]
-fn mcp_json_starts_owl_mcp() {
-    let mcp = json(".mcp.json");
-    let servers = mcp["mcpServers"].as_object().expect("mcpServers object");
-    assert_eq!(servers.len(), 1, "{mcp}");
-    let owl = &servers["owl"];
-    assert_eq!(owl["type"], "stdio", "{owl}");
-    assert_eq!(owl["command"], "owl", "{owl}");
-    assert_eq!(owl["args"], json!(["mcp"]), "{owl}");
+fn plugin_bundles_no_mcp_json() {
+    assert!(
+        !plugin(".mcp.json").exists(),
+        "plugins/claude-code/.mcp.json must not exist"
+    );
+    for (name, text) in [
+        ("README.md", read("README.md")),
+        ("SKILL.md", read("skills/owlpost/SKILL.md")),
+        ("technical-design.md", design_doc()),
+    ] {
+        assert!(!text.contains(".mcp.json"), "{name} still says .mcp.json");
+    }
 }
 
 /// AC6: `contacts.md` is a table over `owl contact list --json` ending with the mention
@@ -997,7 +1012,7 @@ fn skill_and_readme_document_mentions() {
         "@owl:to://",
         "owl ask --peer <fingerprint>",
         "the mention is the approval",
-        "`.mcp.json` starts `owl mcp`",
+        "registered in Claude Code at user scope by `owl setup` / `owl update`",
         "whole repository",
         "Several mentions send the same question to each contact",
     ] {
@@ -1006,6 +1021,13 @@ fn skill_and_readme_document_mentions() {
             "SKILL.md Mentioned contact lacks {needle:?}"
         );
     }
+    // OWL-025 AC5: the `@owl:` typing hint, on one line.
+    assert!(
+        mentioned
+            .lines()
+            .any(|l| l.contains("type @owl: and the start of the name")),
+        "SKILL.md Mentioned contact lacks the @owl: typing hint"
+    );
     assert!(
         skill.contains("`/owlpost:ask` does not: the command itself is the approval."),
         "SKILL.md lacks the no-confirmation rule"
@@ -1039,28 +1061,36 @@ fn skill_and_readme_document_mentions() {
     assert!(ask.contains("the command is the approval"), "{ask}");
     assert!(!ask.contains("confirms first"), "{ask}");
     let mention = section(&readme, "## Mention a contact");
+    // OWL-025 AC5: the `@owl:krz` example, registration by `owl setup` / by hand, the
+    // doctor check; each literal on one line.
     for needle in [
         "`@owl:to://ana-kowalska.ana@acme.pl",
-        "`.mcp.json`",
-        "starts `owl mcp`",
+        "`@owl:krz`",
+        "`owl setup`",
+        "`owl update`",
+        MCP_ADD,
+        "`owl doctor`",
         "`owl` on `PATH`",
+        "mcp server owl already registered",
     ] {
         assert!(
-            mention.contains(needle),
+            mention.lines().any(|l| l.contains(needle)),
             "README Mention a contact lacks {needle:?}"
         );
     }
-    assert!(readme.contains("| MCP server | `.mcp.json` |"), "{readme}");
+    let row = readme
+        .lines()
+        .find(|l| l.starts_with("| MCP server |"))
+        .expect("README MCP server row");
+    assert!(row.contains("`owl mcp`"), "{row}");
+    assert!(row.contains("`owl setup`"), "{row}");
 }
 
-/// AC8: the design doc lists `owl mcp` in the §9 CLI table and `cli/mcp.rs` in §2.
+/// AC8: the design doc lists `owl mcp` in the §9 CLI table and `cli/mcp.rs` in §2; OWL-025
+/// AC5: the §9 `owl mcp` and `owl doctor` rows and §11 name the user-scope registration.
 #[test]
 fn design_doc_lists_owl_mcp() {
-    let doc = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/docs/technical-design.md"
-    ))
-    .unwrap();
+    let doc = design_doc();
     let layout = section(&doc, "## 2. Module layout");
     assert!(
         layout.contains("    mcp.rs           `owl mcp`"),
@@ -1076,11 +1106,42 @@ fn design_doc_lists_owl_mcp() {
         "resources only",
         "to://<name-slug>.<first e-mail>",
         "re-read per request",
-        "`.mcp.json`",
+        MCP_ADD,
+        "checked by `owl doctor`",
     ] {
         assert!(
             row.contains(needle),
             "§9 owl mcp row lacks {needle:?}: {row}"
+        );
+    }
+    let doctor = cli
+        .lines()
+        .find(|l| l.starts_with("| `owl doctor` |"))
+        .expect("§9 owl doctor row");
+    for needle in [
+        "`ok mcp: owl registered in Claude Code (user scope)`",
+        "`warn mcp: claude not on PATH`",
+        MCP_ADD,
+        "never `fail`",
+    ] {
+        assert!(
+            doctor.contains(needle),
+            "§9 owl doctor row lacks {needle:?}: {doctor}"
+        );
+    }
+    let install = section(&doc, "## 11. Notifications and service install");
+    for needle in [
+        "`owl setup`",
+        "`owl update`",
+        MCP_ADD,
+        "`mcp server owl already registered`",
+        "`would run: claude mcp add --scope user owl -- owl mcp`",
+        "`plugin:owlpost:owl`",
+        "`mcp` check",
+    ] {
+        assert!(
+            install.lines().any(|l| l.contains(needle)),
+            "§11 lacks {needle:?}"
         );
     }
 }
