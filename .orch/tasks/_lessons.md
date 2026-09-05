@@ -76,3 +76,6 @@ Code and tests correct in round 1; the only gap was a data-modality criterion (S
 
 ## OWL-021 (2026-09-05)
 Correct in round 1 (18/20 mutants RED). The two survivors were a substring-match weakness: `/owlpost:contact` is a prefix of `/owlpost:contacts`, so removing the shorter name from the README/SKILL.md went unnoticed by `contains()`. Rule: when a directory-driven test greps names that can prefix each other, match a delimited token (closing backtick, `|`, or end of line), and mutant-check the shortest name of every prefix pair. Handed to OWL-022 to close in the same test file.
+
+## OWL-022 (2026-09-05)
+Correct in round 1; the only GAPS was a brittle pin ("in one line and\nstop" — line-wrap dependent, a false RED on reflow). Rule: pin doc literals that fit on one line and never contain a newline; when the sentence is long, shorten the sentence in the doc rather than pin a fragment. Process: an implementer lost an uncommitted edit to `git checkout -- <file>` in its own mutant sweep — commit the intended change BEFORE any checkout-restoring sweep, and run the suite once after the sweep.
