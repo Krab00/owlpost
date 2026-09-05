@@ -273,9 +273,113 @@ fn skill_has_frontmatter_and_required_strings() {
 
 // ---------- AC4 ----------
 
+/// Sorted stems of every `commands/*.md` file: the directory listing drives every check
+/// below, so a command added later is covered without touching this file.
+fn command_names() -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(plugin("commands"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|x| x == "md"))
+        .map(|p| p.file_stem().unwrap().to_str().unwrap().to_string())
+        .collect();
+    names.sort();
+    assert!(!names.is_empty(), "no command files");
+    names
+}
+
+/// Sorted subcommand names from the `Commands:` section of `owl [sub] --help`: clap prints
+/// each as a two-space-indented word at the start of a line, up to the next blank line.
+fn help_subcommands(args: &[&str]) -> Vec<String> {
+    let out = Command::new(OWL).args(args).arg("--help").output().unwrap();
+    assert!(out.status.success(), "owl {args:?} --help: {:?}", out.status);
+    let text = String::from_utf8(out.stdout).unwrap();
+    let rest = text
+        .split_once("\nCommands:\n")
+        .unwrap_or_else(|| panic!("owl {args:?} --help has no Commands section"))
+        .1;
+    let mut names: Vec<String> = rest
+        .lines()
+        .take_while(|l| !l.trim().is_empty())
+        .filter(|l| l.starts_with("  ") && !l.starts_with("   "))
+        .map(|l| l.trim_start().split_whitespace().next().unwrap().to_string())
+        .filter(|n| n != "help")
+        .collect();
+    names.sort();
+    names
+}
+
+/// `owl <sub> --help` output, cached per call site (the binary is cheap; no cache needed).
+fn help(sub: &str) -> String {
+    let out = Command::new(OWL).arg(sub).arg("--help").output().unwrap();
+    assert!(out.status.success(), "owl {sub} --help: {:?}", out.status);
+    String::from_utf8(out.stdout).unwrap()
+}
+
+/// Whether `owl <sub>` takes anything beyond the global options: a positional (`Arguments:`
+/// section) or a nested subcommand (`<COMMAND>` in the usage line). Every subcommand
+/// accepts `[OPTIONS]`, so that alone does not count.
+fn takes_arguments(sub: &str) -> bool {
+    let h = help(sub);
+    h.contains("\nArguments:\n") || h.contains("<COMMAND>")
+}
+
+/// The `owl` subcommand a command file wraps: the file stem, except the two files whose
+/// name is not a subcommand (`me` = `owl contact export`, `contacts` = `owl contact list`).
+fn wrapped_subcommand(name: &str) -> &str {
+    match name {
+        "me" => "contact export",
+        "contacts" => "contact",
+        other => other,
+    }
+}
+
+/// OWL-021 AC1: every `owl --help` subcommand except `daemon` (a service; install/uninstall/
+/// doctor cover it) has `commands/<name>.md`; `contact` has both `contacts.md` (the OWL-020
+/// picker over `contact list`) and `contact.md` (`show|export|remove`). The reverse holds
+/// too: every command file wraps a real subcommand, `me` and `contacts` being the two
+/// renamed ones.
+#[test]
+fn every_subcommand_has_a_command() {
+    let subs = help_subcommands(&[]);
+    assert!(subs.contains(&"daemon".to_string()), "{subs:?}");
+    assert!(subs.contains(&"contact".to_string()), "{subs:?}");
+    let names = command_names();
+    for sub in &subs {
+        if sub == "daemon" {
+            assert!(!names.contains(sub), "daemon must not get a command file");
+            continue;
+        }
+        assert!(names.contains(sub), "commands/{sub}.md is missing");
+    }
+    assert!(names.contains(&"contacts".to_string()), "commands/contacts.md");
+    // `contact.md` covers the non-list subcommands by name.
+    let (_, contact) = frontmatter("commands/contact.md");
+    for sub in help_subcommands(&["contact"]) {
+        if sub == "list" {
+            assert!(contact.contains("/owlpost:contacts"), "{contact}");
+        } else {
+            assert!(contact.contains(&format!("`{sub}")), "contact.md lacks {sub}: {contact}");
+        }
+    }
+    for name in &names {
+        let sub = wrapped_subcommand(name).split(' ').next().unwrap();
+        assert!(subs.contains(&sub.to_string()), "commands/{name}.md wraps no subcommand");
+    }
+}
+
+/// OWL-021 AC2. The `allowed-tools` rule, encoded here and nowhere else:
+/// 1. the primary pattern `Bash(owl <wrapped sub>:*)` is present (`me.md` →
+///    `Bash(owl contact export:*)`, `contacts.md` → `Bash(owl contact:*)`);
+/// 2. every other entry is `Bash(owl <X>:*)` where `<X>` starts with a real `owl`
+///    subcommand and the body actually runs or offers `owl <X>` (so a helper pattern
+///    cannot outlive its use; OWL-022 will give `inbox.md` several such entries);
+/// 3. the only non-`owl` entry ever allowed is `Bash(git blame:*)`, and only in `ask.md`
+///    and `contacts.md` (the ask flow's peer proposal); nothing else, no `Read`, no
+///    `Bash(git status:*)`.
 #[test]
 fn commands_have_descriptions() {
-    for name in ["inbox", "ask", "history", "me", "update", "add", "contacts"] {
+    let subs = help_subcommands(&[]);
+    for name in command_names() {
         let rel = format!("commands/{name}.md");
         let (fm, body) = frontmatter(&rel);
         assert!(
@@ -283,7 +387,49 @@ fn commands_have_descriptions() {
             "{rel}: empty description"
         );
         assert!(!body.trim().is_empty(), "{rel}: empty body");
+
+        let wrapped = wrapped_subcommand(&name);
+        let tools = fm_value(&fm, "allowed-tools").unwrap_or_else(|| panic!("{rel}: no allowed-tools"));
+        let primary = format!("Bash(owl {wrapped}:*)");
+        let entries: Vec<&str> = tools.split(',').map(str::trim).collect();
+        assert!(entries.contains(&primary.as_str()), "{rel}: allowed-tools lacks {primary}: {tools}");
+        for entry in entries {
+            if entry == primary {
+                continue;
+            }
+            if entry == "Bash(git blame:*)" && (name == "ask" || name == "contacts") {
+                continue;
+            }
+            let x = entry
+                .strip_prefix("Bash(owl ")
+                .and_then(|r| r.strip_suffix(":*)"))
+                .unwrap_or_else(|| panic!("{rel}: allowed-tools entry {entry:?} is not an owl pattern"));
+            let first = x.split(' ').next().unwrap();
+            assert!(subs.contains(&first.to_string()), "{rel}: {entry} is not an owl subcommand");
+            assert!(body.contains(&format!("owl {x}")), "{rel}: {entry} allowed but `owl {x}` never used in the body");
+        }
+
+        // A wrapper of a subcommand with positionals must pass `$ARGUMENTS` through — except
+        // the arg-less picker, which the OWL-020 test pins to take none.
+        let sub = wrapped.split(' ').next().unwrap();
+        if takes_arguments(sub) && name != "contacts" && name != "me" {
+            assert!(body.contains("$ARGUMENTS"), "{rel}: `owl {sub}` takes arguments but the body never mentions $ARGUMENTS");
+            assert!(
+                fm_value(&fm, "argument-hint").is_some_and(|h| !h.trim_matches('"').is_empty()),
+                "{rel}: `owl {sub}` takes arguments but there is no argument-hint"
+            );
+        }
     }
+    // The set of arg-taking subcommands the rule above derives from `--help`, pinned so a
+    // clap change that drops the `Arguments:` section is noticed.
+    let with_args: Vec<&str> = ["card", "contact", "add", "allow", "deny", "ask", "show", "draft", "edit", "send", "reject"].to_vec();
+    for sub in &subs {
+        if sub == "daemon" {
+            continue;
+        }
+        assert_eq!(takes_arguments(sub), with_args.contains(&sub.as_str()), "owl {sub} --help argument detection");
+    }
+
     let (fm, ask) = frontmatter("commands/ask.md");
     assert!(ask.contains("$ARGUMENTS"), "ask.md must read $ARGUMENTS");
     // OWL-018 AC4: the path is optional; both invocations are documented.
@@ -304,6 +450,44 @@ fn commands_have_descriptions() {
         !ask.contains("If any part is missing, ask the user"),
         "must not demand a path: {ask}"
     );
+}
+
+/// OWL-021 AC3: the commands that send something or change trust confirm once, with the
+/// one literal sentence every such file carries, before running `owl`.
+#[test]
+fn trust_changing_commands_confirm_before_running() {
+    const CONFIRM: &str = "Ask for explicit confirmation with AskUserQuestion before running";
+    for name in ["send", "allow", "deny", "reject", "uninstall"] {
+        let rel = format!("commands/{name}.md");
+        let (_, body) = frontmatter(&rel);
+        let at = body
+            .find(CONFIRM)
+            .unwrap_or_else(|| panic!("{rel}: lacks {CONFIRM:?}"));
+        // The confirmation comes before the run step.
+        let run = body
+            .find(&format!("Run `owl {name}"))
+            .unwrap_or_else(|| panic!("{rel}: never runs owl {name}"));
+        assert!(at < run, "{rel}: confirmation must precede the run step");
+    }
+    // `edit` cannot run its editor inside a session and says so instead of running it.
+    let (_, edit) = frontmatter("commands/edit.md");
+    assert!(edit.contains("$EDITOR"), "{edit}");
+    assert!(edit.contains("Do not run it here"), "{edit}");
+    // `watch` is the interim plain wrapper OWL-023 replaces.
+    let (_, watch) = frontmatter("commands/watch.md");
+    assert!(watch.contains("OWL-023"), "{watch}");
+}
+
+/// OWL-021 AC4: the README command table and SKILL.md list every `/owlpost:<name>`.
+#[test]
+fn readme_and_skill_list_every_command() {
+    let readme = read("README.md");
+    let (_, skill) = frontmatter("skills/owlpost/SKILL.md");
+    for name in command_names() {
+        assert!(readme.contains(&format!("`commands/{name}.md`")), "README.md lacks commands/{name}.md");
+        assert!(readme.contains(&format!("/owlpost:{name}")), "README.md lacks /owlpost:{name}");
+        assert!(skill.contains(&format!("/owlpost:{name}")), "SKILL.md lacks /owlpost:{name}");
+    }
 }
 
 // ---------- OWL-020: /owlpost:contacts ----------
