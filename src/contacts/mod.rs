@@ -123,6 +123,21 @@ fn load_dir_paths(dir: &Path, source: &str) -> Vec<(PathBuf, Contact)> {
     out
 }
 
+/// Fold a second file for the same key into `into`, whatever order the files were read in:
+/// a policy wins over no policy, and a contact file (non-empty `name`) supplies the contact
+/// fields when `into` is a bare policy overlay.
+fn merge(into: &mut Contact, other: Contact) {
+    if other.policy.is_some() {
+        into.policy = other.policy;
+    }
+    if into.name.is_empty() && !other.name.is_empty() {
+        into.name = other.name;
+        into.emails = other.emails;
+        into.endpoints = other.endpoints;
+        into.added_at = other.added_at;
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct ContactBook {
     pub contacts: Vec<Contact>,
@@ -137,7 +152,7 @@ impl ContactBook {
             .unwrap_or_default();
         for l in local::load(home) {
             match contacts.iter_mut().find(|c| c.pubkey == l.pubkey) {
-                Some(existing) => existing.policy = l.policy,
+                Some(existing) => merge(existing, l),
                 None => contacts.push(l),
             }
         }
@@ -152,25 +167,46 @@ impl ContactBook {
         Ok(book)
     }
 
-    /// The files of one scope with the contact each holds: `global` = `$home/contacts/`
-    /// minus the policy overlays of local contacts; `local` = `.agents/peers/` of the git
-    /// root above `cwd` (`Err` when there is none).
-    pub fn scope_files(
+    /// `owl contact remove`: resolve `query` among the contacts of `scope` only, then delete
+    /// every file holding that key in the scope — and, for both scopes, its policy overlay in
+    /// `$home/contacts/` (the overlay is policy, not a contact; leaving it would resurface as a
+    /// nameless global contact). Returns the contact's name and the paths removed.
+    pub fn remove(
         home: &Path,
         cwd: &Path,
         scope: &str,
-    ) -> anyhow::Result<Vec<(PathBuf, Contact)>> {
-        if scope == "local" {
-            let root = repo::find_git_root(cwd)
-                .with_context(|| format!("{} is not inside a git repository", cwd.display()))?;
-            return Ok(load_dir_paths(&repo::peers_dir(&root), "local"));
+        query: &str,
+    ) -> anyhow::Result<(String, Vec<PathBuf>)> {
+        let root = if scope == "local" {
+            Some(
+                repo::find_git_root(cwd)
+                    .with_context(|| format!("{} is not inside a git repository", cwd.display()))?,
+            )
+        } else {
+            None
+        };
+        let book = ContactBook::load_scope(home, cwd, scope)?;
+        let c = book.resolve(query)?;
+        let (fp, name) = (c.fingerprint.clone(), c.name.clone());
+        let mut paths = Vec::new();
+        if let Some(root) = root {
+            paths.extend(
+                load_dir_paths(&repo::peers_dir(&root), "local")
+                    .into_iter()
+                    .filter(|(_, c)| c.fingerprint == fp)
+                    .map(|(p, _)| p),
+            );
         }
-        let local: Vec<Contact> = repo::find_git_root(cwd)
-            .map(|r| repo::load(&r))
-            .unwrap_or_default();
-        let mut files = load_dir_paths(&local::dir(home), "global");
-        files.retain(|(_, c)| !local.iter().any(|l| l.pubkey == c.pubkey));
-        Ok(files)
+        paths.extend(
+            load_dir_paths(&local::dir(home), "global")
+                .into_iter()
+                .filter(|(_, c)| c.fingerprint == fp)
+                .map(|(p, _)| p),
+        );
+        for p in &paths {
+            std::fs::remove_file(p).with_context(|| format!("removing {}", p.display()))?;
+        }
+        Ok((name, paths))
     }
 
     /// Exact fingerprint → exact email → unique case-insensitive name prefix.
