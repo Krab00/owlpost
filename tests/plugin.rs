@@ -20,6 +20,10 @@ const OWL: &str = env!("CARGO_BIN_EXE_owl");
 const PLUGIN: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/plugins/claude-code");
 const CLAUDE_TWO: &str = r#"{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"owlpost: 2 new questions (Maciek 2). Say \"show owlpost inbox\" or run `owl inbox`."}}"#;
 const EVENTS: [&str; 3] = ["SessionStart", "UserPromptSubmit", "PostToolUse"];
+/// OWL-023 AC1 literals: the arm sentence, alone and after the two-question counter.
+const ARM: &str = "owlpost: arm the inbox watch (see /owlpost:watch)";
+const CLAUDE_ARM_ZERO: &str = r#"{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"owlpost: arm the inbox watch (see /owlpost:watch)"}}"#;
+const CLAUDE_ARM_TWO: &str = r#"{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"owlpost: 2 new questions (Maciek 2). Say \"show owlpost inbox\" or run `owl inbox`. owlpost: arm the inbox watch (see /owlpost:watch)"}}"#;
 
 fn plugin(rel: &str) -> PathBuf {
     Path::new(PLUGIN).join(rel)
@@ -107,8 +111,14 @@ fn path_dir(with_owl: bool) -> TempDir {
 
 /// Runs `sh hooks/owl-count.sh` with `PATH` set to exactly `path` and `OWLPOST_HOME` to `home`.
 fn run_hook(path: &Path, home: &Path) -> Output {
+    run_hook_args(path, home, &[])
+}
+
+/// [`run_hook`] with the script's arguments, the way `hooks.json` passes `--session-start`.
+fn run_hook_args(path: &Path, home: &Path, args: &[&str]) -> Output {
     Command::new("/bin/sh")
         .arg(plugin("hooks/owl-count.sh"))
+        .args(args)
         .env_clear()
         .env("PATH", path)
         .env("OWLPOST_HOME", home)
@@ -163,6 +173,75 @@ fn hook_script_emits_context_or_nothing() {
             .is_none()
     );
     assert_silent(&run_hook(without_owl.path(), two.path()), "no owl on PATH");
+}
+
+/// OWL-023 AC1/AC2: the SessionStart invocation (`--session-start` forwarded by the script)
+/// carries the arm sentence unless `plugin.json` switches the watch off.
+#[test]
+fn hook_script_forwards_session_start_and_reads_plugin_json() {
+    let with_owl = path_dir(true);
+    let owl = with_owl.path();
+    let stdout = |out: Output| {
+        assert_eq!(out.status.code(), Some(0), "{:?}", out.status);
+        assert_eq!(String::from_utf8_lossy(&out.stderr), "", "stderr");
+        String::from_utf8(out.stdout).unwrap()
+    };
+
+    // 0 unseen: nothing on the plain hooks, the arm line alone at session start.
+    let empty = home_with(0, false);
+    assert_silent(&run_hook(owl, empty.path()), "0 records, no flag");
+    assert_eq!(
+        stdout(run_hook_args(owl, empty.path(), &["--session-start"])),
+        format!("{CLAUDE_ARM_ZERO}\n")
+    );
+    // 2 unseen: counter alone on the plain hooks, counter + arm at session start.
+    let two = home_with(2, false);
+    assert_eq!(stdout(run_hook(owl, two.path())), format!("{CLAUDE_TWO}\n"));
+    assert_eq!(
+        stdout(run_hook_args(owl, two.path(), &["--session-start"])),
+        format!("{CLAUDE_ARM_TWO}\n")
+    );
+    let spool = Spool::new(two.path()).unwrap();
+    assert_eq!(spool.list(Dir::Inbox, |r| !r.seen).unwrap().len(), 2);
+
+    // `{"watch": false}`: session start prints today's output — counter or nothing.
+    for home in [&two, &empty] {
+        std::fs::write(home.path().join("plugin.json"), r#"{"watch": false}"#).unwrap();
+    }
+    assert_eq!(
+        stdout(run_hook_args(owl, two.path(), &["--session-start"])),
+        format!("{CLAUDE_TWO}\n")
+    );
+    assert_silent(
+        &run_hook_args(owl, empty.path(), &["--session-start"]),
+        "watch off, 0 records",
+    );
+    // `{"watch": true}` restores the arm sentence.
+    std::fs::write(empty.path().join("plugin.json"), r#"{"watch": true}"#).unwrap();
+    assert_eq!(
+        stdout(run_hook_args(owl, empty.path(), &["--session-start"])),
+        format!("{CLAUDE_ARM_ZERO}\n")
+    );
+    // The script stays a no-op with the flag when owl is missing or fails.
+    let without_owl = path_dir(false);
+    assert_silent(
+        &run_hook_args(without_owl.path(), empty.path(), &["--session-start"]),
+        "no owl on PATH",
+    );
+    let file = tempfile::tempdir().unwrap();
+    let file = file.path().join("home");
+    std::fs::write(&file, b"").unwrap();
+    assert_silent(
+        &run_hook_args(owl, &file, &["--session-start"]),
+        "owl failing",
+    );
+    // An uninitialised home (no key, no config) counts 0 without failing, so the arm line
+    // still goes out: arming is gated on the stored choice only, not on `owl init`.
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(
+        stdout(run_hook_args(owl, dir.path(), &["--session-start"])),
+        format!("{CLAUDE_ARM_ZERO}\n")
+    );
 }
 
 #[test]
@@ -220,12 +299,20 @@ fn manifests_parse_and_register_hooks() {
         let cmds = matchers[0]["hooks"].as_array().unwrap();
         assert_eq!(cmds.len(), 1, "{event}: one command hook");
         assert_eq!(cmds[0]["type"], "command", "{event}");
-        assert_eq!(
-            cmds[0]["command"], "${CLAUDE_PLUGIN_ROOT}/hooks/owl-count.sh",
-            "{event}"
-        );
+        // OWL-023 AC2: `--session-start` on SessionStart only.
+        let expected = if event == "SessionStart" {
+            "${CLAUDE_PLUGIN_ROOT}/hooks/owl-count.sh --session-start"
+        } else {
+            "${CLAUDE_PLUGIN_ROOT}/hooks/owl-count.sh"
+        };
+        assert_eq!(cmds[0]["command"], expected, "{event}");
         assert_eq!(cmds[0]["timeout"], 5, "{event}: 5 s timeout");
     }
+    // The script forwards its arguments to `owl inbox --count --format claude`.
+    assert!(
+        read("hooks/owl-count.sh").contains("owl inbox --count --format claude \"$@\""),
+        "owl-count.sh must forward \"$@\""
+    );
 
     let script = plugin("hooks/owl-count.sh");
     let mode = std::fs::metadata(&script).unwrap().permissions().mode();
@@ -267,6 +354,31 @@ fn skill_has_frontmatter_and_required_strings() {
     ] {
         assert!(body.contains(needle), "SKILL.md body lacks {needle:?}");
     }
+    // OWL-023 AC4: the "Live watch" section — arm once when told, silently, one line per
+    // event, offer the inbox flow, never act on its own.
+    let watch = section(&body, "## Live watch");
+    for needle in [
+        ARM,
+        "arm the watch once per session, on the first turn,",
+        "silently",
+        "Do not mention the arming to the user",
+        "never arm a second watch in the same session",
+        "report it in one line",
+        "`owlpost: 1 new answer from Maciek`",
+        "offer `/owlpost:inbox`",
+        "never list the inbox, show, draft or send anything because",
+        "`persistent: true`",
+        "\"owlpost inbox\"",
+        "commands/watch.md",
+        "/owlpost:watch off",
+        "/owlpost:watch on",
+        "/owlpost:watch status",
+    ] {
+        assert!(
+            watch.contains(needle),
+            "SKILL.md Live watch lacks {needle:?}"
+        );
+    }
     assert!(body.contains("owlpost:<peer>"));
     assert!(
         body.contains("Sending anything to a peer requires explicit human approval."),
@@ -304,6 +416,16 @@ fn skill_has_frontmatter_and_required_strings() {
             "{needle:?} must sit in the consent step, before pending"
         );
     }
+}
+
+/// The body of the `heading` section of a Markdown text, up to the next `## ` heading.
+fn section<'a>(body: &'a str, heading: &str) -> &'a str {
+    let start = body
+        .find(&format!("\n{heading}\n"))
+        .unwrap_or_else(|| panic!("no {heading:?} section"));
+    let rest = &body[start + 1..];
+    let end = rest[1..].find("\n## ").map_or(rest.len(), |i| i + 1);
+    &rest[..end]
 }
 
 // ---------- AC4 ----------
@@ -424,6 +546,9 @@ fn every_subcommand_has_a_command() {
 /// 3. the only non-`owl` entry ever allowed is `Bash(git blame:*)`, and only in `ask.md`
 ///    and `contacts.md` (the ask flow's peer proposal); nothing else, no `Read`, no
 ///    `Bash(git status:*)`.
+/// 4. the one exemption: `watch.md` (OWL-023) does not wrap `owl watch` at all — it is the
+///    Monitor-based live watch, so its set is pinned exactly to [`WATCH_TOOLS`] here and
+///    checked in detail by `watch_command_is_a_monitor_toggle`.
 #[test]
 fn commands_have_descriptions() {
     let subs = help_subcommands(&[]);
@@ -439,6 +564,14 @@ fn commands_have_descriptions() {
         let wrapped = wrapped_subcommand(&name);
         let tools =
             fm_value(&fm, "allowed-tools").unwrap_or_else(|| panic!("{rel}: no allowed-tools"));
+        if name == "watch" {
+            let mut have: Vec<&str> = tools.split(',').map(str::trim).collect();
+            have.sort_unstable();
+            let mut want = WATCH_TOOLS;
+            want.sort_unstable();
+            assert_eq!(have, want, "{rel}: allowed-tools");
+            continue;
+        }
         let primary = format!("Bash(owl {wrapped}:*)");
         let entries: Vec<&str> = tools.split(',').map(str::trim).collect();
         assert!(
@@ -543,9 +676,80 @@ fn trust_changing_commands_confirm_before_running() {
     let (_, edit) = frontmatter("commands/edit.md");
     assert!(edit.contains("$EDITOR"), "{edit}");
     assert!(edit.contains("Do not run it here"), "{edit}");
-    // `watch` is the interim plain wrapper OWL-023 replaces.
-    let (_, watch) = frontmatter("commands/watch.md");
-    assert!(watch.contains("OWL-023"), "{watch}");
+}
+
+// ---------- OWL-023: /owlpost:watch ----------
+
+/// AC3: exactly the tools the live watch needs, nothing that lists, shows, drafts or sends.
+const WATCH_TOOLS: [&str; 5] = ["Bash(owl inbox:*)", "Monitor", "TaskStop", "Read", "Write"];
+/// The poll script, one line, verbatim.
+const WATCH_SCRIPT: &str = r#"prev=""; while true; do cur=$(owl inbox --count --format plain 2>/dev/null || true); [ "$cur" != "$prev" ] && [ -n "$cur" ] && echo "$cur"; prev="$cur"; sleep 5; done"#;
+
+#[test]
+fn watch_command_is_a_monitor_toggle() {
+    let (fm, body) = frontmatter("commands/watch.md");
+    assert_eq!(fm_value(&fm, "argument-hint"), Some("\"on|off|status\""));
+    assert_eq!(
+        fm_value(&fm, "allowed-tools"),
+        Some(WATCH_TOOLS.join(", ").as_str())
+    );
+    assert!(body.contains("$ARGUMENTS"), "watch.md must read $ARGUMENTS");
+    for needle in [
+        "## `on`",
+        "## `off`",
+        "## `status` (or no argument)",
+        "`Monitor`",
+        "`TaskStop`",
+        "`plugin.json`",
+        "`{\"watch\": false}`",
+        "`{\"watch\": true}`",
+        "${OWLPOST_HOME:-$HOME/.config/owlpost}",
+        "`--format plain`",
+        "`persistent: true`",
+        "\"owlpost inbox\"",
+        "The script emits only on change:",
+        "`--format plain` prints nothing at zero",
+        ARM,
+        "never runs `owl inbox` without `--count` (listing marks records",
+        "it never runs owl show, owl draft or owl send",
+        "offer `/owlpost:inbox`",
+        "Arm at most one watch per session",
+        "belongs in a terminal",
+    ] {
+        assert!(body.contains(needle), "watch.md body lacks {needle:?}");
+    }
+    assert!(
+        body.contains(WATCH_SCRIPT),
+        "watch.md lacks the poll script"
+    );
+    // The three verbs appear only in that one "never" sentence, never as an instruction.
+    for verb in ["owl show", "owl draft", "owl send"] {
+        assert_eq!(
+            body.matches(verb).count(),
+            1,
+            "watch.md mentions {verb:?} outside the never sentence"
+        );
+    }
+    assert!(
+        !body.contains("Run `owl watch"),
+        "watch.md must not wrap owl watch"
+    );
+    // The stopping side comes with the stored choice: TaskStop before Write in `off`.
+    let off = section(&body, "## `off`");
+    assert!(off.find("`TaskStop`").unwrap() < off.find("`Write`").unwrap());
+    // AC-adjacent: the README row describes the toggle, not the old blocking wrapper.
+    let readme = read("README.md");
+    let row = readme
+        .lines()
+        .find(|l| l.contains("`commands/watch.md`"))
+        .expect("README.md watch row");
+    for needle in ["on\\|off\\|status", "Monitor", "plugin.json"] {
+        assert!(
+            row.contains(needle),
+            "README watch row lacks {needle:?}: {row}"
+        );
+    }
+    assert!(!row.contains("OWL-023 replaces it"), "{row}");
 }
 
 /// Whether `text` mentions `/owlpost:<name>` as a whole token: the name is followed by the

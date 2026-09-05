@@ -81,6 +81,9 @@ enum Cmd {
         all: bool,
         #[arg(long)]
         format: Option<String>,
+        /// Add the owlpost watch arm sentence to `--count --format claude` (plugin SessionStart hook)
+        #[arg(long)]
+        session_start: bool,
     },
     /// Full content of a record; marks it seen
     Show { id: String },
@@ -316,6 +319,7 @@ fn main() -> ExitCode {
             new,
             all,
             format,
+            session_start,
         } => cli::inbox::run(
             &home,
             cli::inbox::Opts {
@@ -324,6 +328,7 @@ fn main() -> ExitCode {
                 all,
                 format,
                 json: cli.json,
+                session_start,
             },
         ),
         Cmd::Allow {

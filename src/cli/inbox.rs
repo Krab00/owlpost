@@ -6,6 +6,11 @@
 //! total) and never marks anything; with `--format` it prints the harness injection line
 //! instead, or nothing at all when the count is 0.
 //!
+//! `--session-start` (OWL-023, set by the plugin's `SessionStart` hook only) adds the
+//! `ARM_SENTENCE` to the `claude` injection unless `$OWLPOST_HOME/plugin.json` says
+//! `{"watch": false}`; with the count at 0 the sentence stands alone. It is ignored by every
+//! other format and without `--count --format`.
+//!
 //! Consent records get a prompt line under the table (`<name> wants to ask your agent about
 //! <project> — owl allow <fp> [--once|--always] / owl deny <fp>`); records the auto-accept
 //! scheduler failed on show their `auto_error` (§3.4) with the command that retries them:
@@ -31,6 +36,21 @@ pub struct Opts {
     pub all: bool,
     pub format: Option<String>,
     pub json: bool,
+    pub session_start: bool,
+}
+
+/// The second `additionalContext` sentence of the `claude` injection at session start (§9):
+/// the skill arms the Monitor-based inbox watch once when it sees it.
+pub const ARM_SENTENCE: &str = "owlpost: arm the inbox watch (see /owlpost:watch)";
+
+/// `$OWLPOST_HOME/plugin.json` → `watch`; absent file, unparseable JSON or a missing/non-bool
+/// key all mean "on". Written by `/owlpost:watch on|off`, read only here.
+pub fn watch_enabled(home: &Path) -> bool {
+    std::fs::read(home.join("plugin.json"))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+        .and_then(|v| v.get("watch")?.as_bool())
+        .unwrap_or(true)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,12 +98,31 @@ pub fn sentence(per_peer: &[(String, usize)], answers: usize) -> String {
     format!("owlpost: {what} ({peers}). Say \"show owlpost inbox\" or run `owl inbox`.")
 }
 
-/// The exact §9 injection line for `format`; `None` when there is nothing to inject.
-pub fn injection(format: Format, per_peer: &[(String, usize)], answers: usize) -> Option<String> {
-    if per_peer.iter().all(|(_, n)| *n == 0) {
+/// The exact §9 injection line for `format`; `None` when there is nothing to inject. With
+/// `arm`, `Format::Claude` adds the [`ARM_SENTENCE`]: after the counter sentence
+/// (space-separated) when there is one, alone when the count is 0. Other formats ignore `arm`.
+pub fn injection(
+    format: Format,
+    per_peer: &[(String, usize)],
+    answers: usize,
+    arm: bool,
+) -> Option<String> {
+    let arm = arm && format == Format::Claude;
+    let empty = per_peer.iter().all(|(_, n)| *n == 0);
+    if empty && !arm {
         return None;
     }
-    let text = sentence(per_peer, answers);
+    let mut text = if empty {
+        String::new()
+    } else {
+        sentence(per_peer, answers)
+    };
+    if arm {
+        if !text.is_empty() {
+            text.push(' ');
+        }
+        text.push_str(ARM_SENTENCE);
+    }
     Some(match format {
         Format::Claude | Format::Codex => {
             // Structs keep the §9 key order; `json!` maps would sort keys alphabetically.
@@ -143,7 +182,8 @@ pub fn run(home: &Path, opts: Opts) -> anyhow::Result<()> {
     let spool = Spool::new(home)?;
     let book = super::contact_book(home)?;
     if opts.count {
-        return count(&spool, &book, opts.all, format, opts.json);
+        let arm = opts.session_start && watch_enabled(home);
+        return count(&spool, &book, opts.all, format, opts.json, arm);
     }
     let records = spool.list(Dir::Inbox, |r| !opts.new || !r.seen)?;
     let now = envelope::now_unix();
@@ -216,6 +256,7 @@ fn count(
     all: bool,
     format: Option<Format>,
     json: bool,
+    arm: bool,
 ) -> anyhow::Result<()> {
     let records = spool.list(Dir::Inbox, |r| all || !r.seen)?;
     let per_peer = per_peer(&records, book)?;
@@ -226,7 +267,7 @@ fn count(
         .count();
     match format {
         Some(f) => {
-            if let Some(line) = injection(f, &per_peer, total - questions) {
+            if let Some(line) = injection(f, &per_peer, total - questions, arm) {
                 println!("{line}");
             }
         }
@@ -277,18 +318,72 @@ mod tests {
     #[test]
     fn injection_shapes_per_format() {
         let p = peers(&[("Maciek", 2)]);
-        let claude = injection(Format::Claude, &p, 0).unwrap();
+        let claude = injection(Format::Claude, &p, 0, false).unwrap();
         assert_eq!(
             claude,
             r#"{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"owlpost: 2 new questions (Maciek 2). Say \"show owlpost inbox\" or run `owl inbox`."}}"#
         );
-        assert_eq!(injection(Format::Codex, &p, 0).unwrap(), claude);
-        assert_eq!(injection(Format::Kimi, &p, 0).unwrap(), sentence(&p, 0));
-        assert_eq!(injection(Format::Plain, &p, 0).unwrap(), sentence(&p, 0));
+        assert_eq!(injection(Format::Codex, &p, 0, false).unwrap(), claude);
+        assert_eq!(
+            injection(Format::Kimi, &p, 0, false).unwrap(),
+            sentence(&p, 0)
+        );
+        assert_eq!(
+            injection(Format::Plain, &p, 0, false).unwrap(),
+            sentence(&p, 0)
+        );
         for f in [Format::Plain, Format::Claude, Format::Codex, Format::Kimi] {
-            assert_eq!(injection(f, &[], 0), None);
-            assert_eq!(injection(f, &peers(&[("Maciek", 0)]), 0), None);
+            assert_eq!(injection(f, &[], 0, false), None);
+            assert_eq!(injection(f, &peers(&[("Maciek", 0)]), 0, false), None);
         }
+    }
+
+    #[test]
+    fn arm_sentence_is_claude_only_and_stands_alone_at_zero() {
+        const ARMED_TWO: &str = r#"{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"owlpost: 2 new questions (Maciek 2). Say \"show owlpost inbox\" or run `owl inbox`. owlpost: arm the inbox watch (see /owlpost:watch)"}}"#;
+        const ARMED_ZERO: &str = r#"{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"owlpost: arm the inbox watch (see /owlpost:watch)"}}"#;
+        assert_eq!(
+            ARM_SENTENCE,
+            "owlpost: arm the inbox watch (see /owlpost:watch)"
+        );
+        let p = peers(&[("Maciek", 2)]);
+        // Counter + arm, one space between the two sentences, counter text unchanged.
+        assert_eq!(injection(Format::Claude, &p, 0, true).unwrap(), ARMED_TWO);
+        // Zero unseen + arm: the arm sentence alone, in the same JSON shape.
+        assert_eq!(injection(Format::Claude, &[], 0, true).unwrap(), ARMED_ZERO);
+        assert_eq!(
+            injection(Format::Claude, &peers(&[("Maciek", 0)]), 0, true).unwrap(),
+            ARMED_ZERO
+        );
+        // Every other format ignores `arm`: same as without, nothing at zero.
+        for f in [Format::Plain, Format::Codex, Format::Kimi] {
+            assert_eq!(
+                injection(f, &p, 0, true),
+                injection(f, &p, 0, false),
+                "{f:?}"
+            );
+            assert_eq!(injection(f, &[], 0, true), None, "{f:?}");
+        }
+    }
+
+    #[test]
+    fn watch_enabled_defaults_on_and_reads_plugin_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let file = home.join("plugin.json");
+        assert!(watch_enabled(home), "absent file");
+        std::fs::write(&file, r#"{"watch": false}"#).unwrap();
+        assert!(!watch_enabled(home), "watch false");
+        std::fs::write(&file, r#"{"watch": true}"#).unwrap();
+        assert!(watch_enabled(home), "watch true");
+        std::fs::write(&file, r#"{"other": false}"#).unwrap();
+        assert!(watch_enabled(home), "missing key");
+        std::fs::write(&file, r#"{"watch": "false"}"#).unwrap();
+        assert!(watch_enabled(home), "non-bool value");
+        std::fs::write(&file, "{not json").unwrap();
+        assert!(watch_enabled(home), "unparseable");
+        std::fs::write(&file, "").unwrap();
+        assert!(watch_enabled(home), "empty file");
     }
 
     #[test]
