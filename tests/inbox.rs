@@ -31,8 +31,9 @@ const SENTENCE_TWO: &str =
 const FORMATS: [&str; 4] = ["plain", "claude", "codex", "kimi"];
 /// OWL-023 AC1 literals: the arm sentence alone (0 unseen) and after the counter (2 unseen).
 const ARM: &str = "owlpost: arm the inbox watch (see /owlpost:watch)";
-const CLAUDE_ARM_ZERO: &str = r#"{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"owlpost: arm the inbox watch (see /owlpost:watch)"}}"#;
-const CLAUDE_ARM_TWO: &str = r#"{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"owlpost: 2 new questions (Maciek 2). Say \"show owlpost inbox\" or run `owl inbox`. owlpost: arm the inbox watch (see /owlpost:watch)"}}"#;
+const CLAUDE_ARM_ZERO: &str = r#"{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"owlpost: arm the inbox watch (see /owlpost:watch)"}}"#;
+const PREVIEW_TWO: &str = "- Maciek question [pending] on src/auth/session.rs: Why is the refresh token rotated?\n- Maciek question [consent] on src/auth/session.rs: Where is the retry policy?\nowlpost: run /owlpost:inbox now.";
+const CLAUDE_ARM_TWO: &str = r#"{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"owlpost: 2 new questions (Maciek 2). Say \"show owlpost inbox\" or run `owl inbox`. owlpost: arm the inbox watch (see /owlpost:watch)\n- Maciek question [pending] on src/auth/session.rs: Why is the refresh token rotated?\n- Maciek question [consent] on src/auth/session.rs: Where is the retry policy?\nowlpost: run /owlpost:inbox now."}}"#;
 
 struct Home {
     dir: TempDir,
@@ -306,7 +307,15 @@ fn session_start_arms_the_watch_unless_plugin_json_says_off() {
     let h = Home::new();
     let plugin_json = h.path().join("plugin.json");
     let claude = ["inbox", "--count", "--format", "claude"];
-    let claude_ss = ["inbox", "--count", "--format", "claude", "--session-start"];
+    let claude_ss = [
+        "inbox",
+        "--count",
+        "--format",
+        "claude",
+        "--hook-event",
+        "SessionStart",
+        "--session-start",
+    ];
 
     // Absent plugin.json, 0 unseen: nothing without the flag, the arm line alone with it.
     assert!(!plugin_json.exists());
@@ -315,7 +324,7 @@ fn session_start_arms_the_watch_unless_plugin_json_says_off() {
     assert_eq!(
         CLAUDE_ARM_ZERO,
         format!(
-            r#"{{"hookSpecificOutput":{{"hookEventName":"UserPromptSubmit","additionalContext":"{ARM}"}}}}"#
+            r#"{{"hookSpecificOutput":{{"hookEventName":"SessionStart","additionalContext":"{ARM}"}}}}"#
         )
     );
 
@@ -329,7 +338,7 @@ fn session_start_arms_the_watch_unless_plugin_json_says_off() {
     let v: Value = serde_json::from_str(armed.trim()).unwrap();
     assert_eq!(
         v["hookSpecificOutput"]["additionalContext"],
-        format!("{SENTENCE_TWO} {ARM}")
+        format!("{SENTENCE_TWO} {ARM}\n{PREVIEW_TWO}")
     );
     // Neither invocation marks anything seen.
     assert_eq!(h.ok(&["inbox", "--count"]), "2\n");
@@ -338,9 +347,12 @@ fn session_start_arms_the_watch_unless_plugin_json_says_off() {
     std::fs::write(&plugin_json, r#"{"watch": true}"#).unwrap();
     assert_eq!(h.ok(&claude_ss), format!("{CLAUDE_ARM_TWO}\n"));
 
-    // `{"watch": false}`: today's output with and without the flag — counter only ...
+    // `{"watch": false}`: counter + previews, no arm sentence; plain hook unchanged ...
     std::fs::write(&plugin_json, r#"{"watch": false}"#).unwrap();
-    assert_eq!(h.ok(&claude_ss), format!("{CLAUDE_TWO}\n"));
+    assert_eq!(
+        h.ok(&claude_ss),
+        format!("{}\n", CLAUDE_ARM_TWO.replace(&format!(" {ARM}"), ""))
+    );
     assert_eq!(h.ok(&claude), format!("{CLAUDE_TWO}\n"));
     // ... and nothing at all once everything is seen.
     h.ok(&["inbox"]);

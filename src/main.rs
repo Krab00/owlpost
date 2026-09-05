@@ -84,6 +84,9 @@ enum Cmd {
         /// Add the owlpost watch arm sentence to `--count --format claude` (plugin SessionStart hook)
         #[arg(long)]
         session_start: bool,
+        /// Claude Code hook event name echoed in the `--format claude` line (hookEventName)
+        #[arg(long, default_value = "UserPromptSubmit")]
+        hook_event: String,
     },
     /// Full content of a record; marks it seen
     Show { id: String },
@@ -310,6 +313,7 @@ fn main() -> ExitCode {
             all,
             format,
             session_start,
+            hook_event,
         } => cli::inbox::run(
             &home,
             cli::inbox::Opts {
@@ -319,6 +323,7 @@ fn main() -> ExitCode {
                 format,
                 json: cli.json,
                 session_start,
+                hook_event,
             },
         ),
         Cmd::Allow {

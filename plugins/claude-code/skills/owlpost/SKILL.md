@@ -80,6 +80,14 @@ at session start, on every prompt and after tool calls.
 - When the user says "show owlpost inbox" (or similar), run `owl inbox` and summarise the
   rows: id, peer, path, age.
 
+## First turn
+
+When the `SessionStart` context lists unseen records (one `- <peer> <kind> [<state>] on
+<path>: <first line>` line each, closed by `owlpost: run /owlpost:inbox now.`), run
+`/owlpost:inbox` on the first turn before anything else: consent first (allow/deny via
+AskUserQuestion), then draft/send/reject per record. Do not ask whether to open it; the
+sentence is the instruction. Then handle the user's prompt.
+
 ## Live watch
 
 The `SessionStart` hook may inject `owlpost: arm the inbox watch (see /owlpost:watch)`

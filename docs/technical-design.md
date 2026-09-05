@@ -286,7 +286,7 @@ unavailable, `3` rate limited, `4` nothing to do (e.g. `watch` timeout).
 | `owl deny <peer>` | policy `never` |
 | `owl ask <peer> [path] "<question>" [--project <id>] [--wait <secs>] [--no-cache]` | send a question; the path is optional (a repo-level question sends no `body.path`); prints answer (cache/`200`/`--wait`) or `accepted <id>` |
 | `owl ask --file <path> "<question>"` | propose peers from `git blame` (top 3 by line share matched to contact emails); interactive pick, or `--json` list |
-| `owl inbox [--count] [--new] [--all] [--format plain\|claude\|codex\|kimi] [--session-start]` | list / count; `--format` emits the harness injection shape, empty output when count is 0; `--session-start` (the plugin's `SessionStart` hook only) adds the arm sentence to `--format claude` unless `$OWLPOST_HOME/plugin.json` has `{"watch": false}`, ignored by every other format and without `--count --format` |
+| `owl inbox [--count] [--new] [--all] [--format plain\|claude\|codex\|kimi] [--session-start]` | list / count; `--format` emits the harness injection shape, empty output when count is 0; `--hook-event <NAME>` (default `UserPromptSubmit`) is echoed as `hookEventName`, which Claude Code requires to match the firing event; `--session-start` (the plugin's `SessionStart` hook only) adds the arm sentence to `--format claude` unless `$OWLPOST_HOME/plugin.json` has `{"watch": false}`, ignored by every other format and without `--count --format` |
 | `owl show <id\|all>` | full content, marks seen |
 | `owl draft <id> [--harness <name>]` | run the responder, store and print the draft |
 | `owl edit <id>` | open the draft in `$EDITOR` |
@@ -311,6 +311,12 @@ Hook injection formats for `owl inbox --count --format …` (exact):
   The sentence is skipped when `$OWLPOST_HOME/plugin.json` reads `{"watch": false}`; an
   absent file, unparseable JSON or a missing `watch` key mean on. `/owlpost:watch on|off`
   writes that file; nothing else in `owl` reads or writes it.
+- `claude` with `--session-start` and unseen records: after the counter (and arm sentence) the
+  `additionalContext` continues with one line per unseen record,
+  `- <peer> <kind> [<state>] on <path>: <first line, 200 chars>` (` on <path>` omitted for
+  whole-repo questions and answers), then `owlpost: run /owlpost:inbox now.` — the skill
+  opens the inbox on the first turn. Lines are `\n`-joined inside the JSON string, so stdout
+  stays one line; nothing is marked seen. Independent of `plugin.json`.
 
 ## 10. Responder runner
 
