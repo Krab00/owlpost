@@ -38,7 +38,7 @@ patterns of the next steps a file runs itself); `tests/plugin.rs` pins the rule.
 | `/owlpost:send <id>` | `commands/send.md` | `owl send` — sign and move to outbox (confirms first) |
 | `/owlpost:reject <id>` | `commands/reject.md` | `owl reject` — discard a record (confirms first) |
 | `/owlpost:history [--peer] [--path] [--since]` | `commands/history.md` | `owl history` — finished exchanges |
-| `/owlpost:watch [--id <id>] [--timeout <secs>]` | `commands/watch.md` | `owl watch` — block until a record arrives (OWL-023 replaces it) |
+| `/owlpost:watch [on\|off\|status]` | `commands/watch.md` | Monitor over `owl inbox --count --format plain` — live one-line notifications when the inbox changes; `off` stops it and stores `{"watch": false}` in `$OWLPOST_HOME/plugin.json`, `on` restores it, `status` reports both |
 | `/owlpost:install [--dry-run]` | `commands/install.md` | `owl install` — register the daemon service |
 | `/owlpost:uninstall` | `commands/uninstall.md` | `owl uninstall` — remove the service (confirms first) |
 | `/owlpost:doctor` | `commands/doctor.md` | `owl doctor` — check the setup, offer the fix per failure |

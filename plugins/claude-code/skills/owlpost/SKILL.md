@@ -80,6 +80,22 @@ at session start, on every prompt and after tool calls.
 - When the user says "show owlpost inbox" (or similar), run `owl inbox` and summarise the
   rows: id, peer, path, age.
 
+## Live watch
+
+The `SessionStart` hook may inject `owlpost: arm the inbox watch (see /owlpost:watch)`
+next to the counter. When it does, arm the watch once per session, on the first turn,
+silently: one `Monitor` call with `persistent: true`, description "owlpost inbox", running
+the poll script from `commands/watch.md`. Do not mention the arming to the user, and
+never arm a second watch in the same session. No sentence means the user switched it off
+with `/owlpost:watch off`; do not arm it then.
+
+- On a watch event, report it in one line, built from the counter, for example
+  `owlpost: 1 new answer from Maciek`, and offer `/owlpost:inbox`.
+- The watch is a counter only: never list the inbox, show, draft or send anything because
+  of a watch event. Nothing is opened, drafted or sent without the human's pick.
+- `/owlpost:watch off` stops it for this session and later ones, `/owlpost:watch on`
+  restores it, `/owlpost:watch status` reports both.
+
 ## The answer loop
 
 Every step needs the human's go-ahead before moving to the next one.

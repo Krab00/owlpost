@@ -286,7 +286,7 @@ unavailable, `3` rate limited, `4` nothing to do (e.g. `watch` timeout).
 | `owl deny <peer>` | policy `never` |
 | `owl ask <peer> [path] "<question>" [--project <id>] [--wait <secs>] [--no-cache]` | send a question; the path is optional (a repo-level question sends no `body.path`); prints answer (cache/`200`/`--wait`) or `accepted <id>` |
 | `owl ask --file <path> "<question>"` | propose peers from `git blame` (top 3 by line share matched to contact emails); interactive pick, or `--json` list |
-| `owl inbox [--count] [--new] [--all] [--format plain\|claude\|codex\|kimi]` | list / count; `--format` emits the harness injection shape, empty output when count is 0 |
+| `owl inbox [--count] [--new] [--all] [--format plain\|claude\|codex\|kimi] [--session-start]` | list / count; `--format` emits the harness injection shape, empty output when count is 0; `--session-start` (the plugin's `SessionStart` hook only) adds the arm sentence to `--format claude` unless `$OWLPOST_HOME/plugin.json` has `{"watch": false}`, ignored by every other format and without `--count --format` |
 | `owl show <id\|all>` | full content, marks seen |
 | `owl draft <id> [--harness <name>]` | run the responder, store and print the draft |
 | `owl edit <id>` | open the draft in `$EDITOR` |
@@ -304,6 +304,13 @@ Hook injection formats for `owl inbox --count --format …` (exact):
   (unseen answers count as `N new answer(s)`; a mix reads `2 new questions, 1 new answer`)
 - `codex`: same JSON shape.
 - `kimi` / `plain`: the sentence alone.
+- `claude` with `--session-start` (the `SessionStart` hook): the `additionalContext` gains a second
+  sentence, exactly `owlpost: arm the inbox watch (see /owlpost:watch)`, after the counter
+  sentence and one space; at count 0 the line is emitted with the arm sentence alone:
+  `{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"owlpost: arm the inbox watch (see /owlpost:watch)"}}`.
+  The sentence is skipped when `$OWLPOST_HOME/plugin.json` reads `{"watch": false}`; an
+  absent file, unparseable JSON or a missing `watch` key mean on. `/owlpost:watch on|off`
+  writes that file; nothing else in `owl` reads or writes it.
 
 ## 10. Responder runner
 
