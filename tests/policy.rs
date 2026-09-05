@@ -302,7 +302,7 @@ fn allow_writes_manual_and_always_writes_auto() {
     assert_eq!(policy_mode(h.path(), h.cwd(), &h.ana), Some(Mode::Manual));
     assert_eq!(inbox(h.path(), &held).unwrap().state, "pending");
 
-    // `--always` on a local-source contact without the flag: exit 1, nothing written or released.
+    // `--always` on a global-source contact without the flag: exit 1, nothing written or released.
     let held = h.put(&h.ana, "held again?", "consent");
     let before = std::fs::read(overlay_path(h.path(), &h.ana)).unwrap();
     let err = h.fails(
@@ -344,7 +344,7 @@ fn allow_writes_manual_and_always_writes_auto() {
     assert_eq!(policy_mode(h.path(), h.cwd(), &h.ana), Some(Mode::Auto));
     assert_eq!(inbox(h.path(), &held).unwrap().state, "pending");
 
-    // A repo-source contact needs no flag: the overlay holds pubkey + policy only.
+    // A local-source contact needs no flag: the overlay holds pubkey + policy only.
     let repo = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(repo.path().join(".git")).unwrap();
     let peers = repo.path().join(".agents").join("peers");
@@ -362,7 +362,7 @@ fn allow_writes_manual_and_always_writes_auto() {
     )
     .unwrap();
     let book = ContactBook::load(h.path(), repo.path()).unwrap();
-    assert_eq!(book.resolve("Bea").unwrap().source, "repo");
+    assert_eq!(book.resolve("Bea").unwrap().source, "local");
     let held = h.put(&bea, "from the repo?", "consent");
     let out = owl_ok(h.path(), repo.path(), &["allow", "Bea", "--always"]);
     assert!(out.contains("policy auto"), "{out}");

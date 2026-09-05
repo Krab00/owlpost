@@ -56,7 +56,7 @@ producing a draft answer.
 $OWLPOST_HOME/                  default: ~/.config/owlpost   (tests: a temp dir per daemon)
   key                           ed25519 private key, 0600, one per person
   config.json                   listener, endpoints, harness templates, policy defaults
-  contacts/<fingerprint>.json   local-provider contacts and per-contact policy overlays
+  contacts/<slug or fingerprint>.json   global-scope contacts and per-contact policy overlays
   spool/
     inbox/<id>.json             received questions (state: consent | pending | seen | drafted)
     outbox/<id>.json            answers awaiting pull by the asker
@@ -66,7 +66,7 @@ $OWLPOST_HOME/                  default: ~/.config/owlpost   (tests: a temp dir 
   log/outgoing.jsonl            every answer that left this machine, with redaction report
   seen-ids.txt                  replay window
 
-<repo>/.agents/peers/<slug>.json   repo-provider contacts (committed, CODEOWNERS-protected)
+<repo>/.agents/peers/<slug>.json   local-scope contacts (committed, CODEOWNERS-protected)
 ```
 
 Writes are atomic (write to a temp file, rename). State transitions are moves between

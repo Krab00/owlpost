@@ -4,7 +4,7 @@
 //! * `--once`: release every held `consent` record from that peer to `pending`; no policy
 //!   is written, so the next question is held again.
 //! * default: write policy `manual` to the local overlay, then release.
-//! * `--always`: write policy `auto`, then release. A `local`-source contact (TOFU, key never
+//! * `--always`: write policy `auto`, then release. A `global`-source contact (TOFU, key never
 //!   verified out of band) needs `--i-verified-the-fingerprint`; without it nothing is written
 //!   and nothing is released (exit 1). Repo contacts were merged through a reviewed PR and
 //!   need no flag.
@@ -25,7 +25,7 @@ pub struct Opts {
 }
 
 /// The policy `owl allow` writes for `opts`, or `None` for `--once`; the flag conflict and the
-/// local-contact guard are user errors that must leave the home untouched.
+/// global-contact guard are user errors that must leave the home untouched.
 pub fn policy_for(contact: &Contact, opts: Opts) -> anyhow::Result<Option<Mode>> {
     if opts.once && opts.always {
         return Err(user_error(
@@ -38,7 +38,7 @@ pub fn policy_for(contact: &Contact, opts: Opts) -> anyhow::Result<Option<Mode>>
     if !opts.always {
         return Ok(Some(Mode::Manual));
     }
-    if contact.source == "local" && !opts.verified {
+    if contact.source == "global" && !opts.verified {
         return Err(user_error(format!(
             "{} ({}) was added by hand, so its key was never verified through a reviewed repo PR; \
              auto-accept for it needs the fingerprint compared out of band — repeat with \
@@ -128,14 +128,14 @@ mod tests {
         }
     }
 
-    /// `--always` × source × verification flag: only a local contact without the flag is refused.
+    /// `--always` × source × verification flag: only a global contact without the flag is refused.
     #[test]
     fn always_guard_matrix() {
         for (source, verified, expect) in [
-            ("repo", false, Some(Mode::Auto)),
-            ("repo", true, Some(Mode::Auto)),
+            ("local", false, Some(Mode::Auto)),
             ("local", true, Some(Mode::Auto)),
-            ("local", false, None),
+            ("global", true, Some(Mode::Auto)),
+            ("global", false, None),
         ] {
             let got = policy_for(&contact(source), opts(false, true, verified));
             match expect {
@@ -154,7 +154,7 @@ mod tests {
     /// Default and `--once` never look at the source or the flag.
     #[test]
     fn default_is_manual_and_once_writes_nothing() {
-        for source in ["repo", "local"] {
+        for source in ["local", "global"] {
             for verified in [false, true] {
                 assert_eq!(
                     policy_for(&contact(source), opts(false, false, verified)).unwrap(),
@@ -172,7 +172,7 @@ mod tests {
 
     #[test]
     fn once_and_always_conflict() {
-        for source in ["repo", "local"] {
+        for source in ["local", "global"] {
             for verified in [false, true] {
                 let e = policy_for(&contact(source), opts(true, true, verified)).unwrap_err();
                 assert_eq!(crate::cli::exit_code(&e), 1);

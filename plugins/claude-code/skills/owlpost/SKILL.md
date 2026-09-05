@@ -90,6 +90,15 @@ Source: owlpost:maciek:q_01J8Z...  (2026-09-02)
 Save only answers the human has read and accepted. Never store a peer's answer as your own
 knowledge without the provenance line, and never store questions or drafts from the inbox.
 
+## Contacts
+
+`owl contact list` shows every contact with its scope: `global` = this machine's own book
+(`$OWLPOST_HOME/contacts/`, every repo), `local` = this repository's `.agents/peers/`
+(committed, shared via PR). `--global` / `--local` list one scope. `owl add <file|json|->`
+adds a peer file to the global book (`--local` for the repo); `owl contact remove <peer>`
+(`--local` for the repo) deletes one. Adding never grants access: `owl allow <peer>` does,
+after the fingerprint was confirmed out-of-band.
+
 ## History
 
 `owl history` lists finished exchanges; filter with `--peer <peer>`, `--path <path>` and
