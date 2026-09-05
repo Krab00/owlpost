@@ -22,7 +22,7 @@ the arguments and offers the next step; prefer them over typing `owl` when the u
 a session. `/owlpost:me` is `owl contact export`, `/owlpost:contacts` is the arrow-key
 picker over `owl contact list`.
 
-- Setup: `/owlpost:init`, `/owlpost:whoami`, `/owlpost:me`, `/owlpost:card`,
+- Setup: `/owlpost:setup` (init + daemon + plugin in one go), `/owlpost:init`, `/owlpost:whoami`, `/owlpost:me`, `/owlpost:card`,
   `/owlpost:install`, `/owlpost:uninstall`, `/owlpost:doctor`, `/owlpost:update`
 - Contacts and trust: `/owlpost:contacts`, `/owlpost:contact`, `/owlpost:add`,
   `/owlpost:allow`, `/owlpost:deny`

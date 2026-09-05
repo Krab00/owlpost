@@ -49,6 +49,7 @@ fn help_lists_all_subcommands() {
         "install",
         "uninstall",
         "doctor",
+        "setup",
         "update",
     ];
     assert_eq!(listed, expected, "help:\n{help}");
@@ -688,6 +689,41 @@ fn contact_list_rows_follow_filename_order() {
             ["Adam", fp2.as_str(), "local", "-"]
         ]
     );
+}
+
+#[test]
+fn setup_dry_run_lists_steps_and_skips_init_when_key_exists() {
+    let home = tempfile::tempdir().unwrap();
+    let out = owl()
+        .args(["--home"])
+        .arg(home.path())
+        .args([
+            "setup",
+            "--dry-run",
+            "--plugin-source",
+            "/repo/plugins/claude-code",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("would run: owl init"), "{s}");
+    assert!(s.contains("would run: owl install"), "{s}");
+    assert!(
+        s.contains("claude plugin marketplace add /repo/plugins/claude-code")
+            || s.contains("claude not on PATH"),
+        "{s}"
+    );
+    std::fs::write(home.path().join("key"), b"x").unwrap();
+    let out = owl()
+        .args(["--home"])
+        .arg(home.path())
+        .args(["setup", "--dry-run"])
+        .output()
+        .unwrap();
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("owl init skipped"), "{s}");
+    assert!(!s.contains("would run: owl init"), "{s}");
 }
 
 #[test]
