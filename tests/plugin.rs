@@ -23,7 +23,7 @@ const EVENTS: [&str; 3] = ["SessionStart", "UserPromptSubmit", "PostToolUse"];
 /// OWL-023 AC1 literals: the arm sentence, alone and after the two-question counter.
 const ARM: &str = "owlpost: arm the inbox watch (see /owlpost:watch)";
 const CLAUDE_ARM_ZERO: &str = r#"{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"owlpost: arm the inbox watch (see /owlpost:watch)"}}"#;
-const CLAUDE_ARM_TWO: &str = r#"{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"owlpost: 2 new questions (Maciek 2). Say \"show owlpost inbox\" or run `owl inbox`. owlpost: arm the inbox watch (see /owlpost:watch)"}}"#;
+const CLAUDE_ARM_TWO: &str = r#"{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"owlpost: 2 new questions (Maciek 2). Say \"show owlpost inbox\" or run `owl inbox`. owlpost: arm the inbox watch (see /owlpost:watch)\n- Maciek question [pending] on src/auth/session.rs: why does session 0 retry?\n- Maciek question [pending] on src/auth/session.rs: why does session 1 retry?\nowlpost: run /owlpost:inbox now."}}"#;
 
 fn plugin(rel: &str) -> PathBuf {
     Path::new(PLUGIN).join(rel)
@@ -212,7 +212,7 @@ fn hook_script_forwards_session_start_and_reads_plugin_json() {
     let spool = Spool::new(two.path()).unwrap();
     assert_eq!(spool.list(Dir::Inbox, |r| !r.seen).unwrap().len(), 2);
 
-    // `{"watch": false}`: session start prints today's output — counter or nothing.
+    // `{"watch": false}`: session start keeps the previews, drops the arm sentence.
     for home in [&two, &empty] {
         std::fs::write(home.path().join("plugin.json"), r#"{"watch": false}"#).unwrap();
     }
@@ -222,10 +222,7 @@ fn hook_script_forwards_session_start_and_reads_plugin_json() {
             two.path(),
             &["--hook-event", "SessionStart", "--session-start"]
         )),
-        format!(
-            "{}\n",
-            CLAUDE_TWO.replace("UserPromptSubmit", "SessionStart")
-        )
+        format!("{}\n", CLAUDE_ARM_TWO.replace(&format!(" {ARM}"), ""))
     );
     assert_silent(
         &run_hook_args(

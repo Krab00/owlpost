@@ -311,6 +311,12 @@ Hook injection formats for `owl inbox --count --format …` (exact):
   The sentence is skipped when `$OWLPOST_HOME/plugin.json` reads `{"watch": false}`; an
   absent file, unparseable JSON or a missing `watch` key mean on. `/owlpost:watch on|off`
   writes that file; nothing else in `owl` reads or writes it.
+- `claude` with `--session-start` and unseen records: after the counter (and arm sentence) the
+  `additionalContext` continues with one line per unseen record,
+  `- <peer> <kind> [<state>] on <path>: <first line, 200 chars>` (` on <path>` omitted for
+  whole-repo questions and answers), then `owlpost: run /owlpost:inbox now.` — the skill
+  opens the inbox on the first turn. Lines are `\n`-joined inside the JSON string, so stdout
+  stays one line; nothing is marked seen. Independent of `plugin.json`.
 
 ## 10. Responder runner
 

@@ -9,7 +9,10 @@
 //! `--session-start` (OWL-023, set by the plugin's `SessionStart` hook only) adds the
 //! `ARM_SENTENCE` to the `claude` injection unless `$OWLPOST_HOME/plugin.json` says
 //! `{"watch": false}`; with the count at 0 the sentence stands alone. It is ignored by every
-//! other format and without `--count --format`.
+//! other format and without `--count --format`. The same flag adds one preview line per
+//! unseen record (`- <name> <kind> [<state>] on <path>: <first line>`) and the
+//! `OPEN_SENTENCE` so the first turn opens the inbox instead of reporting a counter; the
+//! preview never marks anything seen.
 //!
 //! Consent records get a prompt line under the table (`<name> wants to ask your agent about
 //! <project> — owl allow <fp> [--once|--always] / owl deny <fp>`); records the auto-accept
@@ -43,6 +46,35 @@ pub struct Opts {
 /// The second `additionalContext` sentence of the `claude` injection at session start (§9):
 /// the skill arms the Monitor-based inbox watch once when it sees it.
 pub const ARM_SENTENCE: &str = "owlpost: arm the inbox watch (see /owlpost:watch)";
+
+/// Closes the session-start preview: the skill runs `/owlpost:inbox` on the first turn.
+pub const OPEN_SENTENCE: &str = "owlpost: run /owlpost:inbox now.";
+
+/// One session-start preview line for an unseen record.
+pub fn preview(rec: &Record, payload: &Payload, book: &ContactBook) -> String {
+    let (kind, text) = match &payload.body {
+        Body::Question { question, .. } => ("question", question),
+        Body::Answer { answer, .. } => ("answer", answer),
+    };
+    // ponytail: first line, 200 chars; `/owlpost:inbox` shows the rest.
+    let first: String = text
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .chars()
+        .take(200)
+        .collect();
+    let at = match super::body_path(&payload.body) {
+        "-" => String::new(),
+        p => format!(" on {p}"),
+    };
+    format!(
+        "- {} {kind} [{}]{at}: {first}",
+        peer_name(book, &payload.from),
+        rec.state
+    )
+}
 
 /// `$OWLPOST_HOME/plugin.json` → `watch`; absent file, unparseable JSON or a missing/non-bool
 /// key all mean "on". Written by `/owlpost:watch on|off`, read only here.
@@ -101,12 +133,15 @@ pub fn sentence(per_peer: &[(String, usize)], answers: usize) -> String {
 
 /// The exact §9 injection line for `format`; `None` when there is nothing to inject. With
 /// `arm`, `Format::Claude` adds the [`ARM_SENTENCE`]: after the counter sentence
-/// (space-separated) when there is one, alone when the count is 0. Other formats ignore `arm`.
+/// (space-separated) when there is one, alone when the count is 0. Non-empty `previews`
+/// (session start with unseen records) follow on their own lines, closed by
+/// [`OPEN_SENTENCE`]. Other formats ignore `arm` and `previews`.
 pub fn injection(
     format: Format,
     per_peer: &[(String, usize)],
     answers: usize,
     arm: bool,
+    previews: &[String],
     event: &str,
 ) -> Option<String> {
     let arm = arm && format == Format::Claude;
@@ -124,6 +159,14 @@ pub fn injection(
             text.push(' ');
         }
         text.push_str(ARM_SENTENCE);
+    }
+    if format == Format::Claude && !empty && !previews.is_empty() {
+        for p in previews {
+            text.push('\n');
+            text.push_str(p);
+        }
+        text.push('\n');
+        text.push_str(OPEN_SENTENCE);
     }
     Some(match format {
         Format::Claude | Format::Codex => {
@@ -184,16 +227,7 @@ pub fn run(home: &Path, opts: Opts) -> anyhow::Result<()> {
     let spool = Spool::new(home)?;
     let book = super::contact_book(home)?;
     if opts.count {
-        let arm = opts.session_start && watch_enabled(home);
-        return count(
-            &spool,
-            &book,
-            opts.all,
-            format,
-            opts.json,
-            arm,
-            &opts.hook_event,
-        );
+        return count(&spool, &book, &opts, format, watch_enabled(home));
     }
     let records = spool.list(Dir::Inbox, |r| !opts.new || !r.seen)?;
     let now = envelope::now_unix();
@@ -263,12 +297,17 @@ pub fn run(home: &Path, opts: Opts) -> anyhow::Result<()> {
 fn count(
     spool: &Spool,
     book: &ContactBook,
-    all: bool,
+    opts: &Opts,
     format: Option<Format>,
-    json: bool,
-    arm: bool,
-    event: &str,
+    watch: bool,
 ) -> anyhow::Result<()> {
+    let Opts {
+        all,
+        json,
+        session_start,
+        ..
+    } = *opts;
+    let event = &opts.hook_event;
     let records = spool.list(Dir::Inbox, |r| all || !r.seen)?;
     let per_peer = per_peer(&records, book)?;
     let total = records.len();
@@ -276,9 +315,18 @@ fn count(
         .iter()
         .filter(|(id, r)| payload_of(id, r).is_ok_and(|p| p.kind == Kind::Question))
         .count();
+    let previews = if session_start {
+        records
+            .iter()
+            .map(|(id, r)| Ok(preview(r, &payload_of(id, r)?, book)))
+            .collect::<anyhow::Result<Vec<_>>>()?
+    } else {
+        Vec::new()
+    };
     match format {
         Some(f) => {
-            if let Some(line) = injection(f, &per_peer, total - questions, arm, event) {
+            let arm = session_start && watch;
+            if let Some(line) = injection(f, &per_peer, total - questions, arm, &previews, event) {
                 println!("{line}");
             }
         }
@@ -329,27 +377,34 @@ mod tests {
     #[test]
     fn injection_shapes_per_format() {
         let p = peers(&[("Maciek", 2)]);
-        let claude = injection(Format::Claude, &p, 0, false, "UserPromptSubmit").unwrap();
+        let claude = injection(Format::Claude, &p, 0, false, &[], "UserPromptSubmit").unwrap();
         assert_eq!(
             claude,
             r#"{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"owlpost: 2 new questions (Maciek 2). Say \"show owlpost inbox\" or run `owl inbox`."}}"#
         );
         assert_eq!(
-            injection(Format::Codex, &p, 0, false, "UserPromptSubmit").unwrap(),
+            injection(Format::Codex, &p, 0, false, &[], "UserPromptSubmit").unwrap(),
             claude
         );
         assert_eq!(
-            injection(Format::Kimi, &p, 0, false, "UserPromptSubmit").unwrap(),
+            injection(Format::Kimi, &p, 0, false, &[], "UserPromptSubmit").unwrap(),
             sentence(&p, 0)
         );
         assert_eq!(
-            injection(Format::Plain, &p, 0, false, "UserPromptSubmit").unwrap(),
+            injection(Format::Plain, &p, 0, false, &[], "UserPromptSubmit").unwrap(),
             sentence(&p, 0)
         );
         for f in [Format::Plain, Format::Claude, Format::Codex, Format::Kimi] {
-            assert_eq!(injection(f, &[], 0, false, "UserPromptSubmit"), None);
+            assert_eq!(injection(f, &[], 0, false, &[], "UserPromptSubmit"), None);
             assert_eq!(
-                injection(f, &peers(&[("Maciek", 0)]), 0, false, "UserPromptSubmit"),
+                injection(
+                    f,
+                    &peers(&[("Maciek", 0)]),
+                    0,
+                    false,
+                    &[],
+                    "UserPromptSubmit"
+                ),
                 None
             );
         }
@@ -366,12 +421,12 @@ mod tests {
         let p = peers(&[("Maciek", 2)]);
         // Counter + arm, one space between the two sentences, counter text unchanged.
         assert_eq!(
-            injection(Format::Claude, &p, 0, true, "SessionStart").unwrap(),
+            injection(Format::Claude, &p, 0, true, &[], "SessionStart").unwrap(),
             ARMED_TWO
         );
         // Zero unseen + arm: the arm sentence alone, in the same JSON shape.
         assert_eq!(
-            injection(Format::Claude, &[], 0, true, "SessionStart").unwrap(),
+            injection(Format::Claude, &[], 0, true, &[], "SessionStart").unwrap(),
             ARMED_ZERO
         );
         assert_eq!(
@@ -380,6 +435,7 @@ mod tests {
                 &peers(&[("Maciek", 0)]),
                 0,
                 true,
+                &[],
                 "SessionStart"
             )
             .unwrap(),
@@ -388,11 +444,50 @@ mod tests {
         // Every other format ignores `arm`: same as without, nothing at zero.
         for f in [Format::Plain, Format::Codex, Format::Kimi] {
             assert_eq!(
-                injection(f, &p, 0, true, "SessionStart"),
-                injection(f, &p, 0, false, "SessionStart"),
+                injection(f, &p, 0, true, &[], "SessionStart"),
+                injection(f, &p, 0, false, &[], "SessionStart"),
                 "{f:?}"
             );
-            assert_eq!(injection(f, &[], 0, true, "SessionStart"), None, "{f:?}");
+            assert_eq!(
+                injection(f, &[], 0, true, &[], "SessionStart"),
+                None,
+                "{f:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn previews_follow_arm_and_close_with_open_sentence_claude_only() {
+        let p = peers(&[("Maciek", 1)]);
+        let pv = vec!["- Maciek question [consent] on src/a.rs: why?".to_string()];
+        let line = injection(Format::Claude, &p, 0, true, &pv, "SessionStart").unwrap();
+        let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(
+            v["hookSpecificOutput"]["additionalContext"],
+            format!(
+                "{} {ARM_SENTENCE}\n{}\n{OPEN_SENTENCE}",
+                sentence(&p, 0),
+                pv[0]
+            )
+        );
+        // Watch off: previews still go out, without the arm sentence.
+        let line = injection(Format::Claude, &p, 0, false, &pv, "SessionStart").unwrap();
+        let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(
+            v["hookSpecificOutput"]["additionalContext"],
+            format!("{}\n{}\n{OPEN_SENTENCE}", sentence(&p, 0), pv[0])
+        );
+        // Zero unseen: no previews, no open sentence.
+        assert_eq!(
+            injection(Format::Claude, &[], 0, true, &pv, "SessionStart").unwrap(),
+            injection(Format::Claude, &[], 0, true, &[], "SessionStart").unwrap()
+        );
+        for f in [Format::Plain, Format::Codex, Format::Kimi] {
+            assert_eq!(
+                injection(f, &p, 0, false, &pv, "SessionStart"),
+                injection(f, &p, 0, false, &[], "SessionStart"),
+                "{f:?}"
+            );
         }
     }
 
