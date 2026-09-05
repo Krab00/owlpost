@@ -326,7 +326,7 @@ mod tests {
             let mut v = json!({
                 "name": "Ana",
                 "pubkey": identity::pubkey_string(&self.peer.verifying_key()),
-                "source": "local",
+                "source": "global",
             });
             if let Some(mode) = mode {
                 let p = Policy {

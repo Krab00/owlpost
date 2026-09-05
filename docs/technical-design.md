@@ -33,8 +33,8 @@ src/
   spool.rs           directories, atomic write, state transitions, listing, history
   contacts/
     mod.rs           Contact, Policy, ContactBook (merge providers, lookup)
-    repo.rs          .agents/peers/*.json discovery (walk up from cwd to the git root)
-    local.rs         $OWLPOST_HOME/contacts/*.json entries + policy overlays
+    repo.rs          local scope: .agents/peers/*.json (walk up from cwd to the git root)
+    local.rs         global scope: $OWLPOST_HOME/contacts/*.json entries + policy overlays
   tls.rs             cert from key (rcgen), pinned client/server verifiers, client builder
   server.rs          axum router, handlers, rate limiter, replay window
   client.rs          send question, fetch outbox, ack (iroh first, then every endpoint)
@@ -125,36 +125,57 @@ scripts/
 
 ## 5. Contacts and policy
 
-Repo provider — `<git root>/.agents/peers/<slug>.json`, one file per person:
+Two scopes, named the way the user sees them; `Contact::source` carries the scope name.
+
+**Local** scope (`source: "local"`) — `<git root>/.agents/peers/<slug>.json`, one file per
+person, committed and shared with the team via PR:
 
 ```json
 { "name": "Maciek", "emails": ["maciek@company.com"], "pubkey": "ed25519:…", "endpoints": ["maciek-mbp.tail1234.ts.net:7411"] }
 ```
 
-Local provider — `$OWLPOST_HOME/contacts/<fingerprint>.json`:
+**Global** scope (`source: "global"`) — `$OWLPOST_HOME/contacts/<slug>.json` (written by
+`owl add`) or `<fingerprint>.json` (written by `owl allow` / `owl deny`), this machine's own
+book for every repository:
 
 ```json
 {
   "name": "Ola", "emails": ["ola@example.org"], "pubkey": "ed25519:…", "endpoints": ["ola.example.org:7411"],
-  "source": "local",
+  "source": "global",
   "policy": { "mode": "manual", "scope": { "projects": ["*"] }, "rate_limit_per_hour": 20 },
   "added_at": "2026-09-01T10:00:00Z"
 }
 ```
 
-- A local file whose `pubkey` matches a repo contact is a **policy overlay**: only `policy` is
-  read from it. Repo data wins for name/emails/endpoints.
+- A global file whose `pubkey` matches a local contact is a **policy overlay**: only `policy` is
+  read from it. Local (repo) data wins for name/emails/endpoints, and the merged contact keeps
+  `source: "local"`.
 - `policy.mode`: `manual` (hold for the human), `auto` (draft + send without a human), `never`
   (respond `unavailable`). Absent policy = consent required on first question.
-- Repo contacts may be set to `auto`; local contacts may be set to `auto` only with
+- Local contacts may be set to `auto`; global contacts may be set to `auto` only with
   `owl allow <peer> --always --i-verified-the-fingerprint`.
 - `ContactBook::resolve(query)` matches, in order: exact fingerprint, exact email, unique
   case-insensitive name prefix. Ambiguity is an error listing candidates.
-- `owl contact export` prints this machine's own repo-provider entry (from config + key) so the
-  person can commit it. `owl contact list` shows the merged book with provenance and policy.
-- `owl add <host:port>` fetches the agent card over TLS **without** pinning (unknown peer),
-  shows name + fingerprint, asks for confirmation (or `--yes` with `--fingerprint <fp>` to
-  assert the expected value), then writes a local contact with pinned `pubkey` and no policy.
+- `owl contact export` prints this machine's own peer file (from config + key) so the person
+  can commit it or send it. `owl contact list [--global|--local]` shows the merged book (or one
+  scope) with `SOURCE` = `global` / `local` and policy; both flags together is a usage error.
+- `owl add <peer-file | '<json>' | -> [--local]` validates a peer file (`name` non-empty,
+  `pubkey` parsable, optional `emails` / `endpoints` arrays of strings; other fields dropped),
+  refuses a pubkey already present in either scope (`already a contact: <name> (<scope>)`,
+  exit 1) and a file that already exists under the same slug, writes `<slug>.json` (name
+  lowercased, runs of non-alphanumerics → `-`, trimmed) atomically into the global book or,
+  with `--local`, into `.agents/peers/` of the git root above the current directory, and
+  prints `added <name> <fingerprint> (global|local)`. TOFU (architecture §4): adding never
+  sets a policy; `owl allow` does.
+- `owl contact remove <peer> [--local]` resolves the peer among the contacts of the named
+  scope only (default global; a policy overlay of a local contact is not a global contact),
+  deletes the contact's file there and, in both scopes, that key's policy overlay in
+  `$OWLPOST_HOME/contacts/` (so no nameless ghost blocks a later `owl add`), and prints
+  `removed <name> (<scope>)`. `.agents/peers/` is never touched without `--local`. A peer that
+  lives only in the other scope exits 1 with `<name> is a local contact; use --local` /
+  `<name> is a global contact; drop --local`; a failed unlink exits 1 naming the path.
+- Global files merge by key in any filename order: a policy overlay always wins over a
+  policy-less file and a contact file supplies name/emails/endpoints to a bare overlay.
 
 ## 6. Envelope
 
@@ -201,7 +222,7 @@ in `seen-ids.txt` (pruned on load).
 ## 7. HTTP API (daemon)
 
 All routes require mTLS except the two card routes, which additionally accept **unpinned**
-clients (so `owl add` can fetch the card of an unknown peer). Peer identity = fingerprint of the
+clients (so `owl card <peer>` can fetch the card of an unknown peer). Peer identity = fingerprint of the
 client certificate's public key.
 
 The same handlers are served a second time over **iroh** (ALPN `owl/1`): the daemon binds
@@ -259,8 +280,8 @@ unavailable, `3` rate limited, `4` nothing to do (e.g. `watch` timeout).
 | `owl init [--name] [--email …]` | create home, key, config; print fingerprint |
 | `owl whoami` | identity summary |
 | `owl card [<peer>]` | print own card, or fetch and print a peer's card |
-| `owl contact list \| export \| show <peer>` | merged contact book |
-| `owl add <host:port> [--yes --fingerprint <fp>]` | TOFU add to local provider |
+| `owl contact list [--global\|--local] \| export \| show <peer> \| remove <peer> [--local]` | contact book: list (merged or one scope), own peer file, one contact as JSON, delete a contact's file from one scope |
+| `owl add <peer-file\|json\|-> [--local]` | validate a peer file and write it to the global book (or the repo's `.agents/peers/`); no policy |
 | `owl allow <peer> [--once \| --always] [--i-verified-the-fingerprint]` | set policy `manual` (once = release the held question only) or `auto` |
 | `owl deny <peer>` | policy `never` |
 | `owl ask <peer> [path] "<question>" [--project <id>] [--wait <secs>] [--no-cache]` | send a question; the path is optional (a repo-level question sends no `body.path`); prints answer (cache/`200`/`--wait`) or `accepted <id>` |
@@ -351,7 +372,7 @@ uses its own home; `cargo test` must pass offline.
 `tests/e2e.rs` runs both peers as real `owl daemon --foreground` subprocesses (each with its
 own `OWLPOST_NOTIFY_CMD` logging script, so notifications are asserted per side) from a
 fixture git repo whose `.agents/peers/` holds both peer files; every `owl` command runs from
-that repo, so contact resolution goes through the repo provider like a user's shell.
+that repo, so contact resolution goes through the local scope like a user's shell.
 
 Running the manual loop against a real harness:
 

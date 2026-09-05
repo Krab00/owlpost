@@ -43,18 +43,18 @@ enum Cmd {
     Whoami,
     /// Print own card, or fetch and print a peer's card
     Card { peer: Option<String> },
-    /// Merged contact book: list | export | show <peer>
+    /// Contact book: list | export | show <peer> | remove <peer>
     Contact {
         #[command(subcommand)]
         cmd: ContactCmd,
     },
-    /// TOFU-add a peer to the local provider
+    /// Add a peer file to the global contacts (or the repo's .agents/peers/ with --local)
     Add {
-        host_port: String,
+        /// Path to the peer file, the JSON itself, or `-` for stdin
+        source: String,
+        /// Write into <git root>/.agents/peers/ instead of $OWLPOST_HOME/contacts/
         #[arg(long)]
-        yes: bool,
-        #[arg(long)]
-        fingerprint: Option<String>,
+        local: bool,
     },
     /// Release held questions from a peer: policy manual (default), --once (no policy),
     /// --always (auto; a hand-added contact needs --i-verified-the-fingerprint)
@@ -139,12 +139,25 @@ enum Cmd {
 
 #[derive(Subcommand)]
 enum ContactCmd {
-    /// One row per merged contact: name, fingerprint, source, policy
-    List,
+    /// One row per contact: name, fingerprint, source (global|local), policy
+    List {
+        /// Only $OWLPOST_HOME/contacts/
+        #[arg(long, conflicts_with = "local")]
+        global: bool,
+        /// Only <git root>/.agents/peers/
+        #[arg(long)]
+        local: bool,
+    },
     /// Print one contact as JSON
     Show { peer: String },
-    /// This machine's repo-provider entry (from config + key) as JSON
+    /// This machine's peer file (from config + key) as JSON
     Export,
+    /// Delete a contact's file from the global book (or .agents/peers/ with --local)
+    Remove {
+        peer: String,
+        #[arg(long)]
+        local: bool,
+    },
 }
 
 fn init(home: &Path, name: Option<String>, emails: Vec<String>) -> anyhow::Result<()> {
@@ -209,10 +222,15 @@ fn require_identity(home: &Path) -> anyhow::Result<(config::Config, identity::Id
 }
 
 fn contact(home: &Path, cmd: ContactCmd, json: bool) -> anyhow::Result<()> {
-    let book = || contacts::ContactBook::load(home, &std::env::current_dir()?);
+    let cwd = std::env::current_dir()?;
+    let book = || contacts::ContactBook::load(home, &cwd);
     match cmd {
-        ContactCmd::List => {
-            let book = book()?;
+        ContactCmd::List { global, local } => {
+            let book = match (global, local) {
+                (true, _) => contacts::ContactBook::load_scope(home, &cwd, "global")?,
+                (_, true) => contacts::ContactBook::load_scope(home, &cwd, "local")?,
+                _ => book()?,
+            };
             if json {
                 println!("{}", serde_json::to_string_pretty(&book.contacts)?);
             } else {
@@ -243,6 +261,25 @@ fn contact(home: &Path, cmd: ContactCmd, json: bool) -> anyhow::Result<()> {
             });
             println!("{}", serde_json::to_string_pretty(&out)?);
         }
+        ContactCmd::Remove { peer, local } => {
+            let scope = if local { "local" } else { "global" };
+            match contacts::ContactBook::remove(home, &cwd, scope, &peer) {
+                Ok((name, _)) => println!("removed {name} ({scope})"),
+                Err(e) => {
+                    // The same peer in the other scope gets a hint naming the flag.
+                    let hint = match book()?.resolve(&peer) {
+                        Ok(other) if other.source == "local" && !local => {
+                            format!("{} is a local contact; use --local", other.name)
+                        }
+                        Ok(other) if other.source == "global" && local => {
+                            format!("{} is a global contact; drop --local", other.name)
+                        }
+                        _ => return Err(e),
+                    };
+                    return Err(cli::user_error(hint));
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -272,6 +309,7 @@ fn main() -> ExitCode {
         Cmd::Init { name, email } => init(&home, name, email),
         Cmd::Whoami => whoami(&home, cli.json),
         Cmd::Contact { cmd } => contact(&home, cmd, cli.json),
+        Cmd::Add { source, local } => cli::add::run(&home, &source, local),
         Cmd::Daemon { foreground } => daemon_cmd(&home, foreground),
         Cmd::Inbox {
             count,

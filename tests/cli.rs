@@ -459,29 +459,29 @@ fn contact_list_in_fixture_repo() {
     let r = rows(&text);
     assert_eq!(r.len(), 2, "stdout: {text}");
     for (row, (name, fp)) in r.iter().zip(&peers) {
-        assert_eq!(row, &[name.clone(), fp.clone(), "repo".into(), "-".into()]);
+        assert_eq!(row, &[name.clone(), fp.clone(), "local".into(), "-".into()]);
     }
     // Overlay for Maciek → policy column shows auto; Marek unchanged.
     let (pk1, fp1) = peer(1);
     std::fs::create_dir_all(home.join("contacts")).unwrap();
     std::fs::write(
         home.join("contacts").join(format!("{fp1}.json")),
-        serde_json::json!({"pubkey": pk1, "policy": {"mode": "auto"}, "source": "local"})
+        serde_json::json!({"pubkey": pk1, "policy": {"mode": "auto"}, "source": "global"})
             .to_string(),
     )
     .unwrap();
     let text = list(&[]);
     let r = rows(&text);
     assert_eq!(r.len(), 2, "stdout: {text}");
-    assert_eq!(r[0], ["Maciek", &peers[0].1, "repo", "auto"]);
-    assert_eq!(r[1], ["Marek", &peers[1].1, "repo", "-"]);
+    assert_eq!(r[0], ["Maciek", &peers[0].1, "local", "auto"]);
+    assert_eq!(r[1], ["Marek", &peers[1].1, "local", "-"]);
     // --json
     let v: serde_json::Value = serde_json::from_str(&list(&["--json"])).unwrap();
     let arr = v.as_array().unwrap();
     assert_eq!(arr.len(), 2);
     assert_eq!(arr[0]["name"], "Maciek");
     assert_eq!(arr[0]["fingerprint"], fp1);
-    assert_eq!(arr[0]["source"], "repo");
+    assert_eq!(arr[0]["source"], "local");
     assert_eq!(arr[0]["policy"]["mode"], "auto");
     assert_eq!(arr[1]["name"], "Marek");
     assert!(arr[1].get("policy").is_none(), "{v}");
@@ -512,7 +512,7 @@ fn contact_list_outside_repo_lists_local_only() {
         .skip(1)
         .map(|l| l.split_whitespace().collect())
         .collect();
-    assert_eq!(rows, [["Ola", fp3.as_str(), "local", "never"]]);
+    assert_eq!(rows, [["Ola", fp3.as_str(), "global", "never"]]);
 }
 
 #[test]
@@ -534,7 +534,7 @@ fn contact_show_resolves_and_reports_ambiguity() {
     let v: serde_json::Value = serde_json::from_slice(&ok.stdout).unwrap();
     assert_eq!(v["name"], "Marek");
     assert_eq!(v["fingerprint"], peers[1].1);
-    assert_eq!(v["source"], "repo");
+    assert_eq!(v["source"], "local");
     let amb = show("ma");
     assert_eq!(amb.status.code(), Some(1));
     let err = String::from_utf8_lossy(&amb.stderr);
@@ -684,8 +684,8 @@ fn contact_list_rows_follow_filename_order() {
     assert_eq!(
         rows,
         [
-            ["Zoe", fp1.as_str(), "repo", "-"],
-            ["Adam", fp2.as_str(), "repo", "-"]
+            ["Zoe", fp1.as_str(), "local", "-"],
+            ["Adam", fp2.as_str(), "local", "-"]
         ]
     );
 }
