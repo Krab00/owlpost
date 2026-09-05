@@ -85,13 +85,24 @@ at session start, on every prompt and after tool calls.
 Every step needs the human's go-ahead before moving to the next one.
 
 1. `owl inbox` lists inbox records and marks them seen (`owl inbox --new` lists only
-   unseen ones; `owl inbox --count` never marks anything).
-2. `owl show <id>` prints the full question: who asked, project, path, text.
-3. `owl draft <id>` runs the configured responder harness against this checkout and stores
+   unseen ones; `owl inbox --count` never marks anything). `/owlpost:inbox` walks the
+   records below with `AskUserQuestion` pickers, so the human never types an `owl` command.
+2. A record in state `consent` is a question from a peer who has no policy yet; it is held
+   until the human decides. `owl show <id>` prints the question; show it verbatim, in a
+   code block, with the peer's name and fingerprint. Then, only on the human's pick:
+   - `owl allow <peer> --once` releases the held questions to `pending` without a policy;
+   - `owl allow <peer> --always` sets policy `auto` (future questions answered without
+     asking) — only after the human confirmed the peer's fingerprint out-of-band; a
+     hand-added contact additionally needs `--i-verified-the-fingerprint`;
+   - `owl deny <peer>` sets policy `never`: held questions are denied, new ones get 403.
+   Never allow or deny on your own initiative.
+3. A `pending` record is a question with no draft yet. `owl show <id>` prints the full
+   question: who asked, project, path, text. Show it verbatim before offering anything.
+4. `owl draft <id>` runs the configured responder harness against this checkout and stores
    a draft answer (`--harness <name>` picks another configured harness).
-4. Show the draft verbatim to the human, in a code block. Do not paraphrase, shorten or
-   "improve" it silently.
-5. Only on explicit human approval:
+5. Show the draft verbatim to the human, in a code block. Do not paraphrase, shorten or
+   "improve" it silently. Say so when the draft's language differs from the question's.
+6. Only on explicit human approval:
    - `owl send <id>` signs the draft and moves it to the outbox;
    - `owl edit <id>` opens the draft in `$EDITOR` when the human wants changes, then show
      the edited draft again and ask again before `owl send`;

@@ -31,7 +31,7 @@ patterns of the next steps a file runs itself); `tests/plugin.rs` pins the rule.
 | `/owlpost:allow <peer> [--once\|--always]` | `commands/allow.md` | `owl allow` — release held questions, set policy (confirms first) |
 | `/owlpost:deny <peer>` | `commands/deny.md` | `owl deny` — policy never (confirms first) |
 | `/owlpost:ask <peer> [path] <question>` | `commands/ask.md` | `owl ask` — send a question (confirms first) |
-| `/owlpost:inbox` | `commands/inbox.md` | `owl inbox` — list records, offer the next action |
+| `/owlpost:inbox` | `commands/inbox.md` | `owl inbox --json` — walk the records: question verbatim, consent picker (allow once/always, deny), draft, verbatim draft, send/edit/reject picker |
 | `/owlpost:show <id>` | `commands/show.md` | `owl show` — full record, offer draft/send/reject |
 | `/owlpost:draft <id> [--harness <name>]` | `commands/draft.md` | `owl draft` — run the responder, show the draft |
 | `/owlpost:edit <id>` | `commands/edit.md` | `owl edit` opens `$EDITOR`, which cannot run in a session; explains the alternatives |
