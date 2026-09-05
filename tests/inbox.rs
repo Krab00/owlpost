@@ -755,6 +755,65 @@ fn edit_replaces_draft() {
 
 // ---------------------------------------------------------------- AC5
 
+/// OWL-018: `owl inbox`, `owl show` and `owl history` print `-` for a question without a
+/// path; `--path <glob>` never matches such a row.
+#[test]
+fn listings_print_dash_for_a_question_without_path() {
+    let h = Home::new();
+    let q = Payload::question(&fp(&h.maciek), &fp(&h.me), PROJECT, None, "how big is it?");
+    let env = Envelope::sign(&q, &h.maciek);
+    let id = h.put_env(&env, "pending");
+    let with_path = h.put(&h.ana, "keep me?", "pending");
+
+    let rows = h.json(&["inbox", "--json"]);
+    let row = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == id)
+        .unwrap();
+    assert_eq!(row["path"], "-");
+    assert_eq!(row["project"], PROJECT);
+    let table = h.ok(&["inbox"]);
+    let line = table.lines().find(|l| l.contains(&id)).unwrap();
+    assert!(line.contains(" - "), "{line}");
+
+    let shown = h.ok(&["show", &id]);
+    assert!(shown.contains("\npath:     -\n"), "{shown}");
+    assert!(shown.contains("\nquestion:\nhow big is it?\n"), "{shown}");
+
+    h.ok(&["reject", &id]);
+    h.ok(&["reject", &with_path]);
+    let hist = h.json(&["history", "--json"]);
+    let row = hist
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == id)
+        .unwrap();
+    assert_eq!(row["path"], "-");
+    let table = h.ok(&["history"]);
+    let line = table.lines().find(|l| l.contains(&id)).unwrap();
+    assert!(line.contains(" - "), "{line}");
+    let ids = |v: &Value| -> Vec<String> {
+        v.as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["id"].as_str().unwrap().to_string())
+            .collect()
+    };
+    assert_eq!(
+        ids(&h.json(&["history", "--json", "--path", "src/*"])),
+        vec![with_path.clone()],
+        "a path glob skips the repo-level question"
+    );
+    assert_eq!(
+        ids(&h.json(&["history", "--json", "--path", "-"])),
+        vec![id.clone()],
+        "the literal `-` matches only the repo-level question"
+    );
+}
+
 #[test]
 fn reject_and_history() {
     let h = Home::new();

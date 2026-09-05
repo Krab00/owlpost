@@ -350,11 +350,15 @@ mod tests {
         }
 
         fn put(&self, state: &str, meta: Value) -> String {
+            self.put_with_path(Some("src/auth/session.rs"), state, meta)
+        }
+
+        fn put_with_path(&self, path: Option<&str>, state: &str, meta: Value) -> String {
             let q = Payload::question(
                 &self.fp(&self.peer),
                 &self.fp(&self.me),
                 PROJECT,
-                Some("src/auth/session.rs"),
+                path,
                 "Where is the retry policy?",
             );
             let env = Envelope::sign(&q, &self.peer);
@@ -406,6 +410,23 @@ mod tests {
 
     fn peer_meta(f: &Fixture) -> Value {
         json!({ "peer": f.fp(&f.peer), "hash": "h" })
+    }
+
+    /// OWL-018: a repo-level question is auto-answered like any other; the outcome (and so
+    /// the "auto-answered … about" notification) carries `-` for the path.
+    #[test]
+    fn auto_policy_answers_a_question_without_path() {
+        let f = Fixture::new(Some(Mode::Auto), true);
+        let id = f.put_with_path(None, "pending", peer_meta(&f));
+        let out = f.attempt(&id);
+        let Outcome::Sent { answer, peer, path } = out else {
+            panic!("{out:?}");
+        };
+        assert_eq!(peer, f.fp(&f.peer));
+        assert_eq!(path, "-");
+        assert_eq!(answer.to, f.fp(&f.peer));
+        assert!(f.inbox(&id).is_none());
+        assert_eq!(f.outbox_len(), 1);
     }
 
     #[test]
