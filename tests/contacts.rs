@@ -973,6 +973,7 @@ fn contact_remove_local_deletes_the_repo_file() {
     let home = tmp.path().join("home");
     let (root, sub) = fixture_repo(tmp.path());
     overlay(&home, 1, "", "auto"); // policy overlay for Maciek lives in global
+    overlay(&home, 3, "Ola", "manual");
     let o = owl(
         &home,
         &sub,
@@ -984,10 +985,17 @@ fn contact_remove_local_deletes_the_repo_file() {
     assert!(!root.join(".agents/peers/maciek.json").exists());
     assert!(root.join(".agents/peers/marek.json").exists());
     assert!(
-        home.join("contacts")
+        !home
+            .join("contacts")
             .join(format!("{}.json", fp(1)))
             .exists(),
-        "--local never touches the global book"
+        "the policy overlay goes with its contact"
+    );
+    assert!(
+        home.join("contacts")
+            .join(format!("{}.json", fp(3)))
+            .exists(),
+        "other global files untouched"
     );
     // Ambiguous prefix in the scope is an error and deletes nothing.
     std::fs::write(
@@ -1041,9 +1049,19 @@ fn contact_remove_local_outside_a_git_repo_is_an_error() {
     let home = tmp.path().join("home");
     let cwd = plain_dir(tmp.path());
     overlay(&home, 3, "Ola", "manual");
-    let o = owl(&home, &cwd, &["contact", "remove", "Ola", "--local"], None);
+    // An unknown peer: the missing repo is the error.
+    let o = owl(
+        &home,
+        &cwd,
+        &["contact", "remove", "Nobody", "--local"],
+        None,
+    );
     assert_eq!(o.status.code(), Some(1));
     assert!(err(&o).contains("git repository"), "{}", err(&o));
+    // A global peer: the scope hint is more useful than the missing repo.
+    let o = owl(&home, &cwd, &["contact", "remove", "Ola", "--local"], None);
+    assert_eq!(o.status.code(), Some(1));
+    assert_eq!(err(&o), "owl: Ola is a global contact; drop --local\n");
     assert!(
         home.join("contacts")
             .join(format!("{}.json", fp(3)))
@@ -1079,37 +1097,253 @@ fn load_scope_filters_the_merged_book() {
 }
 
 #[test]
-fn scope_files_returns_paths_and_skips_overlays() {
+fn policy_survives_reload_whatever_the_filename_order() {
+    // Global files merge in filename order: `owl:<fp>.json` sorts after "marek" and before
+    // "pawel", so both orders of (contact file, policy overlay) must keep name AND policy.
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let cwd = plain_dir(tmp.path());
+    for (name, seed) in [("Marek", 2u8), ("Pawel", 5)] {
+        let o = owl(
+            &home,
+            &cwd,
+            &["add", &peer_json(name, "x@x.org", seed)],
+            None,
+        );
+        assert_eq!(o.status.code(), Some(0), "{}", err(&o));
+        let mut book = ContactBook::load(&home, &cwd).unwrap();
+        book.set_policy(&home, &fp(seed), auto()).unwrap();
+        assert!(
+            home.join("contacts")
+                .join(format!("{}.json", fp(seed)))
+                .exists()
+        );
+        let book = ContactBook::load(&home, &cwd).unwrap();
+        let c = book.resolve(name).unwrap();
+        assert_eq!(c.name, name);
+        assert_eq!(c.emails, ["x@x.org"], "{name}");
+        assert_eq!(
+            c.policy.as_ref().map(|p| p.mode),
+            Some(Mode::Auto),
+            "{name}"
+        );
+        assert_eq!(book.policy_for(&fp(seed)).map(|p| p.mode), Some(Mode::Auto));
+        assert_eq!(
+            book.contacts
+                .iter()
+                .filter(|c| c.fingerprint == fp(seed))
+                .count(),
+            1,
+            "one merged row for {name}"
+        );
+    }
+    let rows = list_rows(&home, &cwd, &[]);
+    assert_eq!(
+        rows,
+        [
+            ["Marek", &fp(2), "global", "auto"],
+            ["Pawel", &fp(5), "global", "auto"],
+        ]
+    );
+    let o = owl(&home, &cwd, &["contact", "show", "Pawel"], None);
+    let v: serde_json::Value = serde_json::from_str(&out(&o)).unwrap();
+    assert_eq!(v["policy"]["mode"], "auto");
+    assert_eq!(v["name"], "Pawel");
+}
+
+#[test]
+fn allow_then_list_keeps_policy_for_name_after_owl_prefix() {
+    // The CLI path the bug was seen on: add → allow --always → list/show.
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let cwd = plain_dir(tmp.path());
+    let o = owl(
+        &home,
+        &cwd,
+        &["add", &peer_json("Pawel Nowak", "p@x.org", 5)],
+        None,
+    );
+    assert_eq!(o.status.code(), Some(0), "{}", err(&o));
+    let o = owl(
+        &home,
+        &cwd,
+        &["allow", "Pawel", "--always", "--i-verified-the-fingerprint"],
+        None,
+    );
+    assert_eq!(o.status.code(), Some(0), "{}", err(&o));
+    assert_eq!(
+        list_rows(&home, &cwd, &[]),
+        [["Pawel", "Nowak", &fp(5), "global", "auto"]]
+    );
+    let o = owl(&home, &cwd, &["contact", "show", &fp(5)], None);
+    let v: serde_json::Value = serde_json::from_str(&out(&o)).unwrap();
+    assert_eq!(v["policy"]["mode"], "auto", "{v}");
+    assert_eq!(v["name"], "Pawel Nowak");
+}
+
+#[test]
+fn contact_remove_after_allow_deletes_contact_and_overlay_in_both_scopes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let (root, sub) = fixture_repo(tmp.path());
+    let pawel = peer_json("Pawel Nowak", "p@x.org", 5);
+    // Global: add → allow → remove.
+    let o = owl(&home, &sub, &["add", &pawel], None);
+    assert_eq!(o.status.code(), Some(0), "{}", err(&o));
+    let o = owl(
+        &home,
+        &sub,
+        &["allow", "Pawel", "--always", "--i-verified-the-fingerprint"],
+        None,
+    );
+    assert_eq!(o.status.code(), Some(0), "{}", err(&o));
+    let overlay_path = home.join("contacts").join(format!("{}.json", fp(5)));
+    assert!(overlay_path.exists());
+    let o = owl(&home, &sub, &["contact", "remove", "Pawel"], None);
+    assert_eq!(o.status.code(), Some(0), "{}", err(&o));
+    assert_eq!(out(&o), "removed Pawel Nowak (global)\n");
+    assert!(!home.join("contacts/pawel-nowak.json").exists());
+    assert!(
+        !overlay_path.exists(),
+        "policy overlay removed with the contact"
+    );
+    assert_eq!(
+        list_rows(&home, &sub, &["--global"]),
+        Vec::<Vec<String>>::new()
+    );
+    // The same key can be added again: no ghost entry.
+    let o = owl(&home, &sub, &["add", &pawel], None);
+    assert_eq!(o.status.code(), Some(0), "{}", err(&o));
+    let o = owl(&home, &sub, &["contact", "remove", "Pawel"], None);
+    assert_eq!(o.status.code(), Some(0), "{}", err(&o));
+    // Local: add --local → allow → remove --local.
+    let o = owl(&home, &sub, &["add", &pawel, "--local"], None);
+    assert_eq!(o.status.code(), Some(0), "{}", err(&o));
+    let o = owl(&home, &sub, &["allow", "Pawel", "--always"], None);
+    assert_eq!(o.status.code(), Some(0), "{}", err(&o));
+    assert!(overlay_path.exists());
+    assert_eq!(
+        list_rows(&home, &sub, &[])[2],
+        ["Pawel", "Nowak", &fp(5), "local", "auto"]
+    );
+    let o = owl(
+        &home,
+        &sub,
+        &["contact", "remove", "Pawel", "--local"],
+        None,
+    );
+    assert_eq!(o.status.code(), Some(0), "{}", err(&o));
+    assert_eq!(out(&o), "removed Pawel Nowak (local)\n");
+    assert!(!root.join(".agents/peers/pawel-nowak.json").exists());
+    assert!(
+        !overlay_path.exists(),
+        "overlay removed with the local contact"
+    );
+    assert!(root.join(".agents/peers/maciek.json").exists());
+    assert!(root.join(".agents/peers/marek.json").exists());
+    assert_eq!(list_rows(&home, &sub, &[]).len(), 2);
+    assert!(list_rows(&home, &sub, &["--global"]).is_empty());
+    let o = owl(&home, &sub, &["add", &pawel, "--local"], None);
+    assert_eq!(o.status.code(), Some(0), "{}", err(&o));
+    assert_eq!(out(&o), format!("added Pawel Nowak {} (local)\n", fp(5)));
+}
+
+#[test]
+fn contact_remove_propagates_a_failed_unlink() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let cwd = plain_dir(tmp.path());
+    let o = owl(&home, &cwd, &["add", &peer_json("Ola", "o@x", 3)], None);
+    assert_eq!(o.status.code(), Some(0), "{}", err(&o));
+    let dir = home.join("contacts");
+    let path = dir.join("ola.json");
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let o = owl(&home, &cwd, &["contact", "remove", "Ola"], None);
+    let restore = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755));
+    restore.unwrap();
+    assert_eq!(o.status.code(), Some(1), "{}", err(&o));
+    assert!(
+        err(&o).contains("removing") && err(&o).contains("ola.json"),
+        "{}",
+        err(&o)
+    );
+    assert!(out(&o).is_empty(), "no `removed` line on failure");
+    assert!(path.exists(), "guard engaged: the file is still there");
+}
+
+#[test]
+fn add_rejects_mixed_type_lists() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let cwd = plain_dir(tmp.path());
+    for (text, field) in [
+        (
+            format!(
+                r#"{{"name":"Ola","pubkey":"{}","emails":["a@x",1]}}"#,
+                pk(3)
+            ),
+            "`emails`",
+        ),
+        (
+            format!(
+                r#"{{"name":"Ola","pubkey":"{}","endpoints":["h:1",{{}}]}}"#,
+                pk(3)
+            ),
+            "`endpoints`",
+        ),
+    ] {
+        let o = owl(&home, &cwd, &["add", &text], None);
+        assert_eq!(o.status.code(), Some(1), "{text}");
+        assert!(
+            err(&o).contains(field) && err(&o).contains("array of strings"),
+            "{}",
+            err(&o)
+        );
+    }
+    assert!(!home.join("contacts").exists());
+}
+
+#[test]
+fn library_remove_resolves_in_scope_only_and_returns_paths() {
     let tmp = tempfile::tempdir().unwrap();
     let home = tmp.path().join("home");
     let (root, sub) = fixture_repo(tmp.path());
     overlay(&home, 3, "Ola", "manual");
-    overlay(&home, 1, "Wrong", "auto");
-    let g = ContactBook::scope_files(&home, &sub, "global").unwrap();
-    let got: Vec<(&Path, &str)> = g
-        .iter()
-        .map(|(p, c)| (p.as_path(), c.name.as_str()))
-        .collect();
-    let ola = home.join("contacts").join(format!("{}.json", fp(3)));
-    assert_eq!(got, [(ola.as_path(), "Ola")]);
-    assert_eq!(g[0].1.source, "global");
-    let l = ContactBook::scope_files(&home, &sub, "local").unwrap();
-    let got: Vec<(&Path, &str)> = l
-        .iter()
-        .map(|(p, c)| (p.as_path(), c.name.as_str()))
-        .collect();
-    let (m1, m2) = (
-        root.join(".agents/peers/maciek.json"),
-        root.join(".agents/peers/marek.json"),
+    overlay(&home, 1, "", "auto"); // overlay for local Maciek
+    // Global scope does not see Maciek (overlay is not a contact).
+    let e = ContactBook::remove(&home, &sub, "global", "Maciek")
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("no contact matches"), "{e}");
+    assert!(
+        home.join("contacts")
+            .join(format!("{}.json", fp(1)))
+            .exists()
     );
-    assert_eq!(got, [(m1.as_path(), "Maciek"), (m2.as_path(), "Marek")]);
-    assert!(l.iter().all(|(_, c)| c.source == "local"));
-    // Outside a repo: global keeps the overlay too (nothing to overlay), local is an error.
+    // Local scope: file + overlay removed, paths returned.
+    let (name, paths) = ContactBook::remove(&home, &sub, "local", &fp(1)).unwrap();
+    assert_eq!(name, "Maciek");
+    assert_eq!(
+        paths,
+        [
+            root.join(".agents/peers/maciek.json"),
+            home.join("contacts").join(format!("{}.json", fp(1))),
+        ]
+    );
+    assert!(!paths[0].exists() && !paths[1].exists());
+    // Global: Ola.
+    let (name, paths) = ContactBook::remove(&home, &sub, "global", "ola").unwrap();
+    assert_eq!(name, "Ola");
+    assert_eq!(
+        paths,
+        [home.join("contacts").join(format!("{}.json", fp(3)))]
+    );
+    // Outside a repo, local is an error before anything is resolved.
     let cwd = plain_dir(tmp.path());
-    let g = ContactBook::scope_files(&home, &cwd, "global").unwrap();
-    assert_eq!(g.len(), 2);
-    let e = ContactBook::scope_files(&home, &cwd, "local")
+    let e = ContactBook::remove(&home, &cwd, "local", "Marek")
         .unwrap_err()
         .to_string();
     assert!(e.contains("git repository"), "{e}");
+    assert!(root.join(".agents/peers/marek.json").exists());
 }

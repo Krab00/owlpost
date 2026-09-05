@@ -167,10 +167,15 @@ book for every repository:
   with `--local`, into `.agents/peers/` of the git root above the current directory, and
   prints `added <name> <fingerprint> (global|local)`. TOFU (architecture §4): adding never
   sets a policy; `owl allow` does.
-- `owl contact remove <peer> [--local]` deletes the contact's file from the named scope only
-  (default global; policy overlays of local contacts are not global contacts) and prints
-  `removed <name> (<scope>)`; a peer that lives only in the other scope exits 1 with
-  `<name> is a local contact; use --local` / `<name> is a global contact; drop --local`.
+- `owl contact remove <peer> [--local]` resolves the peer among the contacts of the named
+  scope only (default global; a policy overlay of a local contact is not a global contact),
+  deletes the contact's file there and, in both scopes, that key's policy overlay in
+  `$OWLPOST_HOME/contacts/` (so no nameless ghost blocks a later `owl add`), and prints
+  `removed <name> (<scope>)`. `.agents/peers/` is never touched without `--local`. A peer that
+  lives only in the other scope exits 1 with `<name> is a local contact; use --local` /
+  `<name> is a global contact; drop --local`; a failed unlink exits 1 naming the path.
+- Global files merge by key in any filename order: a policy overlay always wins over a
+  policy-less file and a contact file supplies name/emails/endpoints to a bare overlay.
 
 ## 6. Envelope
 

@@ -3,7 +3,6 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use anyhow::Context as _;
 use clap::{Parser, Subcommand};
 
 mod cli;
@@ -264,32 +263,22 @@ fn contact(home: &Path, cmd: ContactCmd, json: bool) -> anyhow::Result<()> {
         }
         ContactCmd::Remove { peer, local } => {
             let scope = if local { "local" } else { "global" };
-            let files = contacts::ContactBook::scope_files(home, &cwd, scope)?;
-            let scoped = contacts::ContactBook {
-                contacts: files.iter().map(|(_, c)| c.clone()).collect(),
-            };
-            let found = match scoped.resolve(&peer) {
-                Ok(c) => c.fingerprint.clone(),
+            match contacts::ContactBook::remove(home, &cwd, scope, &peer) {
+                Ok((name, _)) => println!("removed {name} ({scope})"),
                 Err(e) => {
                     // The same peer in the other scope gets a hint naming the flag.
                     let hint = match book()?.resolve(&peer) {
-                        Ok(other) if other.source == "local" => {
+                        Ok(other) if other.source == "local" && !local => {
                             format!("{} is a local contact; use --local", other.name)
                         }
-                        Ok(other) if other.source == "global" => {
+                        Ok(other) if other.source == "global" && local => {
                             format!("{} is a global contact; drop --local", other.name)
                         }
-                        _ => e.to_string(),
+                        _ => return Err(e),
                     };
                     return Err(cli::user_error(hint));
                 }
-            };
-            let (path, c) = files
-                .into_iter()
-                .find(|(_, c)| c.fingerprint == found)
-                .expect("resolved from the same list");
-            std::fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
-            println!("removed {} ({scope})", c.name);
+            }
         }
     }
     Ok(())
