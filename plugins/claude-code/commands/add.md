@@ -1,7 +1,7 @@
 ---
 description: Add a colleague's peer file (pasted JSON or a path) to your global contacts
 argument-hint: "<peer json | path/to/peer.json> [--local]"
-allowed-tools: Bash(owl add:*), Bash(owl contact:*), Bash(owl allow:*), Read
+allowed-tools: Bash(owl add:*), Bash(owl contact:*), Bash(owl allow:*)
 ---
 
 Arguments: "$ARGUMENTS"

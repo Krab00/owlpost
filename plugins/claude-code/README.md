@@ -7,8 +7,42 @@ The Claude Code harness adapter for owlpost (`docs/concept.md` "Harness adapters
 |---|---|---|
 | Hooks | `hooks/hooks.json`, `hooks/owl-count.sh` | On `SessionStart`, `UserPromptSubmit` and `PostToolUse` runs `owl inbox --count --format claude` (5 s timeout) and injects the unseen-question counter line. Silent no-op when `owl` is missing or fails. |
 | Skill | `skills/owlpost/SKILL.md` | When to ask a peer, how to run `owl ask`, how to react to the counter, the answer loop, the memory rule. |
-| Commands | `commands/inbox.md`, `commands/ask.md`, `commands/history.md`, `commands/me.md`, `commands/update.md`, `commands/add.md` | `/owlpost:inbox`, `/owlpost:ask <peer> <path> <question>`, `/owlpost:history`, `/owlpost:me`, `/owlpost:update`, `/owlpost:add <peer json|file> [--local]`. |
+| Commands | `commands/<name>.md`, one per `owl` subcommand (all except `daemon`) | `/owlpost:<name>` runs `owl <name>` with the arguments and offers the next step; see the table below. |
 | Manifests | `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json` | Plugin metadata; a one-plugin marketplace so the directory can be added from a local path. |
+
+## Commands
+
+Every `owl` subcommand except `daemon` (a service: `install`, `uninstall` and `doctor`
+cover it) is one `commands/<name>.md`. Each is a thin wrapper: run the command with the
+arguments, show the output, offer the natural next step. `send`, `allow`, `deny`, `reject`
+and `uninstall` ask for one explicit confirmation with `AskUserQuestion` before running.
+`allowed-tools` in each file is limited to its own `owl <sub>:*` pattern (plus the `owl`
+patterns of the next steps a file runs itself); `tests/plugin.rs` pins the rule.
+
+| Command | File | Runs |
+|---|---|---|
+| `/owlpost:init [--name <name>] [--email <email>]` | `commands/init.md` | `owl init` — create home, key, config |
+| `/owlpost:whoami` | `commands/whoami.md` | `owl whoami` — identity summary |
+| `/owlpost:me` | `commands/me.md` | `owl contact export` — own peer file to hand to a colleague |
+| `/owlpost:card [peer]` | `commands/card.md` | `owl card` — own card, or fetch a peer's |
+| `/owlpost:contacts` | `commands/contacts.md` | `owl contact list --json` — pick a peer with the arrow keys, then ask or show the card |
+| `/owlpost:contact <show\|export\|remove> ...` | `commands/contact.md` | `owl contact show|export|remove` |
+| `/owlpost:add <peer json\|file> [--local]` | `commands/add.md` | `owl add` — add a peer file |
+| `/owlpost:allow <peer> [--once\|--always]` | `commands/allow.md` | `owl allow` — release held questions, set policy (confirms first) |
+| `/owlpost:deny <peer>` | `commands/deny.md` | `owl deny` — policy never (confirms first) |
+| `/owlpost:ask <peer> [path] <question>` | `commands/ask.md` | `owl ask` — send a question (confirms first) |
+| `/owlpost:inbox` | `commands/inbox.md` | `owl inbox --json` — walk the records: question verbatim, consent picker (allow once/always, deny), draft, verbatim draft, send/edit/reject picker |
+| `/owlpost:show <id>` | `commands/show.md` | `owl show` — full record, offer draft/send/reject |
+| `/owlpost:draft <id> [--harness <name>]` | `commands/draft.md` | `owl draft` — run the responder, show the draft |
+| `/owlpost:edit <id>` | `commands/edit.md` | `owl edit` opens `$EDITOR`, which cannot run in a session; explains the alternatives |
+| `/owlpost:send <id>` | `commands/send.md` | `owl send` — sign and move to outbox (confirms first) |
+| `/owlpost:reject <id>` | `commands/reject.md` | `owl reject` — discard a record (confirms first) |
+| `/owlpost:history [--peer] [--path] [--since]` | `commands/history.md` | `owl history` — finished exchanges |
+| `/owlpost:watch [on\|off\|status]` | `commands/watch.md` | Monitor over `owl inbox --count --format plain` — live one-line notifications when the inbox changes; `off` stops it and stores `{"watch": false}` in `$OWLPOST_HOME/plugin.json`, `on` restores it, `status` reports both |
+| `/owlpost:install [--dry-run]` | `commands/install.md` | `owl install` — register the daemon service |
+| `/owlpost:uninstall` | `commands/uninstall.md` | `owl uninstall` — remove the service (confirms first) |
+| `/owlpost:doctor` | `commands/doctor.md` | `owl doctor` — check the setup, offer the fix per failure |
+| `/owlpost:update [--source <dir>]` | `commands/update.md` | `owl update` — binary, daemon, plugin |
 
 ## Requirements
 

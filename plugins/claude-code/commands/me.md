@@ -1,6 +1,6 @@
 ---
 description: Show this machine's owlpost identity (peer file) to send to a colleague
-allowed-tools: Bash(owl contact export:*), Bash(owl doctor:*)
+allowed-tools: Bash(owl contact export:*)
 ---
 
 Run `owl contact export` and show the JSON in a code block. Tell the user to send it to the
