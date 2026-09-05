@@ -79,3 +79,6 @@ Correct in round 1 (18/20 mutants RED). The two survivors were a substring-match
 
 ## OWL-022 (2026-09-05)
 Correct in round 1; the only GAPS was a brittle pin ("in one line and\nstop" — line-wrap dependent, a false RED on reflow). Rule: pin doc literals that fit on one line and never contain a newline; when the sentence is long, shorten the sentence in the doc rather than pin a fragment. Process: an implementer lost an uncommitted edit to `git checkout -- <file>` in its own mutant sweep — commit the intended change BEFORE any checkout-restoring sweep, and run the suite once after the sweep.
+
+## OWL-023 (2026-09-05)
+Clean round 1 (14/15 verifier mutants RED; the survivor was the design-doc sentence, which no test reads — same class as OWL-020/021: a data-modality doc criterion without a guard). Third recurrence of "AC-named doc string unguarded by a test" (OWL-020 SKILL/README, OWL-021 contact/contacts prefix, OWL-023 §9) → candidate for standing_checks_extra: "every doc literal an AC names has a single-line contains() test, mutant-checked". Also: a flag that selects an output shape needs a fixture per (flag × config × count) cell; the implementer's 2×5×2 grid is the model.
