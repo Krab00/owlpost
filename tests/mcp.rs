@@ -100,7 +100,8 @@ impl Server {
     }
 }
 
-/// Global book: Ana (1), Zoë (2), Nomail (3, no e-mail), Bob (4); the fixture repo's
+/// Global book: Ana (1), Zoë (2), "Dr. Nomail (QA)" (3, no e-mail: punctuation runs collapse
+/// to one `-`, the trailing `)` is trimmed), Bob (4); the fixture repo's
 /// `.agents/peers/bob.json` is a second Bob (5) with the same e-mail — the URI collision.
 fn fixture() -> (TempDir, TempDir) {
     let home = tempfile::tempdir().unwrap();
@@ -108,7 +109,7 @@ fn fixture() -> (TempDir, TempDir) {
     for (seed, name, emails) in [
         (1u8, "Ana Kowalska", vec!["ana@acme.pl", "ana.k@gmail.com"]),
         (2, "Zoë O'Brien-Łukasz", vec!["zoe@acme.pl"]),
-        (3, "Nomail", vec![]),
+        (3, "Dr. Nomail (QA)", vec![]),
         (4, "Bob Smith", vec!["bob@acme.pl"]),
     ] {
         write_contact_full(home.path(), &Peer::new(&id(seed), name, None), &[], &emails);
@@ -164,8 +165,9 @@ fn handshake_ping_and_eof() {
     assert_eq!(s.finish(), Some(0));
 }
 
-/// AC2: one resource per contact of the merged book, the exact URI list (slug rules, no
-/// e-mail, collision suffix), name/description/mimeType.
+/// AC2: one resource per contact of the merged book, the exact URI list (slug rules: lower
+/// case, accents kept, punctuation runs → one `-`, trimmed; no e-mail; collision suffix),
+/// name/description/mimeType.
 #[test]
 fn resources_list_has_one_uri_per_contact() {
     let (home, repo) = fixture();
@@ -189,7 +191,7 @@ fn resources_list_has_one_uri_per_contact() {
             "to://ana-kowalska.ana@acme.pl",
             bob_a,
             bob_b,
-            "to://nomail",
+            "to://dr-nomail-qa",
             "to://zoë-o-brien-łukasz.zoe@acme.pl",
         ]
     );
@@ -220,7 +222,7 @@ fn resources_list_has_one_uri_per_contact() {
         [
             "to://ana-kowalska.ana@acme.pl",
             "to://bob-smith.bob@acme.pl",
-            "to://nomail",
+            "to://dr-nomail-qa",
             "to://zoë-o-brien-łukasz.zoe@acme.pl",
         ]
     );
@@ -288,6 +290,7 @@ fn contacts_are_reloaded_per_request() {
     let mut s = Server::spawn(home.path(), repo.path());
     let before = s.uris(1);
     assert!(!before.iter().any(|u| u.contains("cara")), "{before:?}");
+    assert_eq!(before[3], "to://dr-nomail-qa", "{before:?}");
     write_contact_full(
         home.path(),
         &Peer::new(&id(6), "Cara Díaz", None),
