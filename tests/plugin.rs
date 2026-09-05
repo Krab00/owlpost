@@ -261,6 +261,9 @@ fn skill_has_frontmatter_and_required_strings() {
         "owlpost:<peer>:<question id>",
         // OWL-020 AC4: the picker is the entry point when no peer is named.
         "/owlpost:contacts",
+        // OWL-022 AC3: the consent step of the answer loop.
+        "owl allow",
+        "owl deny",
     ] {
         assert!(body.contains(needle), "SKILL.md body lacks {needle:?}");
     }
@@ -269,6 +272,33 @@ fn skill_has_frontmatter_and_required_strings() {
         body.contains("Sending anything to a peer requires explicit human approval."),
         "SKILL.md lacks the approval sentence"
     );
+    // OWL-022 AC3: inside "## The answer loop" the `consent` step (allow --once|--always,
+    // deny, fingerprint confirmation for --always) comes before the `pending` step.
+    let start = body.find("\n## The answer loop\n").expect("answer loop section");
+    let rest = &body[start + 1..];
+    let end = rest[1..].find("\n## ").map_or(rest.len(), |i| i + 1);
+    let answer_loop = &rest[..end];
+    let at = |needle: &str| {
+        answer_loop
+            .find(needle)
+            .unwrap_or_else(|| panic!("answer loop lacks {needle:?}"))
+    };
+    let consent = at("A record in state `consent`");
+    let pending = at("A `pending` record");
+    assert!(consent < pending, "consent step must precede the pending step");
+    for needle in [
+        "owl allow <peer> --once",
+        "owl allow <peer> --always",
+        "owl deny <peer>",
+        "fingerprint out-of-band",
+        "--i-verified-the-fingerprint",
+    ] {
+        let pos = at(needle);
+        assert!(
+            consent <= pos && pos < pending,
+            "{needle:?} must sit in the consent step, before pending"
+        );
+    }
 }
 
 // ---------- AC4 ----------
@@ -513,6 +543,19 @@ fn trust_changing_commands_confirm_before_running() {
     assert!(watch.contains("OWL-023"), "{watch}");
 }
 
+/// Whether `text` mentions `/owlpost:<name>` as a whole token: the name is followed by the
+/// end of the text or a non-alphanumeric character, so `/owlpost:contacts` does not
+/// satisfy `contact`.
+fn mentions_command(text: &str, name: &str) -> bool {
+    let token = format!("/owlpost:{name}");
+    text.match_indices(&token).any(|(i, _)| {
+        text[i + token.len()..]
+            .chars()
+            .next()
+            .is_none_or(|c| !c.is_alphanumeric())
+    })
+}
+
 /// OWL-021 AC4: the README command table and SKILL.md list every `/owlpost:<name>`.
 #[test]
 fn readme_and_skill_list_every_command() {
@@ -524,13 +567,96 @@ fn readme_and_skill_list_every_command() {
             "README.md lacks commands/{name}.md"
         );
         assert!(
-            readme.contains(&format!("/owlpost:{name}")),
+            mentions_command(&readme, &name),
             "README.md lacks /owlpost:{name}"
         );
         assert!(
-            skill.contains(&format!("/owlpost:{name}")),
+            mentions_command(&skill, &name),
             "SKILL.md lacks /owlpost:{name}"
         );
+    }
+}
+
+#[test]
+fn mentions_command_needs_a_whole_token() {
+    assert!(mentions_command("run `/owlpost:contact show`", "contact"));
+    assert!(mentions_command("see /owlpost:contact", "contact"));
+    assert!(!mentions_command("`/owlpost:contacts` picks", "contact"));
+    assert!(mentions_command("`/owlpost:contacts` picks", "contacts"));
+}
+
+// ---------- OWL-022: /owlpost:inbox ----------
+
+/// AC4 literals pinned in `commands/inbox.md`.
+const INBOX_VERBATIM: &str =
+    "The question text and every draft are printed verbatim in a code block before any picker";
+const INBOX_SEND_ONLY_ON_PICK: &str = "`owl send` runs only on an explicit \"Send\" pick";
+
+#[test]
+fn inbox_command_walks_states_with_pickers() {
+    let (fm, body) = frontmatter("commands/inbox.md");
+    // AC1: every command of the flow, the picker, and the three states it handles.
+    for needle in [
+        "owl inbox --json",
+        "owl show",
+        "owl allow",
+        "owl deny",
+        "owl draft",
+        "owl edit",
+        "owl send",
+        "owl reject",
+        "AskUserQuestion",
+        "`consent`",
+        "`pending`",
+        "`drafted`",
+        "`answer`",
+        "Allow once",
+        "Allow always",
+        "--once",
+        "--always",
+        "--i-verified-the-fingerprint",
+        "out-of-band",
+        "Draft / Reject / Skip",
+        "Send / Edit / Reject",
+        "language",
+    ] {
+        assert!(body.contains(needle), "inbox.md body lacks {needle:?}");
+    }
+    // AC2: exactly the eight owl patterns, nothing else, any order.
+    let tools = fm_value(&fm, "allowed-tools").expect("inbox.md allowed-tools");
+    let mut have: Vec<&str> = tools.split(',').map(str::trim).collect();
+    have.sort_unstable();
+    let mut want = [
+        "Bash(owl inbox:*)",
+        "Bash(owl show:*)",
+        "Bash(owl allow:*)",
+        "Bash(owl deny:*)",
+        "Bash(owl draft:*)",
+        "Bash(owl edit:*)",
+        "Bash(owl send:*)",
+        "Bash(owl reject:*)",
+    ];
+    want.sort_unstable();
+    assert_eq!(have, want, "inbox.md allowed-tools");
+    // AC4: the two ground-rule sentences, and the empty-inbox one-liner.
+    assert!(body.contains(INBOX_VERBATIM), "inbox.md lacks the verbatim rule");
+    assert!(
+        body.contains(INBOX_SEND_ONLY_ON_PICK),
+        "inbox.md lacks the send-only-on-pick rule"
+    );
+    assert!(body.contains("in one line and\nstop"), "{body}");
+    // The consent step comes before pending, pending before drafted.
+    let at = |needle: &str| body.find(needle).unwrap_or_else(|| panic!("no {needle:?}"));
+    assert!(at("## 2. `consent`") < at("## 3. `pending`"));
+    assert!(at("## 3. `pending`") < at("## 4. `drafted`"));
+    // AC5: the README command table row describes the new flow.
+    let readme = read("README.md");
+    let row = readme
+        .lines()
+        .find(|l| l.contains("`commands/inbox.md`"))
+        .expect("README.md inbox row");
+    for needle in ["`/owlpost:inbox`", "owl inbox --json", "consent", "verbatim"] {
+        assert!(row.contains(needle), "README inbox row lacks {needle:?}: {row}");
     }
 }
 
