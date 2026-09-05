@@ -37,6 +37,7 @@ pub struct Opts {
     pub format: Option<String>,
     pub json: bool,
     pub session_start: bool,
+    pub hook_event: String,
 }
 
 /// The second `additionalContext` sentence of the `claude` injection at session start (§9):
@@ -106,6 +107,7 @@ pub fn injection(
     per_peer: &[(String, usize)],
     answers: usize,
     arm: bool,
+    event: &str,
 ) -> Option<String> {
     let arm = arm && format == Format::Claude;
     let empty = per_peer.iter().all(|(_, n)| *n == 0);
@@ -134,12 +136,12 @@ pub fn injection(
             #[derive(Serialize)]
             #[serde(rename_all = "camelCase")]
             struct Inner<'a> {
-                hook_event_name: &'static str,
+                hook_event_name: &'a str,
                 additional_context: &'a str,
             }
             serde_json::to_string(&Hook {
                 hook_specific_output: Inner {
-                    hook_event_name: "UserPromptSubmit",
+                    hook_event_name: event,
                     additional_context: &text,
                 },
             })
@@ -183,7 +185,15 @@ pub fn run(home: &Path, opts: Opts) -> anyhow::Result<()> {
     let book = super::contact_book(home)?;
     if opts.count {
         let arm = opts.session_start && watch_enabled(home);
-        return count(&spool, &book, opts.all, format, opts.json, arm);
+        return count(
+            &spool,
+            &book,
+            opts.all,
+            format,
+            opts.json,
+            arm,
+            &opts.hook_event,
+        );
     }
     let records = spool.list(Dir::Inbox, |r| !opts.new || !r.seen)?;
     let now = envelope::now_unix();
@@ -257,6 +267,7 @@ fn count(
     format: Option<Format>,
     json: bool,
     arm: bool,
+    event: &str,
 ) -> anyhow::Result<()> {
     let records = spool.list(Dir::Inbox, |r| all || !r.seen)?;
     let per_peer = per_peer(&records, book)?;
@@ -267,7 +278,7 @@ fn count(
         .count();
     match format {
         Some(f) => {
-            if let Some(line) = injection(f, &per_peer, total - questions, arm) {
+            if let Some(line) = injection(f, &per_peer, total - questions, arm, event) {
                 println!("{line}");
             }
         }
@@ -318,51 +329,70 @@ mod tests {
     #[test]
     fn injection_shapes_per_format() {
         let p = peers(&[("Maciek", 2)]);
-        let claude = injection(Format::Claude, &p, 0, false).unwrap();
+        let claude = injection(Format::Claude, &p, 0, false, "UserPromptSubmit").unwrap();
         assert_eq!(
             claude,
             r#"{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"owlpost: 2 new questions (Maciek 2). Say \"show owlpost inbox\" or run `owl inbox`."}}"#
         );
-        assert_eq!(injection(Format::Codex, &p, 0, false).unwrap(), claude);
         assert_eq!(
-            injection(Format::Kimi, &p, 0, false).unwrap(),
+            injection(Format::Codex, &p, 0, false, "UserPromptSubmit").unwrap(),
+            claude
+        );
+        assert_eq!(
+            injection(Format::Kimi, &p, 0, false, "UserPromptSubmit").unwrap(),
             sentence(&p, 0)
         );
         assert_eq!(
-            injection(Format::Plain, &p, 0, false).unwrap(),
+            injection(Format::Plain, &p, 0, false, "UserPromptSubmit").unwrap(),
             sentence(&p, 0)
         );
         for f in [Format::Plain, Format::Claude, Format::Codex, Format::Kimi] {
-            assert_eq!(injection(f, &[], 0, false), None);
-            assert_eq!(injection(f, &peers(&[("Maciek", 0)]), 0, false), None);
+            assert_eq!(injection(f, &[], 0, false, "UserPromptSubmit"), None);
+            assert_eq!(
+                injection(f, &peers(&[("Maciek", 0)]), 0, false, "UserPromptSubmit"),
+                None
+            );
         }
     }
 
     #[test]
     fn arm_sentence_is_claude_only_and_stands_alone_at_zero() {
-        const ARMED_TWO: &str = r#"{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"owlpost: 2 new questions (Maciek 2). Say \"show owlpost inbox\" or run `owl inbox`. owlpost: arm the inbox watch (see /owlpost:watch)"}}"#;
-        const ARMED_ZERO: &str = r#"{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"owlpost: arm the inbox watch (see /owlpost:watch)"}}"#;
+        const ARMED_TWO: &str = r#"{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"owlpost: 2 new questions (Maciek 2). Say \"show owlpost inbox\" or run `owl inbox`. owlpost: arm the inbox watch (see /owlpost:watch)"}}"#;
+        const ARMED_ZERO: &str = r#"{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"owlpost: arm the inbox watch (see /owlpost:watch)"}}"#;
         assert_eq!(
             ARM_SENTENCE,
             "owlpost: arm the inbox watch (see /owlpost:watch)"
         );
         let p = peers(&[("Maciek", 2)]);
         // Counter + arm, one space between the two sentences, counter text unchanged.
-        assert_eq!(injection(Format::Claude, &p, 0, true).unwrap(), ARMED_TWO);
-        // Zero unseen + arm: the arm sentence alone, in the same JSON shape.
-        assert_eq!(injection(Format::Claude, &[], 0, true).unwrap(), ARMED_ZERO);
         assert_eq!(
-            injection(Format::Claude, &peers(&[("Maciek", 0)]), 0, true).unwrap(),
+            injection(Format::Claude, &p, 0, true, "SessionStart").unwrap(),
+            ARMED_TWO
+        );
+        // Zero unseen + arm: the arm sentence alone, in the same JSON shape.
+        assert_eq!(
+            injection(Format::Claude, &[], 0, true, "SessionStart").unwrap(),
+            ARMED_ZERO
+        );
+        assert_eq!(
+            injection(
+                Format::Claude,
+                &peers(&[("Maciek", 0)]),
+                0,
+                true,
+                "SessionStart"
+            )
+            .unwrap(),
             ARMED_ZERO
         );
         // Every other format ignores `arm`: same as without, nothing at zero.
         for f in [Format::Plain, Format::Codex, Format::Kimi] {
             assert_eq!(
-                injection(f, &p, 0, true),
-                injection(f, &p, 0, false),
+                injection(f, &p, 0, true, "SessionStart"),
+                injection(f, &p, 0, false, "SessionStart"),
                 "{f:?}"
             );
-            assert_eq!(injection(f, &[], 0, true), None, "{f:?}");
+            assert_eq!(injection(f, &[], 0, true, "SessionStart"), None, "{f:?}");
         }
     }
 
