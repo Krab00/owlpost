@@ -274,7 +274,9 @@ fn skill_has_frontmatter_and_required_strings() {
     );
     // OWL-022 AC3: inside "## The answer loop" the `consent` step (allow --once|--always,
     // deny, fingerprint confirmation for --always) comes before the `pending` step.
-    let start = body.find("\n## The answer loop\n").expect("answer loop section");
+    let start = body
+        .find("\n## The answer loop\n")
+        .expect("answer loop section");
     let rest = &body[start + 1..];
     let end = rest[1..].find("\n## ").map_or(rest.len(), |i| i + 1);
     let answer_loop = &rest[..end];
@@ -285,7 +287,10 @@ fn skill_has_frontmatter_and_required_strings() {
     };
     let consent = at("A record in state `consent`");
     let pending = at("A `pending` record");
-    assert!(consent < pending, "consent step must precede the pending step");
+    assert!(
+        consent < pending,
+        "consent step must precede the pending step"
+    );
     for needle in [
         "owl allow <peer> --once",
         "owl allow <peer> --always",
@@ -639,7 +644,10 @@ fn inbox_command_walks_states_with_pickers() {
     want.sort_unstable();
     assert_eq!(have, want, "inbox.md allowed-tools");
     // AC4: the two ground-rule sentences, and the empty-inbox one-liner.
-    assert!(body.contains(INBOX_VERBATIM), "inbox.md lacks the verbatim rule");
+    assert!(
+        body.contains(INBOX_VERBATIM),
+        "inbox.md lacks the verbatim rule"
+    );
     assert!(
         body.contains(INBOX_SEND_ONLY_ON_PICK),
         "inbox.md lacks the send-only-on-pick rule"
@@ -655,8 +663,16 @@ fn inbox_command_walks_states_with_pickers() {
         .lines()
         .find(|l| l.contains("`commands/inbox.md`"))
         .expect("README.md inbox row");
-    for needle in ["`/owlpost:inbox`", "owl inbox --json", "consent", "verbatim"] {
-        assert!(row.contains(needle), "README inbox row lacks {needle:?}: {row}");
+    for needle in [
+        "`/owlpost:inbox`",
+        "owl inbox --json",
+        "consent",
+        "verbatim",
+    ] {
+        assert!(
+            row.contains(needle),
+            "README inbox row lacks {needle:?}: {row}"
+        );
     }
 }
 
