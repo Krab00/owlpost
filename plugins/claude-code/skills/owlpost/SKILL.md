@@ -15,6 +15,25 @@ Sending anything to a peer requires explicit human approval. Never run `owl send
 `owl ask` on your own initiative; describe what would go out, wait for a clear yes, then
 run the command.
 
+## Slash commands
+
+Every `owl` subcommand except `daemon` has a `/owlpost:<name>` command that runs it with
+the arguments and offers the next step; prefer them over typing `owl` when the user is in
+a session. `/owlpost:me` is `owl contact export`, `/owlpost:contacts` is the arrow-key
+picker over `owl contact list`.
+
+- Setup: `/owlpost:init`, `/owlpost:whoami`, `/owlpost:me`, `/owlpost:card`,
+  `/owlpost:install`, `/owlpost:uninstall`, `/owlpost:doctor`, `/owlpost:update`
+- Contacts and trust: `/owlpost:contacts`, `/owlpost:contact`, `/owlpost:add`,
+  `/owlpost:allow`, `/owlpost:deny`
+- Asking: `/owlpost:ask`, `/owlpost:history`, `/owlpost:watch`
+- Answering: `/owlpost:inbox`, `/owlpost:show`, `/owlpost:draft`, `/owlpost:edit`,
+  `/owlpost:send`, `/owlpost:reject`
+
+`/owlpost:send`, `/owlpost:allow`, `/owlpost:deny`, `/owlpost:reject` and
+`/owlpost:uninstall` ask for one explicit confirmation before running, as `/owlpost:ask`
+does.
+
 ## When to ask a peer
 
 Suggest `owl ask` when:
