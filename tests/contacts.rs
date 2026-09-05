@@ -1149,6 +1149,37 @@ fn policy_survives_reload_whatever_the_filename_order() {
     let v: serde_json::Value = serde_json::from_str(&out(&o)).unwrap();
     assert_eq!(v["policy"]["mode"], "auto");
     assert_eq!(v["name"], "Pawel");
+    // A *bare* overlay (pubkey + policy only, as `owl allow` writes for a local contact)
+    // next to a slug-named contact file, in both filename orders: the contact fields come
+    // from the contact file, the policy from the overlay.
+    let home2 = tmp.path().join("home2");
+    let dir = home2.join("contacts");
+    std::fs::create_dir_all(&dir).unwrap();
+    for (name, seed) in [("Marek", 2u8), ("Pawel", 5)] {
+        std::fs::write(
+            dir.join(format!("{}.json", name.to_lowercase())),
+            peer_json(name, "y@x.org", seed),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join(format!("{}.json", fp(seed))),
+            serde_json::json!({"pubkey": pk(seed), "policy": {"mode": "never"}}).to_string(),
+        )
+        .unwrap();
+    }
+    let book = ContactBook::load(&home2, &cwd).unwrap();
+    assert_eq!(book.contacts.len(), 2, "{:?}", book.contacts);
+    for (name, seed) in [("Marek", 2u8), ("Pawel", 5)] {
+        let c = book.resolve(name).unwrap();
+        assert_eq!(c.name, name);
+        assert_eq!(c.emails, ["y@x.org"], "{name}");
+        assert_eq!(c.fingerprint, fp(seed));
+        assert_eq!(
+            c.policy.as_ref().map(|p| p.mode),
+            Some(Mode::Never),
+            "{name}"
+        );
+    }
 }
 
 #[test]
