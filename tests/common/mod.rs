@@ -68,7 +68,7 @@ pub fn write_contact_full(home: &Path, peer: &Peer<'_>, endpoints: &[&str], emai
         "emails": emails,
         "pubkey": pubkey_string(&peer.id.verifying_key()),
         "endpoints": endpoints,
-        "source": "local",
+        "source": "global",
         "added_at": "2026-09-01T10:00:00Z",
     });
     if let Some(p) = &peer.policy {
@@ -217,7 +217,7 @@ pub fn record(env: &Envelope, state: &str) -> Record {
 }
 
 pub fn question(from: &Identity, to: &Identity, text: &str) -> Payload {
-    Payload::question(&fp(from), &fp(to), PROJECT, PATH, text)
+    Payload::question(&fp(from), &fp(to), PROJECT, Some(PATH), text)
 }
 
 pub fn signed(from: &Identity, to: &Identity, text: &str) -> Envelope {

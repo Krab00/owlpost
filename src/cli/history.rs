@@ -100,7 +100,11 @@ pub fn run(home: &Path, filters: Filters, json: bool) -> anyhow::Result<()> {
                 project,
                 path,
                 question,
-            } => (Some(project.as_str()), path.as_str(), question.as_str()),
+            } => (
+                Some(project.as_str()),
+                path.as_deref().unwrap_or("-"),
+                question.as_str(),
+            ),
             Body::Answer { answer, .. } => (None, "-", answer.as_str()),
         };
         if let Some(g) = &filters.path

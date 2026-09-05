@@ -1,19 +1,24 @@
 ---
-description: Ask a peer's agent a question about a path in their code (usage: /owlpost:ask <peer> <path> <question>)
-argument-hint: "<peer> <path> <question>"
+description: Ask a peer's agent a question about their code, optionally about one path (usage: /owlpost:ask <peer> [path] <question>)
+argument-hint: "<peer> [path] <question...>"
 allowed-tools: Bash(owl ask:*), Bash(owl contact:*), Bash(git blame:*)
 ---
 
 Arguments: "$ARGUMENTS"
 
-Parse them as `<peer> <path> <question...>` (the question is everything after the path).
-If any part is missing, ask the user for it instead of guessing.
+Parse them as `<peer> [path] <question...>`: the first word is the peer; if the second word
+looks like a file path (contains `/` or a file extension, and is not a question word) it is the
+path and the question is everything after it, otherwise the question is everything after the
+peer and there is no path. A question about the repository as a whole ("how long is your
+README?", "which branch do you deploy from?") needs no path — do not ask for one. Ask the user
+only when the peer or the question itself is missing.
 
 1. Resolve the peer with `owl contact show <peer>` and show the user the peer's name and
-   fingerprint, the path and the exact question text.
+   fingerprint, the path (or "whole repository" when there is none) and the exact question text.
 2. Ask for explicit approval. Do not run anything else until the user says yes.
-3. Run `owl ask --file <path> --peer <peer> "<question>"` and report the result. On
-   `accepted`, offer to wait for the answer with `owl ask ... --wait <secs>` only if the
-   user wants to block; otherwise tell them the answer will show up in the inbox counter.
+3. With a path, run `owl ask --file <path> --peer <peer> "<question>"`; without one, run
+   `owl ask <peer> "<question>"`. Report the result. On `accepted`, offer to wait for the
+   answer with `owl ask ... --wait <secs>` only if the user wants to block; otherwise tell
+   them the answer will show up in the inbox counter.
 4. When an answer arrives and the user accepts it, follow the memory rule from the owlpost
    skill: save it with provenance `owlpost:<peer>:<question id>` and today's date.

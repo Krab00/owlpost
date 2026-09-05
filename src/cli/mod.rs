@@ -2,6 +2,7 @@
 //! shared exit-code error type, and the helpers the inbox commands share: record lookup,
 //! payload parsing, the stored draft shape, peer naming, age formatting and machine output.
 
+pub mod add;
 pub mod allow;
 pub mod ask;
 pub mod deny;
@@ -99,11 +100,14 @@ pub fn kind_str(kind: Kind) -> &'static str {
     }
 }
 
-/// The file path a record is about: the question's `path`; answers carry none, so `-`.
+/// The file path a record is about: the question's `path`; answers and repo-level questions
+/// carry none, so `-`.
 pub fn body_path(body: &Body) -> &str {
     match body {
-        Body::Question { path, .. } => path,
-        Body::Answer { .. } => "-",
+        Body::Question {
+            path: Some(path), ..
+        } => path,
+        Body::Question { path: None, .. } | Body::Answer { .. } => "-",
     }
 }
 
