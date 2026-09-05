@@ -70,3 +70,15 @@ Code correct in round 1; the three survivors were all on the responder's *manual
 
 ## OWL-019 (2026-09-05)
 Round 1 found two real bugs the AC-shaped tests could not see: the contact book merged `$home/contacts/*.json` in filename order, so a policy overlay was silently overwritten by any contact file sorting after `owl:` (the existing test used "ola", which sorts before), and `contact remove` became ambiguous once the overlay and the contact file shared a scope. Rules: any merge/fold over directory listings needs a test with keys on both sides of every fixed filename prefix (order-independence), and any "resolve in scope X" needs a fixture where a second file with the same key exists in X. Verifier note: after a `mv`-restore the file keeps its old mtime and cargo reuses the mutant build — `touch` after every revert and `cargo build` before manual evidence; two implementers sharing one scratchpad overwrote each other's sweep script — name scratch files per task.
+
+## OWL-020 (2026-09-05)
+Code and tests correct in round 1; the only gap was a data-modality criterion (SKILL.md + README must name the new command) that no test pinned, so the two docs mutants survived and test-reviewer returned GAPS. Rule: every "docs/table lists X" criterion gets one `contains()` assert in `tests/plugin.rs` alongside the code change — a data-modality AC is still a mutant target. Process: the fix was two asserts, one extra round; ask the implementer up front to guard every doc string the AC names.
+
+## OWL-021 (2026-09-05)
+Correct in round 1 (18/20 mutants RED). The two survivors were a substring-match weakness: `/owlpost:contact` is a prefix of `/owlpost:contacts`, so removing the shorter name from the README/SKILL.md went unnoticed by `contains()`. Rule: when a directory-driven test greps names that can prefix each other, match a delimited token (closing backtick, `|`, or end of line), and mutant-check the shortest name of every prefix pair. Handed to OWL-022 to close in the same test file.
+
+## OWL-022 (2026-09-05)
+Correct in round 1; the only GAPS was a brittle pin ("in one line and\nstop" — line-wrap dependent, a false RED on reflow). Rule: pin doc literals that fit on one line and never contain a newline; when the sentence is long, shorten the sentence in the doc rather than pin a fragment. Process: an implementer lost an uncommitted edit to `git checkout -- <file>` in its own mutant sweep — commit the intended change BEFORE any checkout-restoring sweep, and run the suite once after the sweep.
+
+## OWL-023 (2026-09-05)
+Clean round 1 (14/15 verifier mutants RED; the survivor was the design-doc sentence, which no test reads — same class as OWL-020/021: a data-modality doc criterion without a guard). Third recurrence of "AC-named doc string unguarded by a test" (OWL-020 SKILL/README, OWL-021 contact/contacts prefix, OWL-023 §9) → candidate for standing_checks_extra: "every doc literal an AC names has a single-line contains() test, mutant-checked". Also: a flag that selects an output shape needs a fixture per (flag × config × count) cell; the implementer's 2×5×2 grid is the model.
