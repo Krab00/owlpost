@@ -18,8 +18,7 @@ Two rules hold for the whole flow:
 
 Run `owl inbox --json`. Each row carries `id`, `from` (fingerprint), `from_name`, `state`,
 `project`, `path` (`null` = the whole repository), `type` and `age`. Listing marks the rows
-seen; that is expected. If the array is empty, say "owlpost inbox is empty" in one line and
-stop.
+seen; that is expected. If the array is empty, say "owlpost inbox is empty" and stop.
 
 Handle the records by state, in this order: `consent`, then `pending`, then `drafted`,
 then `answer` records. After each record continue with the next one; after the last one

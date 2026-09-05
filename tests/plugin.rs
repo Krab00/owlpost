@@ -652,7 +652,10 @@ fn inbox_command_walks_states_with_pickers() {
         body.contains(INBOX_SEND_ONLY_ON_PICK),
         "inbox.md lacks the send-only-on-pick rule"
     );
-    assert!(body.contains("in one line and\nstop"), "{body}");
+    assert!(
+        body.contains(r#"say "owlpost inbox is empty" and stop"#),
+        "inbox.md lacks the empty-inbox one-liner"
+    );
     // The consent step comes before pending, pending before drafted.
     let at = |needle: &str| body.find(needle).unwrap_or_else(|| panic!("no {needle:?}"));
     assert!(at("## 2. `consent`") < at("## 3. `pending`"));
