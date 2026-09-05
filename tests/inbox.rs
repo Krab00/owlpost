@@ -29,6 +29,10 @@ const CLAUDE_TWO: &str = r#"{"hookSpecificOutput":{"hookEventName":"UserPromptSu
 const SENTENCE_TWO: &str =
     "owlpost: 2 new questions (Maciek 2). Say \"show owlpost inbox\" or run `owl inbox`.";
 const FORMATS: [&str; 4] = ["plain", "claude", "codex", "kimi"];
+/// OWL-023 AC1 literals: the arm sentence alone (0 unseen) and after the counter (2 unseen).
+const ARM: &str = "owlpost: arm the inbox watch (see /owlpost:watch)";
+const CLAUDE_ARM_ZERO: &str = r#"{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"owlpost: arm the inbox watch (see /owlpost:watch)"}}"#;
+const CLAUDE_ARM_TWO: &str = r#"{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"owlpost: 2 new questions (Maciek 2). Say \"show owlpost inbox\" or run `owl inbox`. owlpost: arm the inbox watch (see /owlpost:watch)"}}"#;
 
 struct Home {
     dir: TempDir,
@@ -291,6 +295,93 @@ fn count_and_formats() {
     for f in FORMATS {
         assert_eq!(empty.ok(&["inbox", "--count", "--format", f]), "", "{f}");
     }
+}
+
+// ---------------------------------------------------------------- OWL-023 AC1
+
+/// `--session-start` adds the arm sentence to `--format claude` unless `plugin.json` says
+/// `{"watch": false}`; every other invocation is byte-identical to the plain one.
+#[test]
+fn session_start_arms_the_watch_unless_plugin_json_says_off() {
+    let h = Home::new();
+    let plugin_json = h.path().join("plugin.json");
+    let claude = ["inbox", "--count", "--format", "claude"];
+    let claude_ss = ["inbox", "--count", "--format", "claude", "--session-start"];
+
+    // Absent plugin.json, 0 unseen: nothing without the flag, the arm line alone with it.
+    assert!(!plugin_json.exists());
+    assert_eq!(h.ok(&claude), "");
+    assert_eq!(h.ok(&claude_ss), format!("{CLAUDE_ARM_ZERO}\n"));
+    assert_eq!(
+        CLAUDE_ARM_ZERO,
+        format!(
+            r#"{{"hookSpecificOutput":{{"hookEventName":"UserPromptSubmit","additionalContext":"{ARM}"}}}}"#
+        )
+    );
+
+    // 2 unseen: counter only without the flag, counter + arm (one space) with it.
+    h.put(&h.maciek, "Why is the refresh token rotated?", "pending");
+    h.put(&h.maciek, "Where is the retry policy?", "consent");
+    assert_eq!(h.ok(&claude), format!("{CLAUDE_TWO}\n"));
+    let armed = h.ok(&claude_ss);
+    assert_eq!(armed, format!("{CLAUDE_ARM_TWO}\n"));
+    assert_eq!(armed.lines().count(), 1, "one line: {armed:?}");
+    let v: Value = serde_json::from_str(armed.trim()).unwrap();
+    assert_eq!(
+        v["hookSpecificOutput"]["additionalContext"],
+        format!("{SENTENCE_TWO} {ARM}")
+    );
+    // Neither invocation marks anything seen.
+    assert_eq!(h.ok(&["inbox", "--count"]), "2\n");
+
+    // `{"watch": true}` is the same as absent.
+    std::fs::write(&plugin_json, r#"{"watch": true}"#).unwrap();
+    assert_eq!(h.ok(&claude_ss), format!("{CLAUDE_ARM_TWO}\n"));
+
+    // `{"watch": false}`: today's output with and without the flag — counter only ...
+    std::fs::write(&plugin_json, r#"{"watch": false}"#).unwrap();
+    assert_eq!(h.ok(&claude_ss), format!("{CLAUDE_TWO}\n"));
+    assert_eq!(h.ok(&claude), format!("{CLAUDE_TWO}\n"));
+    // ... and nothing at all once everything is seen.
+    h.ok(&["inbox"]);
+    assert_eq!(h.ok(&claude_ss), "");
+    assert_eq!(h.ok(&claude), "");
+    // A file that says nothing usable means on: back to the arm line alone.
+    std::fs::write(&plugin_json, "{not json").unwrap();
+    assert_eq!(h.ok(&claude_ss), format!("{CLAUDE_ARM_ZERO}\n"));
+    std::fs::write(&plugin_json, r#"{"watch": "false"}"#).unwrap();
+    assert_eq!(h.ok(&claude_ss), format!("{CLAUDE_ARM_ZERO}\n"));
+    std::fs::remove_file(&plugin_json).unwrap();
+
+    // Every other format ignores the flag, at 2 unseen and at 0.
+    h.put(&h.ana, "one more?", "pending");
+    h.put(&h.ana, "and another?", "pending");
+    for f in ["plain", "codex", "kimi"] {
+        let without = h.ok(&["inbox", "--count", "--format", f]);
+        assert!(!without.contains(ARM), "{f}: {without}");
+        assert_eq!(
+            h.ok(&["inbox", "--count", "--format", f, "--session-start"]),
+            without,
+            "{f}"
+        );
+    }
+    h.ok(&["inbox"]);
+    for f in ["plain", "codex", "kimi"] {
+        assert_eq!(
+            h.run(&["inbox", "--count", "--format", f, "--session-start"]),
+            (0, String::new(), String::new()),
+            "{f}"
+        );
+    }
+    // Without `--format` (plain count, `--json`) and without `--count` (a listing) the flag
+    // is accepted and changes nothing.
+    assert_eq!(h.ok(&["inbox", "--count", "--session-start"]), "0\n");
+    assert_eq!(
+        h.ok(&["--json", "inbox", "--count", "--session-start"]),
+        h.ok(&["--json", "inbox", "--count"])
+    );
+    assert_eq!(h.ok(&["inbox", "--session-start"]), h.ok(&["inbox"]));
+    assert!(!h.ok(&["inbox", "--session-start"]).contains(ARM));
 }
 
 #[test]

@@ -1403,3 +1403,58 @@ fn library_remove_resolves_in_scope_only_and_returns_paths() {
     assert!(e.contains("git repository"), "{e}");
     assert!(root.join(".agents/peers/marek.json").exists());
 }
+
+// ---------- OWL-020: `contact list --json` feeds the /owlpost:contacts picker ----------
+
+#[test]
+fn list_json_carries_picker_fields_for_both_scopes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let root = tmp.path().join("repo");
+    std::fs::create_dir_all(root.join(".git")).unwrap();
+    // One local contact without a policy...
+    let peers = root.join(".agents").join("peers");
+    std::fs::create_dir_all(&peers).unwrap();
+    std::fs::write(
+        peers.join("maciek.json"),
+        peer_json("Maciek", "maciek@company.com", 1),
+    )
+    .unwrap();
+    // ...and one global contact with a policy.
+    overlay(&home, 3, "Ola", "auto");
+
+    let o = owl(&home, &root, &["contact", "list", "--json"], None);
+    assert_eq!(o.status.code(), Some(0), "{}", err(&o));
+    let v: serde_json::Value = serde_json::from_str(&out(&o)).unwrap();
+    let list = v.as_array().expect("a JSON array");
+    assert_eq!(list.len(), 2, "{v}");
+
+    for c in list {
+        for key in ["name", "fingerprint", "source", "emails", "endpoints"] {
+            assert!(c.get(key).is_some(), "{key} missing in {c}");
+        }
+        assert!(c["emails"].is_array() && c["endpoints"].is_array(), "{c}");
+    }
+    let by_name = |n: &str| {
+        list.iter()
+            .find(|c| c["name"] == n)
+            .unwrap_or_else(|| panic!("{n} not listed: {v}"))
+    };
+    let maciek = by_name("Maciek");
+    assert_eq!(maciek["fingerprint"], fp(1));
+    assert_eq!(maciek["source"], "local");
+    assert_eq!(maciek["emails"], serde_json::json!(["maciek@company.com"]));
+    assert_eq!(
+        maciek["endpoints"],
+        serde_json::json!(["maciek.example.org:7411"])
+    );
+    // No policy → the key is absent; the picker renders it as `-`.
+    assert!(maciek.get("policy").is_none(), "{maciek}");
+
+    let ola = by_name("Ola");
+    assert_eq!(ola["fingerprint"], fp(3));
+    assert_eq!(ola["source"], "global");
+    assert_eq!(ola["emails"], serde_json::json!(["other@example.org"]));
+    assert_eq!(ola["endpoints"], serde_json::json!(["other.example.org:1"]));
+    assert_eq!(ola["policy"]["mode"], "auto");
+}

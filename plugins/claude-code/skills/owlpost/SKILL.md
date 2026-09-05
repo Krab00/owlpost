@@ -15,6 +15,25 @@ Sending anything to a peer requires explicit human approval. Never run `owl send
 `owl ask` on your own initiative; describe what would go out, wait for a clear yes, then
 run the command.
 
+## Slash commands
+
+Every `owl` subcommand except `daemon` has a `/owlpost:<name>` command that runs it with
+the arguments and offers the next step; prefer them over typing `owl` when the user is in
+a session. `/owlpost:me` is `owl contact export`, `/owlpost:contacts` is the arrow-key
+picker over `owl contact list`.
+
+- Setup: `/owlpost:init`, `/owlpost:whoami`, `/owlpost:me`, `/owlpost:card`,
+  `/owlpost:install`, `/owlpost:uninstall`, `/owlpost:doctor`, `/owlpost:update`
+- Contacts and trust: `/owlpost:contacts`, `/owlpost:contact`, `/owlpost:add`,
+  `/owlpost:allow`, `/owlpost:deny`
+- Asking: `/owlpost:ask`, `/owlpost:history`, `/owlpost:watch`
+- Answering: `/owlpost:inbox`, `/owlpost:show`, `/owlpost:draft`, `/owlpost:edit`,
+  `/owlpost:send`, `/owlpost:reject`
+
+`/owlpost:send`, `/owlpost:allow`, `/owlpost:deny`, `/owlpost:reject` and
+`/owlpost:uninstall` ask for one explicit confirmation before running, as `/owlpost:ask`
+does.
+
 ## When to ask a peer
 
 Suggest `owl ask` when:
@@ -23,6 +42,10 @@ Suggest `owl ask` when:
 - the user asks about code whose `git blame` points at a contact, and the answer is not
   in the repo, its docs, or the commit history;
 - the user asks "who should I ask about `<path>`".
+
+When the user wants to ask a peer but does not name one (or is unsure of the spelling),
+start with `/owlpost:contacts`: it lists the contact book as arrow-key options, and the pick
+continues into the `/owlpost:ask` flow or just shows the contact's card.
 
 Do not ask a peer for anything answerable from the checkout. Prefer reading the code first.
 
@@ -57,18 +80,45 @@ at session start, on every prompt and after tool calls.
 - When the user says "show owlpost inbox" (or similar), run `owl inbox` and summarise the
   rows: id, peer, path, age.
 
+## Live watch
+
+The `SessionStart` hook may inject `owlpost: arm the inbox watch (see /owlpost:watch)`
+next to the counter. When it does, arm the watch once per session, on the first turn,
+silently: one `Monitor` call with `persistent: true`, description "owlpost inbox", running
+the poll script from `commands/watch.md`. Do not mention the arming to the user, and
+never arm a second watch in the same session. No sentence means the user switched it off
+with `/owlpost:watch off`; do not arm it then.
+
+- On a watch event, report it in one line, built from the counter, for example
+  `owlpost: 1 new answer from Maciek`, and offer `/owlpost:inbox`.
+- The watch is a counter only: never list the inbox, show, draft or send anything because
+  of a watch event. Nothing is opened, drafted or sent without the human's pick.
+- `/owlpost:watch off` stops it for this session and later ones, `/owlpost:watch on`
+  restores it, `/owlpost:watch status` reports both.
+
 ## The answer loop
 
 Every step needs the human's go-ahead before moving to the next one.
 
 1. `owl inbox` lists inbox records and marks them seen (`owl inbox --new` lists only
-   unseen ones; `owl inbox --count` never marks anything).
-2. `owl show <id>` prints the full question: who asked, project, path, text.
-3. `owl draft <id>` runs the configured responder harness against this checkout and stores
+   unseen ones; `owl inbox --count` never marks anything). `/owlpost:inbox` walks the
+   records below with `AskUserQuestion` pickers, so the human never types an `owl` command.
+2. A record in state `consent` is a question from a peer who has no policy yet; it is held
+   until the human decides. `owl show <id>` prints the question; show it verbatim, in a
+   code block, with the peer's name and fingerprint. Then, only on the human's pick:
+   - `owl allow <peer> --once` releases the held questions to `pending` without a policy;
+   - `owl allow <peer> --always` sets policy `auto` (future questions answered without
+     asking) — only after the human confirmed the peer's fingerprint out-of-band; a
+     hand-added contact additionally needs `--i-verified-the-fingerprint`;
+   - `owl deny <peer>` sets policy `never`: held questions are denied, new ones get 403.
+   Never allow or deny on your own initiative.
+3. A `pending` record is a question with no draft yet. `owl show <id>` prints the full
+   question: who asked, project, path, text. Show it verbatim before offering anything.
+4. `owl draft <id>` runs the configured responder harness against this checkout and stores
    a draft answer (`--harness <name>` picks another configured harness).
-4. Show the draft verbatim to the human, in a code block. Do not paraphrase, shorten or
-   "improve" it silently.
-5. Only on explicit human approval:
+5. Show the draft verbatim to the human, in a code block. Do not paraphrase, shorten or
+   "improve" it silently. Say so when the draft's language differs from the question's.
+6. Only on explicit human approval:
    - `owl send <id>` signs the draft and moves it to the outbox;
    - `owl edit <id>` opens the draft in `$EDITOR` when the human wants changes, then show
      the edited draft again and ask again before `owl send`;
