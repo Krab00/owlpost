@@ -983,6 +983,7 @@ fn contacts_command_lists_and_points_at_mentions() {
     for needle in [
         "owl contact list --json",
         "@owl:to://",
+        "`@owl:to://<name-slug>.<email>`",
         MENTION_HINT,
         "No contacts yet — run /owlpost:add with a colleague's peer file.",
         "`-`",
@@ -1133,7 +1134,7 @@ fn design_doc_lists_owl_mcp() {
     for needle in [
         "`owl setup`",
         "`owl update`",
-        MCP_ADD,
+        "registration of the MCP server: `claude mcp add --scope user owl -- owl mcp`",
         "`mcp server owl already registered`",
         "`would run: claude mcp add --scope user owl -- owl mcp`",
         "`plugin:owlpost:owl`",
