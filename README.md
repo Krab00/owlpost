@@ -57,5 +57,7 @@ person and repository, 6–7 whenever you like.
    (`owl inbox`, `owl show <id>`) and in your agent's memory via the harness plugin
    (`plugins/claude-code/README.md`).
 
+Incoming messages stand out: the counter line wears an owl (`🦉 owlpost: 1 new answer ...`) and a peer's question or answer is shown in an orange `🟧` frame; your own drafts are not framed.
+
 Pilot users: `docs/pilot.md` has the onboarding checklist, the admin fingerprint procedure,
 what to measure and when to stop.
