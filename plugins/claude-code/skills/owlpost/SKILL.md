@@ -181,14 +181,14 @@ A single question or answer shown outside the table (every question and answer
 `/owlpost:inbox` prints) is wrapped in an orange frame with the owl, so it stands out from
 the rest of the conversation:
 
-```
+````
 🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧
 🦉 **Krzysztof Abramczyk** · 09:08 · github.com/Krab00/owlpost · whole repository
 ```text
 Jaki masz ostatni commit u Siebie?
 ```
 🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧
-```
+````
 
 Top and bottom line: 16 × `🟧`. Header: `🦉 **<peer>** · HH:MM · <project> · <path or "whole repository">`.
 On a `consent` record the header also carries the peer's fingerprint, after the peer name.

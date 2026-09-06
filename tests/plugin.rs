@@ -1479,6 +1479,20 @@ fn skill_documents_the_framed_message() {
             .all(|l| !l.starts_with('🟧') || l == FRAME_LINE),
         "a 🟧 line is the frame line, nothing shorter or longer"
     );
+    // The example nests a ```text fence: the outer fence is four backticks so CommonMark
+    // fence parity holds for the rest of the file.
+    let example = format!("````\n{FRAME_LINE}\n");
+    assert!(framed.contains(&example), "outer fence must be ````");
+    let closing = format!("\n{FRAME_LINE}\n````\n");
+    assert!(
+        framed.contains(&closing),
+        "closing outer fence must be ````"
+    );
+    let three = format!("\n```\n{FRAME_LINE}\n🦉");
+    assert!(
+        !framed.contains(&three),
+        "a ``` fence must not open the example"
+    );
     for needle in [
         "🦉 **Krzysztof Abramczyk** · 09:08 · github.com/Krab00/owlpost · whole repository",
         "```text\nJaki masz ostatni commit u Siebie?\n```",
