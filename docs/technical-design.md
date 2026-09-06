@@ -57,7 +57,7 @@ plugins/
   claude-code/       hooks.json, skills/owlpost/SKILL.md, commands/*.md, .claude-plugin/plugin.json
 scripts/
   e2e-real.sh        two daemons + a real harness (claude|codex|opencode) selected by $OWL_HARNESS
-  e2e-watch-arm.sh   three `claude -p` first prompts; proves the plugin arms the inbox watch (marker + Monitor)
+  e2e-watch-wake.sh  one `claude -p` stream-json session; proves the FileChanged hook wakes it (exit 2) when a record lands
   install.sh         curl | sh installer (release task)
 ```
 
@@ -288,7 +288,7 @@ unavailable, `3` rate limited, `4` nothing to do (e.g. `watch` timeout).
 | `owl deny <peer>` | policy `never` |
 | `owl ask <peer> [path] "<question>" [--project <id>] [--wait <secs>] [--no-cache]` | send a question; the path is optional (a repo-level question sends no `body.path`); prints answer (cache/`200`/`--wait`) or `accepted <id>` |
 | `owl ask --file <path> "<question>"` | propose peers from `git blame` (top 3 by line share matched to contact emails); interactive pick, or `--json` list |
-| `owl inbox [--count] [--new] [--all] [--format plain\|claude\|codex\|kimi] [--follow [--session <id>]]` | list / count; `--format` emits the harness injection shape, empty output when count is 0; `--hook-event <NAME>` (default `UserPromptSubmit`) is echoed as `hookEventName`, which Claude Code requires to match the firing event; `--count --format claude` reads the hook input JSON on stdin (when stdin is not a terminal) and takes `session_id` from it; `--count --follow` (plain only) is the live watch: with `--session <id>` (`[A-Za-z0-9._-]{1,128}`, anything else is a clap usage error, exit 2) it writes its pid to `$OWLPOST_HOME/watch/<id>`, polls the count every 5 s (`OWLPOST_FOLLOW_SECS`, fractions allowed), prints the counter sentence only when it changed and nothing at zero, never marks anything seen, and ends — removing the marker — when the marker is removed from outside or its stdout is closed; `--session-start` is accepted and ignored (OWL-023 plugins not yet reinstalled) |
+| `owl inbox [--count] [--new] [--all] [--format plain\|claude\|codex\|kimi] [--follow [--session <id>]]` | list / count; `--format` emits the harness injection shape, empty output when count is 0; `--hook-event <NAME>` (default `UserPromptSubmit`) is echoed as `hookEventName`, which Claude Code requires to match the firing event; `--count --format claude --hook-event SessionStart` always prints the line (also at count 0) with `watchPaths: ["<home>/spool/inbox"]` unless `plugin.json` says `{"watch": false}`, and sweeps dead markers from `$OWLPOST_HOME/watch/`; `--count --format claude --hook-event FileChanged` reads the hook input JSON on stdin and exits 2 with the counter sentence on stderr when `event` is `add`, something is unseen and the watch is on (else exit 0, silent; `--hook-event FileChanged` with another format, or none, is a clap usage error); `--count --follow` (plain only) is the poll-loop fallback for hosts without a `FileChanged` hook: with `--session <id>` (`[A-Za-z0-9._-]{1,128}`, anything else is a clap usage error, exit 2) it writes its pid to `$OWLPOST_HOME/watch/<id>`, polls the count every 5 s (`OWLPOST_FOLLOW_SECS`, fractions allowed), prints the counter sentence only when it changed and nothing at zero, never marks anything seen, and ends — removing the marker — when the marker is removed from outside or its stdout is closed; `--session-start` is accepted and ignored (OWL-023 plugins not yet reinstalled) |
 | `owl show <id\|all>` | full content, marks seen |
 | `owl draft <id> [--harness <name>]` | run the responder, store and print the draft |
 | `owl edit <id>` | open the draft in `$EDITOR` |
@@ -307,24 +307,33 @@ Hook injection formats for `owl inbox --count --format …` (exact):
   (unseen answers count as `N new answer(s)`; a mix reads `2 new questions, 1 new answer`)
 - `codex`: same JSON shape.
 - `kimi` / `plain`: the sentence alone.
-- `claude` on `--hook-event SessionStart` and `UserPromptSubmit` (OWL-029 per-turn re-arm):
-  the `additionalContext` gains a second sentence starting `owlpost: before handling this prompt` (OWL-026: a self-contained
-  imperative that names the Monitor call — `persistent: true`, description `"owlpost inbox"` —
-  and quotes the follow command `owl inbox --count --follow --session <session id>` with the
-  id filled in, the template byte-identical to `commands/watch.md`), after the counter
-  sentence and one space; at count 0 the line is emitted with the arm sentence alone
-  (`{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"owlpost: before handling this prompt, …"}}`).
-  The session id comes from the hook input JSON on stdin (`session_id`; a terminal, empty or
-  unparseable stdin, or an id outside `[A-Za-z0-9._-]{1,128}` means none). With a session id
-  the sentence goes out when no live marker `$OWLPOST_HOME/watch/<session id>` exists — the
-  running `--follow` writes its pid there, a marker whose pid is dead is removed and counts as
-  absent — so a watch that was never armed or died is asked for again on the next prompt;
-  never on `PostToolUse`. Without a session id it goes out on `SessionStart` only (old rule)
-  and quotes the command without `--session`.
-  The sentence is skipped when `$OWLPOST_HOME/plugin.json` reads `{"watch": false}`; an
-  absent file, unparseable JSON or a missing `watch` key mean on. `/owlpost:watch on|off`
-  writes that file; nothing else in `owl` reads or writes it.
-- `claude` on `--hook-event SessionStart` with unseen records: after the counter (and arm sentence) the
+- `claude` on `--hook-event SessionStart` (OWL-031 event-driven watch): the line always goes
+  out, also at count 0, and its `hookSpecificOutput` carries `watchPaths: ["<home>/spool/inbox"]`
+  (absolute; `<home>` is the resolved `$OWLPOST_HOME`, canonicalised when it exists) next to
+  `hookEventName`; `additionalContext` is present only when there is text
+  (`{"hookSpecificOutput":{"hookEventName":"SessionStart","watchPaths":["/home/me/.config/owlpost/spool/inbox"]}}`
+  at count 0). Claude Code watches that directory and runs the plugin's `FileChanged` hook
+  (`asyncRewake: true`, `owl-count.sh --hook-event FileChanged`) on every `add`, `change` and
+  `unlink` there. When `$OWLPOST_HOME/plugin.json` reads `{"watch": false}` the `watchPaths`
+  key is absent and count 0 prints nothing; an absent file, unparseable JSON or a missing
+  `watch` key mean on. `/owlpost:watch on|off` writes that file; nothing else in `owl` writes
+  it. `UserPromptSubmit` and `PostToolUse` never carry `watchPaths`. The model arms nothing:
+  the OWL-026/029 imperative that asked it to start a poll loop is not emitted any more.
+  `SessionStart` also sweeps `$OWLPOST_HOME/watch/`: every marker whose pid is dead is removed
+  (all session ids), live ones stay, and an absent or unreadable directory never fails the hook.
+- `claude` on `--hook-event FileChanged` (the wake): `owl` reads the hook input JSON on stdin
+  (`{session_id, transcript_path, cwd, hook_event_name, file_path, event}`) and, when `event`
+  is `add`, the unseen count is above 0 and the watch is on, prints the counter sentence
+  (`sentence()`, 🦉 icon, byte-identical to `--follow`) to stderr and exits `2` — the exit
+  code Claude Code's `asyncRewake` hook turns into a new model turn, showing the hook's stderr
+  (stdout when stderr is empty) to the model; the script lets exactly that through. Everything
+  else — `change`, `unlink`, count 0, watch off, a terminal, empty or unparseable stdin, no
+  `event` — is exit 0 with nothing printed. Keying on `add` only is the de-duplication:
+  marking seen and moving to `done/` are `change`/`unlink`, so they never wake; two records
+  in a burst wake twice. Nothing is ever marked seen. `--hook-event FileChanged` with
+  `--format plain|codex|kimi` (or no `--format`) is a clap usage error (exit 2, distinct from the wake by its
+  stderr text).
+- `claude` on `--hook-event SessionStart` with unseen records: after the counter the
   `additionalContext` continues with one line per unseen record,
   `- <peer> <kind> [<state>] on <path>: <first line, 200 chars>` (` on <path>` omitted for
   whole-repo questions and answers), then `owlpost: run /owlpost:inbox now.` — the skill
@@ -365,6 +374,13 @@ Answer in at most 300 words.
 - macOS: `osascript -e 'display notification "<text>" with title "owlpost"'`.
 - Linux: `notify-send owlpost "<text>"` if present, otherwise skip silently.
 - Text never includes the question body — only "<name> asks about <path>" or "answer from <name>".
+- Claude Code live watch (OWL-031): the plugin's `SessionStart` hook returns `watchPaths`
+  with the spool inbox directory and its `FileChanged` hook runs with `asyncRewake: true`
+  (`hooks.json`, timeout 5 s); `owl inbox --count --format claude --hook-event FileChanged`
+  exits 2 with the counter sentence when a record is added, which wakes the idle session with
+  a new model turn — nothing is polled and the model arms nothing. `owl inbox --count --follow`
+  stays as the poll-loop fallback for hosts without such a hook; its marker under
+  `$OWLPOST_HOME/watch/` is informational and dead ones are swept on `SessionStart`.
 - `owl install` writes the launchd plist / systemd unit running `owl daemon` with the current
   home, loads it, and prints the status. `--dry-run` prints the unit instead.
 - `owl update [--source <dir>] [--dry-run]` (OWL-029) first resolves the running binary
@@ -415,7 +431,7 @@ serves the test binary offline), `OWL_INSTALL_FAKE_SUM=1` (forces the checksum m
 | E2E (automated) | `tests/e2e.rs`: A asks B, B holds for consent, `allow`, `draft` with the fake harness, `send`, A's pull ingests, hook output asserted; plus unknown-key handshake refused, replay refused, rate limit trips | no |
 | iroh (automated) | `tests/iroh.rs`: the same loop over iroh with empty `endpoints` and an `iroh-relay` server on `127.0.0.1:0`; unknown key closed before any request; signature / replay / rate-limit statuses equal to the HTTPS suite; transport order (a decoy listener counts dials) | no |
 | E2E (manual) | `scripts/e2e-real.sh` with `OWL_HARNESS=claude\|codex\|opencode` runs the same script against a real harness on this machine; output saved under `target/e2e-real/` | yes, on demand |
-| E2E (manual) | `scripts/e2e-watch-arm.sh` (OWL-029): for each of the three first prompts `/owlpost:watch status`, `/owlpost:whoami`, `what is 2+2? answer with the number only` it runs `claude -p` with `--output-format stream-json` in a temp `OWLPOST_HOME`, waits for `$OWLPOST_HOME/watch/<session id>` with a live pid and for a `Monitor` tool_use with description `owlpost inbox` and `--session <id>` in the stream, prints `PASS`/`FAIL` per prompt; `E2E_PLUGIN_DIR` adds `--plugin-dir`, `E2E_OUT` keeps the streams | yes, on demand |
+| E2E (manual) | `scripts/e2e-watch-wake.sh` (OWL-031): one `claude -p --input-format stream-json --output-format stream-json --verbose --include-hook-events` session in a temp `OWLPOST_HOME` with stdin held open; it sends `Reply with exactly the word: ready`, waits for the first `result` event, drops one unseen question record into `spool/inbox/` and asserts within 60 s a `system` `hook_response` for `FileChanged` with `exit_code` 2 and the 🦉 sentence followed by a second `assistant` event with no second user message sent; prints `PASS`/`FAIL <reason>`, bounded by `timeout 180`; `E2E_PLUGIN_DIR` adds `--plugin-dir`, `E2E_OUT` keeps the stream | yes, on demand |
 
 Rules: automated tests never call a real harness; every network test binds port 0; every test
 uses its own home; `cargo test` must pass offline.
@@ -458,6 +474,7 @@ shell — the runner template and `owl doctor` must resolve it there as a fallba
 ## 13. Known ceilings (`ponytail:` markers in code)
 
 - Spool scan on an interval instead of fsnotify — add a watcher when the scan shows up in CPU.
+- `owl inbox --count --follow` polls every 5 s — the fallback for hosts without a `FileChanged` hook; drop it when every harness offers an event-driven wake.
 - In-memory rate limiter resets on daemon restart — persist buckets if abuse appears.
 - One private key per person copied between machines — per-machine keys need a `pubkeys` list
   in the contact format.

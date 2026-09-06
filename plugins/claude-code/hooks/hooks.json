@@ -32,6 +32,18 @@
           }
         ]
       }
+    ],
+    "FileChanged": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/owl-count.sh --hook-event FileChanged",
+            "asyncRewake": true,
+            "timeout": 5
+          }
+        ]
+      }
     ]
   }
 }
