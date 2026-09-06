@@ -451,7 +451,10 @@ fn hook_script_via_env_i_arms_until_the_follow_runs_for_real() {
     let marker = home.path().join("watch").join("sess-1");
     let start = std::time::Instant::now();
     while !marker.exists() {
-        assert!(start.elapsed().as_secs() < 5, "marker never appeared");
+        if start.elapsed().as_secs() >= 10 {
+            let _ = watch.kill();
+            panic!("marker never appeared");
+        }
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
     let pid: u32 = std::fs::read_to_string(&marker)
@@ -472,12 +475,21 @@ fn hook_script_via_env_i_arms_until_the_follow_runs_for_real() {
     // Two questions arrive: the follow prints the counter, the hooks carry it without the
     // sentence (and SessionStart adds its previews).
     seed(home.path(), &id(2), &id(1), 2, false);
-    let mut first = String::new();
-    std::io::BufRead::read_line(
-        &mut std::io::BufReader::new(watch.stdout.take().unwrap()),
-        &mut first,
-    )
-    .unwrap();
+    // Bounded read of the follow's first line (a reader thread + channel).
+    let (tx, rx) = std::sync::mpsc::channel();
+    let stdout = watch.stdout.take().unwrap();
+    std::thread::spawn(move || {
+        let mut first = String::new();
+        let _ = std::io::BufRead::read_line(&mut std::io::BufReader::new(stdout), &mut first);
+        let _ = tx.send(first);
+    });
+    let first = match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+        Ok(line) => line,
+        Err(e) => {
+            let _ = watch.kill();
+            panic!("the follow printed nothing within 10 s: {e:?}");
+        }
+    };
     assert_eq!(first.trim_end(), SENTENCE_TWO);
     assert_eq!(
         context(&run("UserPromptSubmit", "sess-1")).unwrap(),

@@ -8,7 +8,8 @@ mod common;
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
-use std::process::{Child, Command, Output, Stdio};
+use std::process::{Child, ChildStdout, Command, Output, Stdio};
+use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 use common::{Peer, id, policy, prepare_home, signed};
@@ -141,15 +142,46 @@ impl Home {
     }
 }
 
-/// Polls until `cond` holds, at most `secs` seconds.
-fn wait_for(secs: u64, what: &str, mut cond: impl FnMut() -> bool) {
+/// Every wait on a `--follow` child is bounded by this: a broken exit path must fail the
+/// test, never hang it.
+const BOUND: Duration = Duration::from_secs(10);
+
+/// Polls until `cond` holds; after [`BOUND`] the child is killed and the test fails.
+fn wait_for(child: &mut Child, what: &str, mut cond: impl FnMut() -> bool) {
     let start = Instant::now();
     while !cond() {
-        assert!(
-            start.elapsed() < Duration::from_secs(secs),
-            "timed out waiting for {what}"
-        );
+        if start.elapsed() > BOUND {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("timed out waiting for {what}");
+        }
         std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// The child's stdout as a channel of lines (a reader thread), so reads can be bounded.
+fn lines_of(stdout: ChildStdout) -> Receiver<String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            let Ok(line) = line else { break };
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    rx
+}
+
+/// The next line within [`BOUND`]; otherwise the child is killed and the test fails.
+fn next_line(rx: &Receiver<String>, child: &mut Child, what: &str) -> String {
+    match rx.recv_timeout(BOUND) {
+        Ok(line) => line,
+        Err(e) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("no line within {BOUND:?} waiting for {what}: {e:?}");
+        }
     }
 }
 
@@ -168,14 +200,14 @@ fn spawn_follow(h: &Home, session: Option<&str>) -> Child {
     if let Some(id) = session {
         cmd.args(["--session", id]);
     }
-    let child = cmd
+    let mut child = cmd
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
     if let Some(id) = session {
         let marker = h.marker(id);
-        wait_for(5, "the marker", || marker.exists());
+        wait_for(&mut child, "the marker", || marker.exists());
         let pid: u32 = std::fs::read_to_string(&marker)
             .unwrap()
             .trim()
@@ -187,8 +219,18 @@ fn spawn_follow(h: &Home, session: Option<&str>) -> Child {
     child
 }
 
+/// Waits for the child to end on its own within [`BOUND`]; a child still running then is
+/// killed and the test fails (a follow whose exit path is broken must not hang the suite).
 fn wait_exit(mut child: Child, what: &str) -> Output {
-    wait_for(5, what, || child.try_wait().unwrap().is_some());
+    let start = Instant::now();
+    while child.try_wait().unwrap().is_none() {
+        if start.elapsed() > BOUND {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("follow still running after {BOUND:?}: {what}");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
     child.wait_with_output().unwrap()
 }
 
@@ -201,23 +243,19 @@ fn wait_exit(mut child: Child, what: &str) -> Output {
 fn follow_prints_on_change_only_and_ends_when_its_marker_is_removed() {
     let h = Home::new();
     let mut child = spawn_follow(&h, Some("S1"));
-    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
-    // Each `next` blocks until the follow prints its next line.
-    fn next(lines: &mut std::io::Lines<BufReader<std::process::ChildStdout>>) -> String {
-        lines.next().expect("a line").unwrap()
-    }
+    let rx = lines_of(child.stdout.take().unwrap());
     // 0 → 2: one counter line (the first thing ever printed: zero was silent).
     h.put("why does session 0 retry?");
     h.put("why does session 1 retry?");
     assert_eq!(
-        next(&mut lines),
+        next_line(&rx, &mut child, "the 2-count"),
         "🦉 owlpost: 2 new questions (Maciek 2). Say \"show owlpost inbox\" or run `owl inbox`."
     );
     // Many polls at the same count: nothing; 2 → 3: exactly the next line.
     std::thread::sleep(Duration::from_millis(400));
     h.put("and a third?");
     assert_eq!(
-        next(&mut lines),
+        next_line(&rx, &mut child, "the 3-count"),
         "🦉 owlpost: 3 new questions (Maciek 3). Say \"show owlpost inbox\" or run `owl inbox`."
     );
     // 3 → 0 is silent; 0 → 1 prints again, so the line after the 3-count is the 1-count.
@@ -225,17 +263,19 @@ fn follow_prints_on_change_only_and_ends_when_its_marker_is_removed() {
     std::thread::sleep(Duration::from_millis(400));
     h.put("one more?");
     assert_eq!(
-        next(&mut lines),
+        next_line(&rx, &mut child, "the 1-count"),
         "🦉 owlpost: 1 new question (Maciek 1). Say \"show owlpost inbox\" or run `owl inbox`."
     );
     assert_eq!(h.unseen(), 1, "the follow never marks anything seen");
-    // Removing the marker ends the loop: exit 0, stdout closed, marker still absent.
+    // Removing the marker ends the loop (bounded wait): exit 0, nothing more on stdout,
+    // marker still absent.
     std::fs::remove_file(h.marker("S1")).unwrap();
-    assert!(
-        lines.next().is_none(),
+    let out = wait_exit(child, "after the marker was removed");
+    assert_eq!(
+        rx.recv_timeout(Duration::from_secs(1)),
+        Err(RecvTimeoutError::Disconnected),
         "no more output after the marker is gone"
     );
-    let out = wait_exit(child, "follow to end");
     assert_eq!(out.status.code(), Some(0), "{:?}", out.status);
     assert_eq!(String::from_utf8_lossy(&out.stderr), "");
     assert!(!h.marker("S1").exists());
@@ -261,14 +301,8 @@ fn follow_without_session_writes_no_marker() {
     let h = Home::new();
     let mut child = spawn_follow(&h, None);
     h.put("hello?");
-    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
-    assert!(
-        lines
-            .next()
-            .unwrap()
-            .unwrap()
-            .starts_with("🦉 owlpost: 1 new question")
-    );
+    let rx = lines_of(child.stdout.take().unwrap());
+    assert!(next_line(&rx, &mut child, "the 1-count").starts_with("🦉 owlpost: 1 new question"));
     assert!(!h.path().join("watch").exists(), "no watch dir, no marker");
     child.kill().unwrap();
     child.wait().unwrap();
@@ -308,7 +342,7 @@ fn follow_interval_is_read_from_the_env() {
         .spawn()
         .unwrap();
     let marker = h.marker("slow");
-    wait_for(5, "the marker", || marker.exists());
+    wait_for(&mut child, "the marker", || marker.exists());
     // The first poll ran at start (count 0, silent); the next one is 5 s away.
     std::thread::sleep(Duration::from_millis(100));
     h.put("slow?");
