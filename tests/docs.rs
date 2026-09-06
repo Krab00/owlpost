@@ -438,19 +438,54 @@ fn e2e_watch_wake_script_is_executable_and_pins_the_flow() {
     ] {
         assert!(s.contains(needle), "e2e-watch-wake.sh lacks {needle:?}");
     }
-    // Order: one user message is sent, the first result event is awaited, only then is the
-    // record dropped into spool/inbox/, then the wake is asserted.
-    let send = s.find("Reply with exactly the word: ready").unwrap();
-    let wait_result = s[send..].find("\"type\":\"result\"").unwrap() + send;
-    let drop = s[wait_result..]
-        .find("mv \"$WORK/$id.json\" \"$HOME_DIR/spool/inbox/$id.json\"")
+    // The pins below are on the code, not the header comment: comment lines are dropped.
+    let code: String = s
+        .lines()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .map(|l| format!("{l}\n"))
+        .collect();
+    // Both `claude -p` invocations (with and without --plugin-dir) take stream-json input.
+    assert_eq!(
+        code.matches("--input-format stream-json --output-format stream-json --verbose")
+            .count(),
+        2,
+        "both claude invocations use --input-format stream-json"
+    );
+    assert!(!code.contains("--input-format text"), "{code}");
+    // The wake check greps the hook_response for exit code 2 and the FileChanged event.
+    assert!(
+        code.contains(
+            "grep -F '\"hook_event\":\"FileChanged\"' | grep -F '\"exit_code\":2' | grep -F 'owlpost: 1 new question'"
+        ),
+        "the wake check pins hook_event FileChanged, exit_code 2 and the sentence"
+    );
+    // Order: one user message is sent, the first result event is awaited (and its absence
+    // fails the run), only then is the record dropped into spool/inbox/ — exactly once — and
+    // then the wake is asserted.
+    let drop_cmd = "mv \"$WORK/$id.json\" \"$HOME_DIR/spool/inbox/$id.json\"";
+    assert_eq!(
+        code.matches(drop_cmd).count(),
+        1,
+        "one drop into spool/inbox"
+    );
+    let send = code.find("Reply with exactly the word: ready").unwrap();
+    let wait_result = code[send..]
+        .find("result_line=$(grep -n -F '\"type\":\"result\"'")
+        .unwrap()
+        + send;
+    let no_result = code[wait_result..]
+        .find("echo \"FAIL no result event within")
         .unwrap()
         + wait_result;
-    let wake = s[drop..].find("\"hook_event\":\"FileChanged\"").unwrap() + drop;
-    assert!(send < wait_result && wait_result < drop && drop < wake);
+    let drop = code.find(drop_cmd).unwrap();
+    let wake = code[drop..].find("\"hook_event\":\"FileChanged\"").unwrap() + drop;
+    assert!(
+        send < wait_result && wait_result < no_result && no_result < drop && drop < wake,
+        "send={send} wait={wait_result} no_result={no_result} drop={drop} wake={wake}"
+    );
     // Exactly one user message is ever written to the FIFO.
     assert_eq!(
-        s.matches("\"type\":\"user\"").count(),
+        code.matches("\"type\":\"user\"").count(),
         1,
         "one user message"
     );
