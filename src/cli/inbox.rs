@@ -45,6 +45,9 @@ pub struct Opts {
 
 /// The second `additionalContext` sentence of the `claude` injection at session start (§9):
 /// the skill arms the Monitor-based inbox watch once when it sees it.
+/// Prefix of every counter sentence: incoming messages wear the owl (OWL-027).
+pub const ICON: &str = "🦉 ";
+
 pub const ARM_SENTENCE: &str = "owlpost: arm the inbox watch (see /owlpost:watch)";
 
 /// Closes the session-start preview: the skill runs `/owlpost:inbox` on the first turn.
@@ -106,8 +109,9 @@ impl Format {
     }
 }
 
-/// `owlpost: 2 new questions (Maciek 2). Say "show owlpost inbox" or run `owl inbox`.`
-/// Peers are ordered by count (descending), then name. Singular below two. `answers` is how
+/// `🦉 owlpost: 2 new questions (Maciek 2). Say "show owlpost inbox" or run `owl inbox`.`
+/// The [`ICON`] marks a message from a peer (OWL-027); the arm sentence and the preview
+/// lines carry none. Peers are ordered by count (descending), then name. Singular below two. `answers` is how
 /// many of the counted records are answers: all answers reads `1 new answer`, a mix reads
 /// `2 new questions, 1 new answer`.
 pub fn sentence(per_peer: &[(String, usize)], answers: usize) -> String {
@@ -128,7 +132,7 @@ pub fn sentence(per_peer: &[(String, usize)], answers: usize) -> String {
         .map(|(name, n)| format!("{name} {n}"))
         .collect::<Vec<_>>()
         .join(", ");
-    format!("owlpost: {what} ({peers}). Say \"show owlpost inbox\" or run `owl inbox`.")
+    format!("{ICON}owlpost: {what} ({peers}). Say \"show owlpost inbox\" or run `owl inbox`.")
 }
 
 /// The exact §9 injection line for `format`; `None` when there is nothing to inject. With
@@ -354,23 +358,23 @@ mod tests {
     fn sentence_matches_design_literal() {
         assert_eq!(
             sentence(&peers(&[("Maciek", 2)]), 0),
-            "owlpost: 2 new questions (Maciek 2). Say \"show owlpost inbox\" or run `owl inbox`."
+            "🦉 owlpost: 2 new questions (Maciek 2). Say \"show owlpost inbox\" or run `owl inbox`."
         );
         assert_eq!(
             sentence(&peers(&[("Maciek", 1)]), 0),
-            "owlpost: 1 new question (Maciek 1). Say \"show owlpost inbox\" or run `owl inbox`."
+            "🦉 owlpost: 1 new question (Maciek 1). Say \"show owlpost inbox\" or run `owl inbox`."
         );
         assert_eq!(
             sentence(&peers(&[("Ana", 2), ("Maciek", 1)]), 0),
-            "owlpost: 3 new questions (Ana 2, Maciek 1). Say \"show owlpost inbox\" or run `owl inbox`."
+            "🦉 owlpost: 3 new questions (Ana 2, Maciek 1). Say \"show owlpost inbox\" or run `owl inbox`."
         );
         assert_eq!(
             sentence(&peers(&[("Maciek", 1)]), 1),
-            "owlpost: 1 new answer (Maciek 1). Say \"show owlpost inbox\" or run `owl inbox`."
+            "🦉 owlpost: 1 new answer (Maciek 1). Say \"show owlpost inbox\" or run `owl inbox`."
         );
         assert_eq!(
             sentence(&peers(&[("Ana", 2), ("Maciek", 1)]), 1),
-            "owlpost: 2 new questions, 1 new answer (Ana 2, Maciek 1). Say \"show owlpost inbox\" or run `owl inbox`."
+            "🦉 owlpost: 2 new questions, 1 new answer (Ana 2, Maciek 1). Say \"show owlpost inbox\" or run `owl inbox`."
         );
     }
 
@@ -380,7 +384,7 @@ mod tests {
         let claude = injection(Format::Claude, &p, 0, false, &[], "UserPromptSubmit").unwrap();
         assert_eq!(
             claude,
-            r#"{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"owlpost: 2 new questions (Maciek 2). Say \"show owlpost inbox\" or run `owl inbox`."}}"#
+            r#"{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"🦉 owlpost: 2 new questions (Maciek 2). Say \"show owlpost inbox\" or run `owl inbox`."}}"#
         );
         assert_eq!(
             injection(Format::Codex, &p, 0, false, &[], "UserPromptSubmit").unwrap(),
@@ -412,7 +416,7 @@ mod tests {
 
     #[test]
     fn arm_sentence_is_claude_only_and_stands_alone_at_zero() {
-        const ARMED_TWO: &str = r#"{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"owlpost: 2 new questions (Maciek 2). Say \"show owlpost inbox\" or run `owl inbox`. owlpost: arm the inbox watch (see /owlpost:watch)"}}"#;
+        const ARMED_TWO: &str = r#"{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"🦉 owlpost: 2 new questions (Maciek 2). Say \"show owlpost inbox\" or run `owl inbox`. owlpost: arm the inbox watch (see /owlpost:watch)"}}"#;
         const ARMED_ZERO: &str = r#"{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"owlpost: arm the inbox watch (see /owlpost:watch)"}}"#;
         assert_eq!(
             ARM_SENTENCE,

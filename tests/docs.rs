@@ -148,3 +148,25 @@ fn readme_answer_paragraph_names_draft_and_send() {
         "README intro lacks the Draft & send mention"
     );
 }
+
+/// OWL-027 AC4: one README line describes the owl icon on the counter and the orange frame
+/// around a peer's message.
+#[test]
+fn readme_describes_the_owl_icon_and_orange_frame() {
+    let s = readme();
+    let line = s
+        .lines()
+        .find(|l| l.contains("🦉") && l.contains("🟧"))
+        .expect("README line with the owl icon and the orange frame");
+    for needle in [
+        "counter line wears an owl",
+        "`🦉 owlpost: 1 new answer ...`",
+        "orange `🟧` frame",
+        "drafts are not framed",
+    ] {
+        assert!(
+            line.contains(needle),
+            "README frame line lacks {needle:?}: {line}"
+        );
+    }
+}
