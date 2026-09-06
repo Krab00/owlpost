@@ -1013,6 +1013,23 @@ fn inbox_offers_draft_and_send_in_one_pick() {
             "Draft & send option lacks {needle:?}: {option}"
         );
     }
+    // Step 4's Send option is no longer the only pick that runs `owl send`.
+    let drafted = section(&body, "## 4. `drafted` records (draft stored, not sent)");
+    let send_option = drafted
+        .lines()
+        .skip_while(|l| !l.contains("- **Send** —"))
+        .take_while(|l| !l.contains("- **Edit** —"))
+        .map(str::trim)
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        send_option.contains("This is the only pick in this picker that runs `owl send`."),
+        "inbox.md step 4 Send option lacks the picker-scoped sentence: {send_option}"
+    );
+    assert!(
+        !body.contains("This is the only pick that runs `owl send`."),
+        "inbox.md still has the unscoped only-pick sentence"
+    );
     // The order of the draft-and-send steps: draft, print, send.
     let at = |needle: &str| {
         option
@@ -1029,10 +1046,9 @@ fn draft_command_accepts_send_flag() {
     // AC2: `--send` documented, stripped before `owl draft`, draft printed before `owl send`.
     for needle in [
         "`/owlpost:draft <id> --send`",
-        "`--send` is stripped from the
-arguments before `owl draft` runs (owl has no such flag)",
-        "the draft is printed verbatim as
-above, then `owl send <id>` runs at once",
+        "`--send` is stripped from the",
+        "arguments before `owl draft` runs (owl has no such flag)",
+        "then `owl send <id>` runs at once",
         "non-zero `owl draft` exit",
         "nothing is sent",
         "non-zero `owl send` exit",
