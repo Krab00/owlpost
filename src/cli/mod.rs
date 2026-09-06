@@ -12,6 +12,7 @@ pub mod edit;
 pub mod history;
 pub mod inbox;
 pub mod install;
+pub mod mcp;
 pub mod reject;
 pub mod send;
 pub mod setup;

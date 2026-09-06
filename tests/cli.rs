@@ -49,6 +49,7 @@ fn help_lists_all_subcommands() {
         "install",
         "uninstall",
         "doctor",
+        "mcp",
         "setup",
         "update",
     ];

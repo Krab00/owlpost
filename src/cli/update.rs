@@ -1,6 +1,7 @@
 //! `owl update [--source <dir>] [--dry-run]`: replace the `owl` binary (release installer, or
 //! `cargo install` from a checkout), re-register the daemon so it runs the new binary, and
-//! reinstall the Claude Code plugin so its copied command/hook files are refreshed.
+//! reinstall the Claude Code plugin so its copied command/hook files are refreshed (and
+//! register the `owl` MCP server at user scope when it is missing).
 
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -8,6 +9,7 @@ use std::process::{Command, Stdio};
 use anyhow::{Context, bail};
 
 use super::install;
+use super::setup::register_mcp;
 
 const INSTALL_SH: &str = "https://raw.githubusercontent.com/Krab00/owlpost/main/scripts/install.sh";
 const MARKETPLACE: &str = "owlpost-local";
@@ -83,6 +85,7 @@ pub fn run_update(home: &Path, source: Option<&Path>, dry_run: bool) -> anyhow::
             for (_, c) in plugin_cmds() {
                 println!("would run: {}", c.join(" "));
             }
+            register_mcp(true)?;
         } else {
             println!("claude not on PATH: plugin reinstall skipped");
         }
@@ -97,6 +100,7 @@ pub fn run_update(home: &Path, source: Option<&Path>, dry_run: bool) -> anyhow::
         for (required, c) in plugin_cmds() {
             run(&c, required)?;
         }
+        register_mcp(false)?;
     } else {
         println!("claude not on PATH: plugin reinstall skipped");
     }

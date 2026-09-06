@@ -1,6 +1,7 @@
 //! `owl setup [--name] [--email] [--plugin-source <dir|repo>] [--dry-run]`: one command from a
 //! fresh machine to a working owlpost — `owl init` (skipped when a key exists), `owl install`
-//! for the daemon, then `claude plugin marketplace add` + `claude plugin install`.
+//! for the daemon, then `claude plugin marketplace add` + `claude plugin install`, and the
+//! `owl` MCP server registered at user scope (`claude mcp add --scope user owl -- owl mcp`).
 
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -62,6 +63,40 @@ fn plugin_cmds(source: &str) -> Vec<Vec<String>> {
     ]
 }
 
+/// The user-scope registration of `owl mcp` in Claude Code (OWL-025): a server bundled in a
+/// plugin's `.mcp.json` is named `plugin:owlpost:owl`, which sinks its resources in the `@`
+/// typeahead; one added at user scope is plain `owl`, so `@owl:krz` finds the contact.
+pub const MCP_ADD: [&str; 9] = [
+    "claude", "mcp", "add", "--scope", "user", "owl", "--", "owl", "mcp",
+];
+
+/// `claude mcp get owl` exit status: `Ok(true)` when the server is registered.
+fn mcp_registered() -> anyhow::Result<bool> {
+    let status = Command::new("claude")
+        .args(["mcp", "get", "owl"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .context("running claude mcp get owl")?;
+    Ok(status.success())
+}
+
+/// Idempotent registration step shared by `owl setup` and `owl update`; the caller has
+/// checked that `claude` is on PATH.
+pub fn register_mcp(dry_run: bool) -> anyhow::Result<()> {
+    if mcp_registered()? {
+        println!("mcp server owl already registered");
+        return Ok(());
+    }
+    let cmd: Vec<String> = MCP_ADD.iter().map(|s| s.to_string()).collect();
+    if dry_run {
+        println!("would run: {}", cmd.join(" "));
+        return Ok(());
+    }
+    run(&cmd)
+}
+
 fn run(cmd: &[String]) -> anyhow::Result<()> {
     println!("+ {}", cmd.join(" "));
     let status = Command::new(&cmd[0])
@@ -97,6 +132,7 @@ pub fn run_setup(home: &Path, opts: Opts) -> anyhow::Result<()> {
             for c in plugin_cmds(&source) {
                 println!("would run: {}", c.join(" "));
             }
+            register_mcp(true)?;
         } else {
             println!("claude not on PATH: plugin install skipped");
         }
@@ -112,6 +148,7 @@ pub fn run_setup(home: &Path, opts: Opts) -> anyhow::Result<()> {
         for c in plugin_cmds(&source) {
             run(&c)?;
         }
+        register_mcp(false)?;
     } else {
         println!("claude not on PATH: plugin install skipped");
     }

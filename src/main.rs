@@ -133,6 +133,8 @@ enum Cmd {
     Uninstall,
     /// Check key, config, endpoints, harnesses, daemon
     Doctor,
+    /// MCP server over stdio: the contact book as `to://` resources (Claude Code `@owl:` mentions)
+    Mcp,
     /// One-shot first install: init (if no key), install the daemon, install the Claude Code plugin
     Setup {
         #[arg(long)]
@@ -355,6 +357,7 @@ fn main() -> ExitCode {
         Cmd::Install { dry_run } => cli::install::install(&home, dry_run),
         Cmd::Uninstall => cli::install::uninstall(),
         Cmd::Doctor => cli::doctor::run(&home, cli.json),
+        Cmd::Mcp => cli::mcp::run(&home),
         Cmd::Setup {
             name,
             email,

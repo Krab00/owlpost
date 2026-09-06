@@ -13,12 +13,13 @@ peer and there is no path. A question about the repository as a whole ("how long
 README?", "which branch do you deploy from?") needs no path — do not ask for one. Ask the user
 only when the peer or the question itself is missing.
 
-1. Resolve the peer with `owl contact show <peer>` and show the user the peer's name and
-   fingerprint, the path (or "whole repository" when there is none) and the exact question text.
-2. Ask for explicit approval. Do not run anything else until the user says yes.
-3. With a path, run `owl ask --file <path> --peer <peer> "<question>"`; without one, run
-   `owl ask <peer> "<question>"`. Report the result. On `accepted`, offer to wait for the
-   answer with `owl ask ... --wait <secs>` only if the user wants to block; otherwise tell
-   them the answer will show up in the inbox counter.
+1. Resolve the peer with `owl contact show <peer>`.
+2. Do not ask for confirmation: the command is the approval. Run at once. With a path, run
+   `owl ask --file <path> --peer <peer> "<question>"`; without one, run
+   `owl ask <peer> "<question>"`.
+3. Report in one line who the question went to (name and fingerprint), the path (or
+   "whole repository") and the result. On `accepted`, offer to wait for the answer with
+   `owl ask ... --wait <secs>` only if the user wants to block; otherwise tell them the
+   answer will show up in the inbox counter.
 4. When an answer arrives and the user accepts it, follow the memory rule from the owlpost
    skill: save it with provenance `owlpost:<peer>:<question id>` and today's date.

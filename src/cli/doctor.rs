@@ -1,11 +1,12 @@
 //! `owl doctor` (§9): one line per check — `ok|warn|fail  <name>: <detail>` — for the key,
-//! the config, every endpoint's host, the configured harness binaries, the daemon at
-//! `daemon.addr` (card fetch, pinned to our own key), the daemon's iroh endpoint (from the
-//! card) and the age of the last pull recorded in `daemon.status`. Exit 1 when any check
-//! fails; `--json` prints `[{check, status, detail}]`.
+//! the config, every endpoint's host, the configured harness binaries, the `owl` MCP server
+//! in Claude Code, the daemon at `daemon.addr` (card fetch, pinned to our own key), the
+//! daemon's iroh endpoint (from the card) and the age of the last pull recorded in
+//! `daemon.status`. Exit 1 when any check fails; `--json` prints `[{check, status, detail}]`.
 
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::Path;
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -14,6 +15,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::cli::ExitError;
+use crate::cli::setup::MCP_ADD;
 use owlpost::config::Config;
 use owlpost::daemon::ADDR_FILE;
 pub use owlpost::daemon::connect_addr;
@@ -178,6 +180,32 @@ pub fn harness_checks(
         }
     }
     out
+}
+
+/// `mcp`: `claude mcp get owl` exits 0 → `ok`; `warn` naming the `claude mcp add` fix when
+/// it does not, `warn claude not on PATH` when `claude` cannot be run. Never `fail`: owlpost
+/// works without Claude Code.
+pub fn mcp_check() -> Check {
+    let status = Command::new("claude")
+        .args(["mcp", "get", "owl"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    match status {
+        Ok(s) if s.success() => Check::ok("mcp", "owl registered in Claude Code (user scope)"),
+        Ok(_) => Check::warn(
+            "mcp",
+            format!(
+                "owl not registered in Claude Code; run {}",
+                MCP_ADD.join(" ")
+            ),
+        ),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Check::warn("mcp", "claude not on PATH")
+        }
+        Err(e) => Check::warn("mcp", format!("claude mcp get owl: {e}")),
+    }
 }
 
 /// `daemon`: `daemon.addr` exists, the card is served there and (when our key is known) the
@@ -364,6 +392,7 @@ pub fn run_checks(home: &Path) -> Vec<Check> {
         std::env::var_os("PATH").as_deref(),
         &user_home,
     ));
+    out.push(mcp_check());
     let (daemon_line, card) = daemon_check(home, id.as_ref());
     out.push(daemon_line);
     out.push(iroh_check(card.as_ref()));
