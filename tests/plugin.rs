@@ -960,6 +960,16 @@ fn plugin_bundles_no_mcp_json() {
     ] {
         assert!(!text.contains(".mcp.json"), "{name} still says .mcp.json");
     }
+    // An inline `mcpServers` in the manifest would bundle the server just the same.
+    let manifest = json(".claude-plugin/plugin.json");
+    let obj = manifest.as_object().expect("plugin.json object");
+    assert!(!obj.contains_key("mcpServers"), "{manifest}");
+    assert!(
+        obj.get("experimental")
+            .and_then(Value::as_object)
+            .is_none_or(|e| !e.contains_key("mcpServers")),
+        "{manifest}"
+    );
 }
 
 /// AC6: `contacts.md` is a table over `owl contact list --json` ending with the mention
@@ -1108,6 +1118,7 @@ fn design_doc_lists_owl_mcp() {
         "to://<name-slug>.<first e-mail>",
         "re-read per request",
         MCP_ADD,
+        "`mcp server owl already registered`",
         "checked by `owl doctor`",
     ] {
         assert!(

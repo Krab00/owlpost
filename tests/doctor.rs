@@ -215,6 +215,24 @@ async fn doctor_reports_each_check() {
         "{stdout}"
     );
     assert_eq!(heads(&stdout)[4], ("warn".to_string(), "mcp".to_string()));
+    let out = owl_on(d.home(), empty.path())
+        .args(["--json", "doctor"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    let json: serde_json::Value = serde_json::from_str(&text(&out).0).unwrap();
+    let mcp = json
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c.get("check").and_then(|v| v.as_str()) == Some("mcp"))
+        .expect("mcp check in --json");
+    assert_eq!(mcp.get("status").and_then(|v| v.as_str()), Some("warn"));
+    assert_eq!(
+        mcp.get("detail").and_then(|v| v.as_str()),
+        Some("claude not on PATH"),
+        "{mcp}"
+    );
 
     // Without the status file the last line is a warning, not a failure (exit 0).
     std::fs::remove_file(d.home().join(STATUS_FILE)).unwrap();
