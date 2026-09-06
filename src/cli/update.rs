@@ -177,9 +177,10 @@ pub fn run_update(home: &Path, source: Option<&Path>, dry_run: bool) -> anyhow::
     let _ = std::fs::remove_dir_all(&tmp);
     result?;
     // uninstall+install re-points the unit at the binary path, which is now the one that
-    // was replaced in place.
+    // was replaced in place. `active` was read before the replacement: resolving it again
+    // here would see `<path> (deleted)` (OWL-030).
     install::uninstall()?;
-    install::install(home, false)?;
+    install::install(home, false, &active)?;
     if has_claude {
         for (required, c) in plugin_cmds() {
             run(&c, required)?;

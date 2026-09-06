@@ -36,6 +36,11 @@ person and repository, 6–7 whenever you like.
    Then `owl setup --name "Your Name" --email you@company.com` does steps 2–3 and installs the
    Claude Code plugin in one go (`--dry-run` lists the steps); or step by step:
 
+   Later, `owl update` replaces the running binary in place. An `owl` older than that
+   (installed by `cargo install`) still updates into `~/.cargo/bin`: bootstrap once with
+   `cp ~/.cargo/bin/owl ~/.local/bin/owl.new && mv ~/.local/bin/owl.new ~/.local/bin/owl`
+   (or re-run the installer above), then `owl update` works in place.
+
 2. **`owl init`** — creates your key and config under `~/.config/owlpost` and prints your fingerprint
    (`owl init --name "Your Name" --email you@company.com`).
 

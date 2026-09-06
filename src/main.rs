@@ -365,7 +365,9 @@ fn main() -> ExitCode {
         }
         Cmd::Ask(args) => cli::ask::run(&home, args, cli.json, cli.quiet),
         Cmd::Watch { id, timeout } => cli::watch::run(&home, id.as_deref(), timeout),
-        Cmd::Install { dry_run } => cli::install::install(&home, dry_run),
+        Cmd::Install { dry_run } => {
+            cli::install::owl_path().and_then(|owl| cli::install::install(&home, dry_run, &owl))
+        }
         Cmd::Uninstall => cli::install::uninstall(),
         Cmd::Doctor => cli::doctor::run(&home, cli.json),
         Cmd::Mcp => cli::mcp::run(&home),
