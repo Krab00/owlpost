@@ -148,13 +148,15 @@ Every step needs the human's go-ahead before moving to the next one.
 5. Show the draft verbatim to the human, in a code block. Do not paraphrase, shorten or
    "improve" it silently. Say so when the draft's language differs from the question's.
 6. Only on explicit human approval:
-   - `owl send <id>` signs the draft and moves it to the outbox;
+   - `owl send <id>` signs the draft and moves it to the outbox; a "Draft & send" pick in
+     `/owlpost:inbox` (or `/owlpost:draft <id> --send`) is that approval given once, at
+     draft time: the draft is still printed in full before `owl send` runs;
    - `owl edit <id>` opens the draft in `$EDITOR` when the human wants changes, then show
      the edited draft again and ask again before `owl send`;
    - `owl reject <id>` discards the record when the human declines to answer.
 
-Never chain `owl draft` and `owl send` in one step. Never send a draft the human has not
-seen in full.
+Never chain `owl draft` and `owl send` unless the human picked "Draft & send" (or passed `--send`); the draft is still printed in full before `owl send` runs.
+Never send a draft the human has not seen in full.
 
 ## Showing messages
 

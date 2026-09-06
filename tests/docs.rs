@@ -137,3 +137,14 @@ fn pilot_sections_carry_their_required_content() {
         assert!(kill.contains(k), "Kill criteria lacks {k}");
     }
 }
+
+/// OWL-028 AC4: the README's answer paragraph names the one-pick `Draft & send`.
+#[test]
+fn readme_answer_paragraph_names_draft_and_send() {
+    let s = readme();
+    let intro = &s[..s.find("\n## Quickstart\n").expect("## Quickstart heading")];
+    assert!(
+        intro.contains("approves — one `Draft & send` pick in `/owlpost:inbox` — or automatically"),
+        "README intro lacks the Draft & send mention"
+    );
+}
