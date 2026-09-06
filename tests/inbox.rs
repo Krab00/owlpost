@@ -29,11 +29,6 @@ const CLAUDE_TWO: &str = r#"{"hookSpecificOutput":{"hookEventName":"UserPromptSu
 const SENTENCE_TWO: &str =
     "🦉 owlpost: 2 new questions (Maciek 2). Say \"show owlpost inbox\" or run `owl inbox`.";
 const FORMATS: [&str; 4] = ["plain", "claude", "codex", "kimi"];
-/// OWL-023 AC1 / OWL-026 AC1 / OWL-029: the arm sentence alone (0 unseen) and after the
-/// counter (2 unseen). The sentence is self-contained: it embeds the follow command. Without
-/// hook input on stdin (every call here) there is no session id, so the command is bare and
-/// the old rule holds: `SessionStart` only. `tests/follow.rs` covers the stdin path.
-const ARM: &str = "owlpost: before handling this prompt, arm the inbox watch for this session: call Monitor with persistent: true, description \"owlpost inbox\" and this command (verbatim): `owl inbox --count --follow`. Then handle the prompt.";
 const PREVIEW_TWO: &str = "- Maciek question [pending] on src/auth/session.rs: Why is the refresh token rotated?\n- Maciek question [consent] on src/auth/session.rs: Where is the retry policy?\nowlpost: run /owlpost:inbox now.";
 
 /// The exact SessionStart line for `context`: serde's own escaping, §9 key order.
@@ -43,11 +38,22 @@ fn session_start_line(context: &str) -> String {
         serde_json::to_string(context).unwrap()
     )
 }
-fn claude_arm_zero() -> String {
-    session_start_line(ARM)
+/// The retired OWL-026/029 arm sentence prefix: no output may carry it any more (OWL-031).
+const ARM_PREFIX: &str = "owlpost: before handling this prompt";
+/// OWL-031 AC1: the SessionStart line with the watch on — `watchPaths` alone at 0 unseen,
+/// after the context (counter + previews) with unseen records.
+fn claude_watch_zero(inbox: &str) -> String {
+    format!(
+        r#"{{"hookSpecificOutput":{{"hookEventName":"SessionStart","watchPaths":[{}]}}}}"#,
+        serde_json::to_string(inbox).unwrap()
+    )
 }
-fn claude_arm_two() -> String {
-    session_start_line(&format!("{SENTENCE_TWO} {ARM}\n{PREVIEW_TWO}"))
+fn claude_watch_two(inbox: &str) -> String {
+    format!(
+        r#"{{"hookSpecificOutput":{{"hookEventName":"SessionStart","additionalContext":{},"watchPaths":[{}]}}}}"#,
+        serde_json::to_string(&format!("{SENTENCE_TWO}\n{PREVIEW_TWO}")).unwrap(),
+        serde_json::to_string(inbox).unwrap()
+    )
 }
 
 struct Home {
@@ -106,6 +112,18 @@ impl Home {
 
     fn spool(&self) -> Spool {
         Spool::new(self.path()).unwrap()
+    }
+
+    /// The `watchPaths` entry: the canonical `<home>/spool/inbox`.
+    fn inbox_path(&self) -> String {
+        self.spool();
+        self.path()
+            .join("spool")
+            .join("inbox")
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned()
     }
 
     fn owl(&self) -> Command {
@@ -313,14 +331,18 @@ fn count_and_formats() {
     }
 }
 
-// ---------------------------------------------------------------- OWL-023 AC1
+// ---------------------------------------------------------------- OWL-031 AC1
 
-/// `--hook-event SessionStart` adds the arm sentence to `--format claude` unless
-/// `plugin.json` says `{"watch": false}`; every other invocation is byte-identical to the
-/// plain one.
+/// `--hook-event SessionStart` always prints the `--format claude` line with `watchPaths`
+/// (the canonical `<home>/spool/inbox`) unless `plugin.json` says `{"watch": false}`;
+/// `additionalContext` is present only with unseen records; every other invocation is
+/// byte-identical to the plain one and nothing ever carries the retired arm sentence.
 #[test]
-fn session_start_arms_the_watch_unless_plugin_json_says_off() {
+fn session_start_registers_the_watch_path_unless_plugin_json_says_off() {
     let h = Home::new();
+    let inbox = h.inbox_path();
+    assert!(Path::new(&inbox).is_absolute());
+    assert!(inbox.ends_with("/spool/inbox"), "{inbox}");
     let plugin_json = h.path().join("plugin.json");
     let claude = ["inbox", "--count", "--format", "claude"];
     let claude_ss = [
@@ -332,61 +354,95 @@ fn session_start_arms_the_watch_unless_plugin_json_says_off() {
         "SessionStart",
     ];
 
-    // Absent plugin.json, 0 unseen: nothing without the flag, the arm line alone with it.
+    // Absent plugin.json, 0 unseen: nothing without the flag, the watchPaths line alone with it.
     assert!(!plugin_json.exists());
     assert_eq!(h.ok(&claude), "");
-    assert_eq!(h.ok(&claude_ss), format!("{}\n", claude_arm_zero()));
-    // OWL-026 AC1: valid JSON despite the `"` and `$` in the embedded script.
-    let v: Value = serde_json::from_str(claude_arm_zero().trim()).unwrap();
-    assert_eq!(v["hookSpecificOutput"]["additionalContext"], ARM);
-    assert!(ARM.starts_with("owlpost: before handling this prompt"));
+    let zero = h.ok(&claude_ss);
+    assert_eq!(zero, format!("{}\n", claude_watch_zero(&inbox)));
+    let v: Value = serde_json::from_str(zero.trim()).unwrap();
+    assert_eq!(v["hookSpecificOutput"]["hookEventName"], "SessionStart");
+    assert_eq!(v["hookSpecificOutput"]["watchPaths"], json!([inbox]));
+    assert!(
+        v["hookSpecificOutput"].get("additionalContext").is_none(),
+        "{v}"
+    );
 
-    // 2 unseen: counter only without the flag, counter + arm (one space) with it.
+    // 2 unseen: counter only without the flag, counter + previews + watchPaths with it.
     h.put(&h.maciek, "Why is the refresh token rotated?", "pending");
     h.put(&h.maciek, "Where is the retry policy?", "consent");
     assert_eq!(h.ok(&claude), format!("{CLAUDE_TWO}\n"));
-    let armed = h.ok(&claude_ss);
-    assert_eq!(armed, format!("{}\n", claude_arm_two()));
-    assert_eq!(armed.lines().count(), 1, "one line: {armed:?}");
-    let v: Value = serde_json::from_str(armed.trim()).unwrap();
+    let two = h.ok(&claude_ss);
+    assert_eq!(two, format!("{}\n", claude_watch_two(&inbox)));
+    assert_eq!(two.lines().count(), 1, "one line: {two:?}");
+    let v: Value = serde_json::from_str(two.trim()).unwrap();
     assert_eq!(
         v["hookSpecificOutput"]["additionalContext"],
-        format!("{SENTENCE_TWO} {ARM}\n{PREVIEW_TWO}")
+        format!("{SENTENCE_TWO}\n{PREVIEW_TWO}")
+    );
+    assert_eq!(v["hookSpecificOutput"]["watchPaths"], json!([inbox]));
+    assert!(
+        v["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap()
+            .ends_with("owlpost: run /owlpost:inbox now.")
     );
     // Neither invocation marks anything seen.
     assert_eq!(h.ok(&["inbox", "--count"]), "2\n");
 
     // `{"watch": true}` is the same as absent.
     std::fs::write(&plugin_json, r#"{"watch": true}"#).unwrap();
-    assert_eq!(h.ok(&claude_ss), format!("{}\n", claude_arm_two()));
+    assert_eq!(h.ok(&claude_ss), format!("{}\n", claude_watch_two(&inbox)));
 
-    // `{"watch": false}`: counter + previews, no arm sentence; plain hook unchanged ...
+    // `{"watch": false}`: counter + previews, no watchPaths key; plain hook unchanged ...
     std::fs::write(&plugin_json, r#"{"watch": false}"#).unwrap();
+    let off = h.ok(&claude_ss);
     assert_eq!(
-        h.ok(&claude_ss),
+        off,
         format!(
             "{}\n",
             session_start_line(&format!("{SENTENCE_TWO}\n{PREVIEW_TWO}"))
         )
     );
+    assert!(!off.contains("watchPaths"), "{off}");
     assert_eq!(h.ok(&claude), format!("{CLAUDE_TWO}\n"));
     // ... and nothing at all once everything is seen.
     h.ok(&["inbox"]);
     assert_eq!(h.ok(&claude_ss), "");
     assert_eq!(h.ok(&claude), "");
-    // A file that says nothing usable means on: back to the arm line alone.
+    // A file that says nothing usable means on: back to the watchPaths line alone.
     std::fs::write(&plugin_json, "{not json").unwrap();
-    assert_eq!(h.ok(&claude_ss), format!("{}\n", claude_arm_zero()));
+    assert_eq!(h.ok(&claude_ss), format!("{}\n", claude_watch_zero(&inbox)));
     std::fs::write(&plugin_json, r#"{"watch": "false"}"#).unwrap();
-    assert_eq!(h.ok(&claude_ss), format!("{}\n", claude_arm_zero()));
+    assert_eq!(h.ok(&claude_ss), format!("{}\n", claude_watch_zero(&inbox)));
     std::fs::remove_file(&plugin_json).unwrap();
 
-    // Every other format ignores the event, at 2 unseen and at 0.
+    // UserPromptSubmit and PostToolUse never carry watchPaths, at 2 unseen or at 0.
     h.put(&h.ana, "one more?", "pending");
     h.put(&h.ana, "and another?", "pending");
+    for event in ["UserPromptSubmit", "PostToolUse"] {
+        let line = h.ok(&[
+            "inbox",
+            "--count",
+            "--format",
+            "claude",
+            "--hook-event",
+            event,
+        ]);
+        assert!(!line.contains("watchPaths"), "{event}: {line}");
+        assert!(!line.contains(ARM_PREFIX), "{event}: {line}");
+        let v: Value = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(v["hookSpecificOutput"]["hookEventName"], event);
+        assert!(
+            v["hookSpecificOutput"]["additionalContext"]
+                .as_str()
+                .unwrap()
+                .contains("2 new questions (Ana 2)")
+        );
+    }
+    // Every other format ignores the event, at 2 unseen and at 0.
     for f in ["plain", "codex", "kimi"] {
         let without = h.ok(&["inbox", "--count", "--format", f]);
-        assert!(!without.contains(ARM), "{f}: {without}");
+        assert!(!without.contains(ARM_PREFIX), "{f}: {without}");
         assert!(!without.contains("--follow"), "{f}: {without}");
         let ss = [
             "inbox",
@@ -401,8 +457,8 @@ fn session_start_arms_the_watch_unless_plugin_json_says_off() {
             at_start.contains("2 new questions (Ana 2)"),
             "{f}: {at_start}"
         );
-        assert!(!at_start.contains(ARM), "{f}: {at_start}");
-        assert!(!at_start.contains("--follow"), "{f}: {at_start}");
+        assert!(!at_start.contains(ARM_PREFIX), "{f}: {at_start}");
+        assert!(!at_start.contains("watchPaths"), "{f}: {at_start}");
         // Only the echoed hookEventName may differ (codex shares the JSON shape).
         assert_eq!(
             at_start.replace("SessionStart", "UserPromptSubmit"),
@@ -425,6 +481,20 @@ fn session_start_arms_the_watch_unless_plugin_json_says_off() {
             "{f}"
         );
     }
+    for event in ["UserPromptSubmit", "PostToolUse"] {
+        assert_eq!(
+            h.run(&[
+                "inbox",
+                "--count",
+                "--format",
+                "claude",
+                "--hook-event",
+                event
+            ]),
+            (0, String::new(), String::new()),
+            "{event}"
+        );
+    }
     // Without `--format` (plain count, `--json`) and without `--count` (a listing) the
     // event is accepted and changes nothing.
     let ss = ["--hook-event", "SessionStart"];
@@ -434,7 +504,54 @@ fn session_start_arms_the_watch_unless_plugin_json_says_off() {
         h.ok(&["--json", "inbox", "--count"])
     );
     assert_eq!(h.ok(&["inbox", ss[0], ss[1]]), h.ok(&["inbox"]));
-    assert!(!h.ok(&["inbox", ss[0], ss[1]]).contains(ARM));
+    assert!(!h.ok(&["inbox", ss[0], ss[1]]).contains("watchPaths"));
+}
+
+/// The path in `watchPaths` follows `--home` / `$OWLPOST_HOME` and is canonical: a home
+/// given through a symlink or a relative path resolves to the real absolute directory.
+#[test]
+fn watch_path_follows_the_home_and_is_canonical() {
+    let h = Home::new();
+    let inbox = h.inbox_path();
+    let link_dir = tempfile::tempdir().unwrap();
+    let link = link_dir.path().join("home-link");
+    std::os::unix::fs::symlink(h.path(), &link).unwrap();
+    let via_link = Command::new(OWL)
+        .env_remove("OWLPOST_HOME")
+        .args(["--home"])
+        .arg(&link)
+        .args([
+            "inbox",
+            "--count",
+            "--format",
+            "claude",
+            "--hook-event",
+            "SessionStart",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8(via_link.stdout).unwrap(),
+        format!("{}\n", claude_watch_zero(&inbox))
+    );
+    // Through the environment, relative to the current directory.
+    let via_env = Command::new(OWL)
+        .current_dir(link_dir.path())
+        .env("OWLPOST_HOME", "home-link")
+        .args([
+            "inbox",
+            "--count",
+            "--format",
+            "claude",
+            "--hook-event",
+            "SessionStart",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8(via_env.stdout).unwrap(),
+        format!("{}\n", claude_watch_zero(&inbox))
+    );
 }
 
 #[test]

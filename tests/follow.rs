@@ -1,13 +1,15 @@
-//! OWL-029 AC3/AC4: `owl inbox --count --follow --session <id>` (the live watch: marker with
-//! its pid, counter only on change, nothing at zero, marker removed on a clean end) and the
-//! hook path `owl inbox --count --format claude` reading `session_id` from stdin and arming
-//! only while no live marker exists for that session. Every test drives the built binary
-//! against its own temp home with a fast poll interval (`OWLPOST_FOLLOW_SECS`).
+//! OWL-029 AC3 / OWL-031 AC1–AC3: `owl inbox --count --follow --session <id>` (the poll-loop
+//! fallback: marker with its pid, counter only on change, nothing at zero, marker removed on
+//! a clean end) and the hook path `owl inbox --count --format claude`: `SessionStart` carries
+//! `watchPaths` and sweeps dead markers, `FileChanged` wakes (exit 2, the sentence on stderr)
+//! on `add` with unseen records only, and no event asks the model to arm anything any more.
+//! Every test drives the built binary against its own temp home with a fast poll interval
+//! (`OWLPOST_FOLLOW_SECS`).
 
 mod common;
 
 use std::io::{BufRead, BufReader, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Output, Stdio};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
@@ -21,14 +23,14 @@ use serde_json::Value;
 use tempfile::TempDir;
 
 const OWL: &str = env!("CARGO_BIN_EXE_owl");
+/// The three events that inject context; `FileChanged` is the wake and prints no context.
 const EVENTS: [&str; 3] = ["SessionStart", "UserPromptSubmit", "PostToolUse"];
+/// The retired OWL-026/029 arm sentence prefix: must never appear in any output again.
 const ARM_PREFIX: &str = "owlpost: before handling this prompt";
-/// The arm sentence for session `S`, exactly as `owl` emits it (AC4/AC5).
-const ARM_S: &str = "owlpost: before handling this prompt, arm the inbox watch for this session: call Monitor with persistent: true, description \"owlpost inbox\" and this command (verbatim): `owl inbox --count --follow --session S`. Then handle the prompt.";
-/// The arm sentence without a session id (no stdin: the old `SessionStart`-only rule).
-const ARM_BARE: &str = "owlpost: before handling this prompt, arm the inbox watch for this session: call Monitor with persistent: true, description \"owlpost inbox\" and this command (verbatim): `owl inbox --count --follow`. Then handle the prompt.";
 const STDIN_S: &str =
     r#"{"session_id":"S","transcript_path":"/t","cwd":"/c","hook_event_name":"UserPromptSubmit"}"#;
+const COUNTER_ONE: &str =
+    "🦉 owlpost: 1 new question (Maciek 1). Say \"show owlpost inbox\" or run `owl inbox`.";
 
 struct Home {
     dir: TempDir,
@@ -99,8 +101,20 @@ impl Home {
             .len()
     }
 
-    fn marker(&self, id: &str) -> std::path::PathBuf {
+    fn marker(&self, id: &str) -> PathBuf {
         self.path().join("watch").join(id)
+    }
+
+    /// The `watchPaths` entry `owl` must emit: the canonical `<home>/spool/inbox`.
+    fn inbox_path(&self) -> String {
+        Spool::new(self.path()).unwrap();
+        self.path()
+            .join("spool")
+            .join("inbox")
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned()
     }
 
     fn owl(&self) -> Command {
@@ -308,9 +322,10 @@ fn follow_without_session_writes_no_marker() {
     child.wait().unwrap();
 }
 
-/// A killed follow leaves its marker behind (stale, pid dead); the hook path cleans it up.
+/// A killed follow leaves its marker behind (stale, pid dead); the `SessionStart` sweep
+/// removes it — `UserPromptSubmit` does not look at markers at all (OWL-031 AC3).
 #[test]
-fn a_killed_follow_leaves_a_stale_marker_the_hook_removes() {
+fn a_killed_follow_leaves_a_stale_marker_the_session_start_sweep_removes() {
     let h = Home::new();
     let mut child = spawn_follow(&h, Some("S3"));
     child.kill().unwrap();
@@ -320,11 +335,21 @@ fn a_killed_follow_leaves_a_stale_marker_the_hook_removes() {
         "UserPromptSubmit",
         Some(r#"{"session_id":"S3","hook_event_name":"UserPromptSubmit"}"#),
     );
-    let ctx = context(&out).expect("arm sentence for a dead marker");
-    assert!(ctx.contains("--session S3"), "{ctx}");
+    assert_eq!(hook_output(&out), None, "nothing to inject at 0 unseen");
+    assert!(
+        h.marker("S3").exists(),
+        "UserPromptSubmit never touches markers"
+    );
+    // Another session's start sweeps it: the sweep is by pid, not by session id.
+    let out = h.hook(
+        "SessionStart",
+        Some(r#"{"session_id":"other","hook_event_name":"SessionStart"}"#),
+    );
+    let v = hook_output(&out).expect("the SessionStart line");
+    assert_eq!(watch_paths(&v), Some(vec![h.inbox_path()]));
     assert!(
         !h.marker("S3").exists(),
-        "stale marker removed by the hook path"
+        "stale marker removed by the SessionStart sweep"
     );
 }
 
@@ -412,11 +437,11 @@ fn follow_rejects_bad_session_ids_and_flag_combinations_with_exit_2() {
     child.wait().unwrap();
 }
 
-// ---------- AC4 ----------
+// ---------- OWL-031 AC1 / AC3: the hook path ----------
 
-/// `additionalContext` of a one-line `--format claude` output, `None` for empty output; the
-/// line must be valid JSON with the event echoed.
-fn context(out: &Output) -> Option<String> {
+/// `hookSpecificOutput` of a one-line `--format claude` output, `None` for empty output; the
+/// line must be valid JSON, exit 0, nothing on stderr.
+fn hook_output(out: &Output) -> Option<Value> {
     assert_eq!(out.status.code(), Some(0), "{:?}", out.status);
     assert_eq!(String::from_utf8_lossy(&out.stderr), "", "stderr");
     let stdout = String::from_utf8(out.stdout.clone()).unwrap();
@@ -424,12 +449,30 @@ fn context(out: &Output) -> Option<String> {
         return None;
     }
     assert_eq!(stdout.lines().count(), 1, "one line: {stdout:?}");
+    assert!(!stdout.contains(ARM_PREFIX), "{stdout}");
     let v: Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|e| panic!("{e}: {stdout}"));
+    let inner = v["hookSpecificOutput"].clone();
+    assert!(inner.is_object(), "{stdout}");
+    Some(inner)
+}
+
+/// `additionalContext` of the line, `None` when the line or the key is absent.
+fn context(out: &Output) -> Option<String> {
+    hook_output(out)?
+        .get("additionalContext")?
+        .as_str()
+        .map(str::to_string)
+}
+
+/// `watchPaths` of a `hookSpecificOutput`, `None` when the key is absent.
+fn watch_paths(v: &Value) -> Option<Vec<String>> {
     Some(
-        v["hookSpecificOutput"]["additionalContext"]
-            .as_str()
-            .unwrap()
-            .to_string(),
+        v.get("watchPaths")?
+            .as_array()
+            .expect("watchPaths is an array")
+            .iter()
+            .map(|p| p.as_str().unwrap().to_string())
+            .collect(),
     )
 }
 
@@ -440,13 +483,15 @@ enum Marker {
     Dead,
 }
 
-/// The full grid: event × marker state × `plugin.json` × stdin, at 0 unseen. The sentence
-/// goes out iff the watch is not off and (with `session_id` on stdin) the event is
-/// `SessionStart` or `UserPromptSubmit` and no live marker exists — or (without stdin) the
-/// event is `SessionStart`. A dead marker is removed by the arming events, a live one stays.
+/// The full grid at 0 unseen: event × marker state × `plugin.json` × stdin. The only output
+/// is the `SessionStart` line with `watchPaths` (the canonical `<home>/spool/inbox`) and no
+/// `additionalContext`, unless the watch is off; `UserPromptSubmit` and `PostToolUse` print
+/// nothing. A dead marker is removed exactly on `SessionStart` (any stdin, watch on or off),
+/// a live one always stays; no cell ever carries the retired arm sentence.
 #[test]
-fn hook_arms_per_event_marker_state_plugin_json_and_stdin() {
+fn hook_emits_watch_paths_and_sweeps_markers_per_event_marker_plugin_json_and_stdin() {
     let h = Home::new();
+    let inbox = h.inbox_path();
     let mut sleeper = Command::new("sleep")
         .arg("60")
         .stdout(Stdio::null())
@@ -460,7 +505,7 @@ fn hook_arms_per_event_marker_state_plugin_json_and_stdin() {
     for event in EVENTS {
         for marker in [Marker::None, Marker::Live, Marker::Dead] {
             for watch in [None, Some(true), Some(false)] {
-                for stdin in [Some(STDIN_S), None] {
+                for stdin in [Some(STDIN_S), Some("not json"), None] {
                     match marker {
                         Marker::None => {
                             let _ = std::fs::remove_file(h.marker("S"));
@@ -480,47 +525,27 @@ fn hook_arms_per_event_marker_state_plugin_json_and_stdin() {
                             std::fs::write(&plugin_json, format!(r#"{{"watch": {b}}}"#)).unwrap()
                         }
                     }
+                    let cell = format!("{event} marker={marker:?} watch={watch:?} stdin={stdin:?}");
                     let out = h.hook(event, stdin);
-                    let ctx = context(&out);
-                    let want = watch != Some(false)
-                        && match stdin {
-                            Some(_) => {
-                                matches!(event, "SessionStart" | "UserPromptSubmit")
-                                    && marker != Marker::Live
-                            }
-                            None => event == "SessionStart",
-                        };
-                    let cell = format!(
-                        "{event} marker={marker:?} watch={watch:?} stdin={}",
-                        stdin.is_some()
-                    );
-                    match (&ctx, want) {
-                        (Some(ctx), true) => {
-                            assert_eq!(
-                                ctx,
-                                if stdin.is_some() { ARM_S } else { ARM_BARE },
-                                "{cell}"
-                            );
-                            assert!(ctx.starts_with(ARM_PREFIX), "{cell}");
-                            assert!(ctx.contains("description \"owlpost inbox\""), "{cell}");
-                            if stdin.is_some() {
-                                assert!(ctx.contains("--session S"), "{cell}");
-                            } else {
-                                assert!(!ctx.contains("--session"), "{cell}");
-                            }
+                    let v = hook_output(&out);
+                    let want = event == "SessionStart" && watch != Some(false);
+                    match (&v, want) {
+                        (Some(v), true) => {
+                            assert_eq!(v["hookEventName"], "SessionStart", "{cell}");
+                            assert_eq!(watch_paths(v), Some(vec![inbox.clone()]), "{cell}");
+                            assert!(v.get("additionalContext").is_none(), "{cell}: {v}");
+                            assert_eq!(v.as_object().unwrap().len(), 2, "{cell}: {v}");
                         }
                         (None, false) => {}
                         other => panic!("{cell}: got {other:?}"),
                     }
-                    // Marker bookkeeping: a live marker always stays; a dead one is removed
-                    // exactly when the arming path looked at it (session id + arming event).
-                    let looked = stdin.is_some()
-                        && matches!(event, "SessionStart" | "UserPromptSubmit")
-                        && watch != Some(false);
+                    // Marker bookkeeping: a live marker always stays; a dead one goes exactly
+                    // on SessionStart, whatever stdin or plugin.json say.
+                    let swept = event == "SessionStart";
                     match marker {
                         Marker::Live => assert!(h.marker("S").exists(), "{cell}: live marker kept"),
                         Marker::Dead => {
-                            assert_eq!(!h.marker("S").exists(), looked, "{cell}: stale marker")
+                            assert_eq!(!h.marker("S").exists(), swept, "{cell}: stale marker")
                         }
                         Marker::None => assert!(!h.marker("S").exists(), "{cell}"),
                     }
@@ -529,59 +554,112 @@ fn hook_arms_per_event_marker_state_plugin_json_and_stdin() {
             }
         }
     }
-    assert_eq!(cells, 3 * 3 * 3 * 2);
+    assert_eq!(cells, 3 * 3 * 3 * 3);
     sleeper.kill().unwrap();
     sleeper.wait().unwrap();
 }
 
-/// With unseen records the counter comes first and the arm sentence follows after one
-/// space; on `SessionStart` the previews and the open sentence close the context. Nothing
-/// is marked seen.
+/// OWL-031 AC3: the sweep covers every marker in `watch/` — dead ones of any session id go,
+/// a live one (a spawned `sleep`) stays — and an absent or unreadable `watch/` does not fail
+/// the hook.
 #[test]
-fn hook_keeps_the_counter_and_previews_around_the_arm_sentence() {
+fn session_start_sweeps_every_dead_marker_and_keeps_live_ones() {
+    let h = Home::new();
+    let mut sleeper = Command::new("sleep").arg("60").spawn().unwrap();
+    let mut reaped = Command::new("true").spawn().unwrap();
+    reaped.wait().unwrap();
+    // Absent watch dir: the line still goes out.
+    assert!(!h.path().join("watch").exists());
+    let v = hook_output(&h.hook("SessionStart", Some(STDIN_S))).unwrap();
+    assert_eq!(watch_paths(&v), Some(vec![h.inbox_path()]));
+    assert!(
+        !h.path().join("watch").exists(),
+        "the sweep creates nothing"
+    );
+    // Three dead markers with unrelated ids, one live, one garbage.
+    std::fs::create_dir_all(h.path().join("watch")).unwrap();
+    for dead in ["S", "abc-123", "other.session"] {
+        std::fs::write(h.marker(dead), format!("{}\n", reaped.id())).unwrap();
+    }
+    std::fs::write(h.marker("garbage"), "not a pid").unwrap();
+    std::fs::write(h.marker("live"), sleeper.id().to_string()).unwrap();
+    // UserPromptSubmit and PostToolUse leave everything alone.
+    for event in ["UserPromptSubmit", "PostToolUse"] {
+        assert_eq!(hook_output(&h.hook(event, Some(STDIN_S))), None);
+        for m in ["S", "abc-123", "other.session", "garbage", "live"] {
+            assert!(h.marker(m).exists(), "{event} must not touch {m}");
+        }
+    }
+    hook_output(&h.hook("SessionStart", Some(STDIN_S))).unwrap();
+    for gone in ["S", "abc-123", "other.session", "garbage"] {
+        assert!(!h.marker(gone).exists(), "{gone} swept");
+    }
+    assert!(h.marker("live").exists(), "live marker kept");
+    assert!(pid_alive(sleeper.id()));
+    // Watch off: the sweep still runs (no line at 0 unseen).
+    std::fs::write(h.marker("S"), reaped.id().to_string()).unwrap();
+    std::fs::write(h.path().join("plugin.json"), r#"{"watch": false}"#).unwrap();
+    assert_eq!(hook_output(&h.hook("SessionStart", Some(STDIN_S))), None);
+    assert!(!h.marker("S").exists());
+    assert!(h.marker("live").exists());
+    std::fs::remove_file(h.path().join("plugin.json")).unwrap();
+    // `watch` is a file, not a directory: unreadable as a dir, the hook still succeeds.
+    sleeper.kill().unwrap();
+    sleeper.wait().unwrap();
+    std::fs::remove_dir_all(h.path().join("watch")).unwrap();
+    std::fs::write(h.path().join("watch"), "x").unwrap();
+    let v = hook_output(&h.hook("SessionStart", Some(STDIN_S))).unwrap();
+    assert_eq!(watch_paths(&v), Some(vec![h.inbox_path()]));
+    assert!(h.path().join("watch").is_file());
+}
+
+/// With unseen records the counter is the whole context (no arm sentence, no space); on
+/// `SessionStart` the previews and the open sentence close it and `watchPaths` rides along.
+/// Nothing is marked seen; the event name is echoed on every line.
+#[test]
+fn hook_keeps_the_counter_and_previews_and_never_asks_to_arm() {
     let h = Home::new();
     h.put("why does session 0 retry?");
     h.put("why does session 1 retry?");
     let counter =
         "🦉 owlpost: 2 new questions (Maciek 2). Say \"show owlpost inbox\" or run `owl inbox`.";
     let previews = "- Maciek question [pending] on src/auth/session.rs: why does session 0 retry?\n- Maciek question [pending] on src/auth/session.rs: why does session 1 retry?\nowlpost: run /owlpost:inbox now.";
-    let ss = context(&h.hook("SessionStart", Some(STDIN_S))).unwrap();
-    assert_eq!(ss, format!("{counter} {ARM_S}\n{previews}"));
-    let ups = context(&h.hook("UserPromptSubmit", Some(STDIN_S))).unwrap();
-    assert_eq!(ups, format!("{counter} {ARM_S}"));
-    let ptu = context(&h.hook("PostToolUse", Some(STDIN_S))).unwrap();
-    assert_eq!(ptu, counter);
-    // Live marker: counter only, previews kept on SessionStart.
-    std::fs::create_dir_all(h.path().join("watch")).unwrap();
-    std::fs::write(h.marker("S"), std::process::id().to_string()).unwrap();
+    let ss = hook_output(&h.hook("SessionStart", Some(STDIN_S))).unwrap();
+    assert_eq!(ss["additionalContext"], format!("{counter}\n{previews}"));
+    assert_eq!(watch_paths(&ss), Some(vec![h.inbox_path()]));
+    let ups = hook_output(&h.hook("UserPromptSubmit", Some(STDIN_S))).unwrap();
+    assert_eq!(ups["additionalContext"], counter);
+    assert_eq!(watch_paths(&ups), None, "{ups}");
+    let ptu = hook_output(&h.hook("PostToolUse", Some(STDIN_S))).unwrap();
+    assert_eq!(ptu["additionalContext"], counter);
+    assert_eq!(watch_paths(&ptu), None, "{ptu}");
+    // Watch off: same context, no watchPaths.
+    std::fs::write(h.path().join("plugin.json"), r#"{"watch": false}"#).unwrap();
+    let off = hook_output(&h.hook("SessionStart", Some(STDIN_S))).unwrap();
+    assert_eq!(off["additionalContext"], format!("{counter}\n{previews}"));
+    assert_eq!(watch_paths(&off), None, "{off}");
+    std::fs::remove_file(h.path().join("plugin.json")).unwrap();
+    // No stdin: identical (stdin is only read on FileChanged).
+    assert_eq!(hook_output(&h.hook("SessionStart", None)), Some(ss));
     assert_eq!(
-        context(&h.hook("SessionStart", Some(STDIN_S))).unwrap(),
-        format!("{counter}\n{previews}")
+        context(&h.hook("UserPromptSubmit", None)).as_deref(),
+        Some(counter)
     );
-    assert_eq!(
-        context(&h.hook("UserPromptSubmit", Some(STDIN_S))).unwrap(),
-        counter
-    );
-    // No stdin: the old rule, with the bare command.
-    assert_eq!(
-        context(&h.hook("SessionStart", None)).unwrap(),
-        format!("{counter} {ARM_BARE}\n{previews}")
-    );
-    assert_eq!(context(&h.hook("UserPromptSubmit", None)).unwrap(), counter);
     assert_eq!(h.unseen(), 2);
-    // The event name is echoed as hookEventName on every line.
     for event in EVENTS {
-        let out = h.hook(event, Some(STDIN_S));
-        let v: Value = serde_json::from_slice(&out.stdout).unwrap();
-        assert_eq!(v["hookSpecificOutput"]["hookEventName"], event);
+        let v = hook_output(&h.hook(event, Some(STDIN_S))).unwrap();
+        assert_eq!(v["hookEventName"], event);
     }
 }
 
-/// Stdin that carries no usable session id — empty, not JSON, no `session_id`, a bad id —
-/// falls back to the old rule (`SessionStart` only, bare command) and touches no marker.
+/// Stdin that carries nothing usable — empty, not JSON, no `session_id`, a bad id — changes
+/// nothing on the context events: `SessionStart` always carries `watchPaths`, the others
+/// print nothing at 0 unseen, no marker dir is created. `--session-start` (the OWL-023
+/// hooks.json) is accepted and ignored.
 #[test]
-fn hook_without_a_usable_session_id_uses_the_session_start_rule() {
+fn hook_context_events_ignore_stdin_and_session_start_flag() {
     let h = Home::new();
+    let inbox = h.inbox_path();
     for stdin in [
         "",
         "not json",
@@ -590,25 +668,23 @@ fn hook_without_a_usable_session_id_uses_the_session_start_rule() {
         r#"{"session_id": ""}"#,
         r#"{"session_id": "a/b"}"#,
         r#"{"sessionId": "S"}"#,
+        r#"{"session_id":"S","event":"add"}"#,
     ] {
+        let v = hook_output(&h.hook("SessionStart", Some(stdin))).unwrap();
+        assert_eq!(watch_paths(&v), Some(vec![inbox.clone()]), "{stdin:?}");
+        assert!(v.get("additionalContext").is_none(), "{stdin:?}");
         assert_eq!(
-            context(&h.hook("SessionStart", Some(stdin))).as_deref(),
-            Some(ARM_BARE),
-            "{stdin:?}"
-        );
-        assert_eq!(
-            context(&h.hook("UserPromptSubmit", Some(stdin))),
+            hook_output(&h.hook("UserPromptSubmit", Some(stdin))),
             None,
             "{stdin:?}"
         );
         assert_eq!(
-            context(&h.hook("PostToolUse", Some(stdin))),
+            hook_output(&h.hook("PostToolUse", Some(stdin))),
             None,
             "{stdin:?}"
         );
     }
     assert!(!h.path().join("watch").exists());
-    // `--session-start` (the OWL-023 hooks.json) is accepted and ignored.
     let out = h
         .owl()
         .args([
@@ -623,19 +699,20 @@ fn hook_without_a_usable_session_id_uses_the_session_start_rule() {
         .stdin(Stdio::null())
         .output()
         .unwrap();
-    assert_eq!(context(&out).as_deref(), Some(ARM_BARE));
+    let v = hook_output(&out).unwrap();
+    assert_eq!(watch_paths(&v), Some(vec![inbox]));
     let out = h
         .owl()
         .args(["inbox", "--count", "--format", "claude", "--session-start"])
         .stdin(Stdio::null())
         .output()
         .unwrap();
-    assert_eq!(context(&out), None);
+    assert_eq!(hook_output(&out), None);
 }
 
-/// Other formats never read stdin for a session id and never carry the sentence.
+/// Other formats never read stdin, never carry `watchPaths` and never carry the sentence.
 #[test]
-fn other_formats_ignore_stdin_and_markers() {
+fn other_formats_ignore_stdin_and_never_carry_watch_paths() {
     let h = Home::new();
     h.put("one?");
     for f in ["plain", "codex", "kimi"] {
@@ -658,7 +735,184 @@ fn other_formats_ignore_stdin_and_markers() {
             assert!(s.contains("1 new question"), "{f} {event}: {s}");
             assert!(!s.contains(ARM_PREFIX), "{f} {event}: {s}");
             assert!(!s.contains("--follow"), "{f} {event}: {s}");
+            assert!(!s.contains("watchPaths"), "{f} {event}: {s}");
         }
+        // Codex at SessionStart, 0 unseen: nothing (no watch path for a harness without the hook).
+        h.mark_all_seen();
+        let out = h
+            .owl()
+            .args([
+                "inbox",
+                "--count",
+                "--format",
+                f,
+                "--hook-event",
+                "SessionStart",
+            ])
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "", "{f}");
+        h.put("one?");
     }
     assert!(!h.path().join("watch").exists());
+}
+
+// ---------- OWL-031 AC2: the wake ----------
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Input {
+    Add,
+    Change,
+    Unlink,
+    NoEvent,
+    Empty,
+    Garbage,
+    Closed,
+}
+
+impl Input {
+    fn stdin(self) -> Option<String> {
+        match self {
+            Input::Add | Input::Change | Input::Unlink => {
+                let event = format!("{self:?}").to_lowercase();
+                Some(format!(
+                    r#"{{"session_id":"S","transcript_path":"/t","cwd":"/c","hook_event_name":"FileChanged","file_path":"/h/spool/inbox/x.json","event":"{event}"}}"#
+                ))
+            }
+            Input::NoEvent => Some(
+                r#"{"session_id":"S","hook_event_name":"FileChanged","file_path":"/h/spool/inbox/x.json"}"#
+                    .to_string(),
+            ),
+            Input::Empty => Some(String::new()),
+            Input::Garbage => Some("not json".to_string()),
+            Input::Closed => None,
+        }
+    }
+}
+
+/// The full grid: input × count × `plugin.json`. Exit 2 with the counter sentence on stderr
+/// (byte-identical to the plain `--format plain` line) and nothing on stdout exactly for
+/// `add` with unseen records and the watch not off; every other cell is exit 0 and silent.
+/// The count never changes.
+#[test]
+fn file_changed_wakes_on_add_with_unseen_records_only() {
+    let h = Home::new();
+    let plugin_json = h.path().join("plugin.json");
+    let mut cells = 0;
+    for count in [0usize, 1, 2] {
+        h.mark_all_seen();
+        for i in 0..count {
+            h.put(&format!("why does session {i} retry?"));
+        }
+        let plain = h
+            .owl()
+            .args(["inbox", "--count", "--format", "plain"])
+            .output()
+            .unwrap();
+        let plain = String::from_utf8(plain.stdout).unwrap();
+        for input in [
+            Input::Add,
+            Input::Change,
+            Input::Unlink,
+            Input::NoEvent,
+            Input::Empty,
+            Input::Garbage,
+            Input::Closed,
+        ] {
+            for watch in [None, Some(true), Some(false)] {
+                match watch {
+                    None => {
+                        let _ = std::fs::remove_file(&plugin_json);
+                    }
+                    Some(b) => {
+                        std::fs::write(&plugin_json, format!(r#"{{"watch": {b}}}"#)).unwrap()
+                    }
+                }
+                let cell = format!("count={count} input={input:?} watch={watch:?}");
+                let stdin = input.stdin();
+                let out = h.hook("FileChanged", stdin.as_deref());
+                let wake = input == Input::Add && count > 0 && watch != Some(false);
+                assert_eq!(String::from_utf8_lossy(&out.stdout), "", "{cell}: stdout");
+                if wake {
+                    assert_eq!(out.status.code(), Some(2), "{cell}: {:?}", out.status);
+                    let err = String::from_utf8(out.stderr.clone()).unwrap();
+                    assert_eq!(err, plain, "{cell}: stderr is the plain sentence");
+                    assert!(err.starts_with("🦉 owlpost: "), "{cell}: {err}");
+                    assert_eq!(err.lines().count(), 1, "{cell}");
+                    assert!(!err.contains("--hook-event"), "{cell}: not clap's exit 2");
+                } else {
+                    assert_eq!(out.status.code(), Some(0), "{cell}: {:?}", out.status);
+                    assert_eq!(String::from_utf8_lossy(&out.stderr), "", "{cell}: stderr");
+                }
+                assert_eq!(h.unseen(), count, "{cell}: nothing marked seen");
+                cells += 1;
+            }
+        }
+    }
+    assert_eq!(cells, 3 * 7 * 3);
+    assert_eq!(
+        COUNTER_ONE,
+        "🦉 owlpost: 1 new question (Maciek 1). Say \"show owlpost inbox\" or run `owl inbox`."
+    );
+    let _ = std::fs::remove_file(&plugin_json);
+    h.mark_all_seen();
+    h.put("one?");
+    let out = h.hook("FileChanged", Input::Add.stdin().as_deref());
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        format!("{COUNTER_ONE}\n")
+    );
+    assert!(
+        !h.path().join("watch").exists(),
+        "the wake writes no marker"
+    );
+}
+
+/// `--hook-event FileChanged` with any format but `claude` is a clap usage error: exit 2,
+/// nothing on stdout, the usage text (not a counter) on stderr, nothing marked seen.
+#[test]
+fn file_changed_requires_the_claude_format() {
+    let h = Home::new();
+    h.put("one?");
+    for f in ["plain", "codex", "kimi"] {
+        let out = output_within(
+            h.owl()
+                .args([
+                    "inbox",
+                    "--count",
+                    "--format",
+                    f,
+                    "--hook-event",
+                    "FileChanged",
+                ])
+                .stdin(Stdio::null()),
+        );
+        assert_eq!(out.status.code(), Some(2), "{f}: {:?}", out.status);
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "", "{f}: stdout");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            err.contains("--hook-event FileChanged requires --format claude"),
+            "{f}: {err}"
+        );
+        assert!(err.contains("Usage:"), "{f}: {err}");
+        assert!(!err.contains("🦉"), "{f}: {err}");
+    }
+    // Without `--format` at all (a plain count, a listing) it is the same usage error: the
+    // event has no meaning outside the Claude hook.
+    for args in [
+        vec!["inbox", "--count", "--hook-event", "FileChanged"],
+        vec!["inbox", "--hook-event", "FileChanged"],
+    ] {
+        let out = output_within(h.owl().args(&args).stdin(Stdio::null()));
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {:?}", out.status);
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "", "{args:?}");
+        assert!(
+            String::from_utf8_lossy(&out.stderr)
+                .contains("--hook-event FileChanged requires --format claude"),
+            "{args:?}"
+        );
+    }
+    assert_eq!(h.unseen(), 1);
 }
