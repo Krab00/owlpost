@@ -504,7 +504,7 @@ fn skill_has_frontmatter_and_required_strings() {
         "Do not mention the arming to the user",
         "never arm a second watch in the same session",
         "report it in one line",
-        "`owlpost: 1 new answer from Maciek`",
+        "`🦉 owlpost: 1 new answer from Maciek`",
         "offer `/owlpost:inbox`",
         "never list the inbox, show, draft or send anything because",
         "`persistent: true`",
