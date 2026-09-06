@@ -11,8 +11,8 @@ Two rules hold for the whole flow:
 - The question text and every draft are printed verbatim in a code block before any picker.
   Never paraphrase, shorten or "improve" them; never offer a choice about a text the human
   has not seen in full.
-- `owl send` runs only on an explicit "Send" pick. `owl allow --always` and `owl deny` run
-  only on their pick. Never send, allow or deny on your own initiative.
+- `owl send` runs only on an explicit "Send" or "Draft & send" pick. `owl allow --always`
+  and `owl deny` run only on their pick. Never send, allow or deny on your own initiative.
 
 ## 1. List
 
@@ -53,10 +53,16 @@ For every record in state `consent`:
 - Several: print the table (id, peer, path, age), `AskUserQuestion` to pick one, then run
   `owl show <id>` for the pick and print the question verbatim.
 
-Then `AskUserQuestion` with **Draft / Reject / Skip**:
+Then `AskUserQuestion` with **Draft / Draft & send / Reject / Skip**:
 
 - **Draft** — run `owl draft <id>` (the configured responder harness against this
   checkout), then continue with the record in step 4.
+- **Draft & send** — run `owl draft <id>`, print the draft verbatim in a code block (as
+  step 4 does), then run `owl send <id>` at once, without a second picker. The pick is the
+  human's explicit approval to send whatever the harness produced; say so in the option
+  description: `sends the draft as-is; pick Draft to read it first`. On a non-zero `owl draft` exit
+  show the error line and stop (nothing is sent); on a non-zero `owl send` exit show the
+  error line, the record stays `drafted`.
 - **Reject** — run `owl reject <id>`; the peer gets no answer.
 - **Skip** — leave it pending and move on.
 
@@ -68,7 +74,7 @@ Then `AskUserQuestion` with **Draft / Reject / Skip**:
    say so in one line before the picker and recommend Edit.
 2. `AskUserQuestion` with **Send / Edit / Reject**:
    - **Send** — run `owl send <id>`: signs the draft and moves it to the outbox. This is the
-     only pick that runs `owl send`.
+     only pick in this picker that runs `owl send`.
    - **Edit** — `owl edit <id>` opens `$EDITOR`, which cannot run inside a session (see
      `commands/edit.md`): tell the human to run `owl edit <id>` in a terminal and say when
      they are done. Then run `owl show <id>` again, print the edited draft verbatim in a code
@@ -78,7 +84,7 @@ Then `AskUserQuestion` with **Draft / Reject / Skip**:
 3. Show the command's output. On a non-zero exit show the error line and stop; the record
    is untouched and the flow can be repeated.
 
-Never chain `owl draft` and `owl send` in one step.
+Never chain `owl draft` and `owl send` unless the human picked "Draft & send" (or passed `--send`); the draft is still printed in full before `owl send` runs.
 
 ## 5. `answer` records (a peer answered a question asked from here)
 

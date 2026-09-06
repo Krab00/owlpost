@@ -870,7 +870,8 @@ fn mentions_command_needs_a_whole_token() {
 /// AC4 literals pinned in `commands/inbox.md`.
 const INBOX_VERBATIM: &str =
     "The question text and every draft are printed verbatim in a code block before any picker";
-const INBOX_SEND_ONLY_ON_PICK: &str = "`owl send` runs only on an explicit \"Send\" pick";
+const INBOX_SEND_ONLY_ON_PICK: &str =
+    "`owl send` runs only on an explicit \"Send\" or \"Draft & send\" pick";
 
 #[test]
 fn inbox_command_walks_states_with_pickers() {
@@ -896,7 +897,7 @@ fn inbox_command_walks_states_with_pickers() {
         "--always",
         "--i-verified-the-fingerprint",
         "out-of-band",
-        "Draft / Reject / Skip",
+        DRAFT_PICKS,
         "Send / Edit / Reject",
         "language",
     ] {
@@ -952,6 +953,180 @@ fn inbox_command_walks_states_with_pickers() {
             "README inbox row lacks {needle:?}: {row}"
         );
     }
+}
+
+// ---------- OWL-028: one-pick "Draft & send" ----------
+
+/// The step-3 picker of `commands/inbox.md`, verbatim.
+const DRAFT_PICKS: &str = "Draft / Draft & send / Reject / Skip";
+/// What the "Draft & send" option description must say.
+const DRAFT_AND_SEND_DESC: &str = "sends the draft as-is; pick Draft to read it first";
+/// The amended ground rule, one line, stated in SKILL.md, inbox.md and draft.md.
+const NEVER_CHAIN: &str = "Never chain `owl draft` and `owl send` unless the human picked \"Draft & send\" (or passed `--send`); the draft is still printed in full before `owl send` runs.";
+/// The two absolute forms the rule replaced.
+const OLD_NEVER_CHAIN: [&str; 2] = [
+    "Never chain draft and send in one step",
+    "Never chain `owl draft` and `owl send` in one step",
+];
+
+#[test]
+fn inbox_offers_draft_and_send_in_one_pick() {
+    let (_, body) = frontmatter("commands/inbox.md");
+    // AC1: the four picks, one per line, and the picker literal itself.
+    let pending = section(
+        &body,
+        "## 3. `pending` records (question with no draft yet)",
+    );
+    assert!(
+        pending.contains(DRAFT_PICKS),
+        "inbox.md step 3 lacks {DRAFT_PICKS:?}"
+    );
+    for pick in [
+        "- **Draft** —",
+        "- **Draft & send** —",
+        "- **Reject** —",
+        "- **Skip** —",
+    ] {
+        assert!(
+            pending.lines().any(|l| l.starts_with(pick)),
+            "inbox.md step 3 lacks the pick line {pick:?}"
+        );
+    }
+    let option = pending
+        .lines()
+        .skip_while(|l| !l.starts_with("- **Draft & send** —"))
+        .take_while(|l| !l.starts_with("- **Reject** —"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    for needle in [
+        DRAFT_AND_SEND_DESC,
+        "run `owl draft <id>`",
+        "print the draft verbatim in a code block",
+        "then run `owl send <id>` at once, without a second picker",
+        "non-zero `owl draft` exit",
+        "nothing is sent",
+        "non-zero `owl send` exit",
+        "the record stays `drafted`",
+    ] {
+        assert!(
+            option.contains(needle),
+            "Draft & send option lacks {needle:?}: {option}"
+        );
+    }
+    // Step 4's Send option is no longer the only pick that runs `owl send`.
+    let drafted = section(&body, "## 4. `drafted` records (draft stored, not sent)");
+    let send_option = drafted
+        .lines()
+        .skip_while(|l| !l.contains("- **Send** —"))
+        .take_while(|l| !l.contains("- **Edit** —"))
+        .map(str::trim)
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        send_option.contains("This is the only pick in this picker that runs `owl send`."),
+        "inbox.md step 4 Send option lacks the picker-scoped sentence: {send_option}"
+    );
+    assert!(
+        !body.contains("This is the only pick that runs `owl send`."),
+        "inbox.md still has the unscoped only-pick sentence"
+    );
+    // The order of the draft-and-send steps: draft, print, send.
+    let at = |needle: &str| {
+        option
+            .find(needle)
+            .unwrap_or_else(|| panic!("no {needle:?}"))
+    };
+    assert!(at("run `owl draft <id>`") < at("print the draft verbatim"));
+    assert!(at("print the draft verbatim") < at("then run `owl send <id>`"));
+}
+
+#[test]
+fn draft_command_accepts_send_flag() {
+    let (fm, body) = frontmatter("commands/draft.md");
+    // AC2: `--send` documented, stripped before `owl draft`, draft printed before `owl send`.
+    for needle in [
+        "`/owlpost:draft <id> --send`",
+        "`--send` is stripped from the",
+        "arguments before `owl draft` runs (owl has no such flag)",
+        "then `owl send <id>` runs at once",
+        "non-zero `owl draft` exit",
+        "nothing is sent",
+        "non-zero `owl send` exit",
+        "stays `drafted`",
+    ] {
+        assert!(body.contains(needle), "draft.md lacks {needle:?}");
+    }
+    assert!(
+        fm_value(&fm, "argument-hint").is_some_and(|h| h.contains("[--send]")),
+        "draft.md argument-hint lacks [--send]"
+    );
+    let tools = fm_value(&fm, "allowed-tools").expect("draft.md allowed-tools");
+    let mut have: Vec<&str> = tools.split(',').map(str::trim).collect();
+    have.sort_unstable();
+    assert_eq!(
+        have,
+        ["Bash(owl draft:*)", "Bash(owl send:*)"],
+        "draft.md allowed-tools"
+    );
+}
+
+#[test]
+fn never_chain_rule_is_amended_everywhere() {
+    // AC3: the rule is stated three times, so it is pinned three times, one line each;
+    // the old absolute forms are gone from every file that had them.
+    for rel in [
+        "skills/owlpost/SKILL.md",
+        "commands/inbox.md",
+        "commands/draft.md",
+    ] {
+        let (_, body) = frontmatter(rel);
+        assert!(
+            body.lines().any(|l| l == NEVER_CHAIN),
+            "{rel}: lacks the amended never-chain line"
+        );
+        for old in OLD_NEVER_CHAIN {
+            assert!(!body.contains(old), "{rel}: still has the old rule {old:?}");
+        }
+    }
+    // The skill keeps its second sentence, and step 6 names the one-pick path.
+    let (_, skill) = frontmatter("skills/owlpost/SKILL.md");
+    let answer_loop = section(&skill, "## The answer loop");
+    assert!(
+        answer_loop.contains("Never send a draft the human has not seen in full."),
+        "SKILL.md answer loop lacks the never-send-unseen sentence"
+    );
+    let step6 = answer_loop
+        .lines()
+        .skip_while(|l| !l.starts_with("6. "))
+        .take_while(|l| l.starts_with("6. ") || l.starts_with("   "))
+        .collect::<Vec<_>>()
+        .join(" ");
+    for needle in [
+        "\"Draft & send\" pick",
+        "`/owlpost:draft <id> --send`",
+        "the draft is still printed in full before `owl send` runs",
+    ] {
+        assert!(
+            step6.contains(needle),
+            "SKILL.md step 6 lacks {needle:?}: {step6}"
+        );
+    }
+    // The design doc never stated the rule, so nothing is pinned there; guard that.
+    let design = design_doc();
+    for old in OLD_NEVER_CHAIN {
+        assert!(!design.contains(old), "design doc has the old rule {old:?}");
+    }
+    // The plugin README rows name the new pick and the flag.
+    let readme = read("README.md");
+    let row = |file: &str| {
+        readme
+            .lines()
+            .find(|l| l.contains(file))
+            .unwrap_or_else(|| panic!("README.md lacks the {file} row"))
+            .to_string()
+    };
+    assert!(row("`commands/inbox.md`").contains("draft / draft & send / reject / skip picker"));
+    assert!(row("`commands/draft.md`").contains("`--send` then runs `owl send` at once"));
 }
 
 // ---------- OWL-024: contacts as MCP resources ----------
