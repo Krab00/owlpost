@@ -376,3 +376,118 @@ fn update_with_a_failed_replacement_runs_no_unit_or_plugin_step() {
         "{calls:?}"
     );
 }
+
+/// `child` finished within 60 s, or it is killed and the test fails naming `what`.
+fn wait_bounded(mut child: std::process::Child, what: &str) -> Output {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        if child.try_wait().unwrap().is_some() {
+            return child.wait_with_output().unwrap();
+        }
+        if std::time::Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("{what} did not exit within 60 s");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+/// OWL-030 AC1 + AC3, end to end and without `OWLPOST_UPDATE_ACTIVE`: a copy of the test
+/// `owl` at `<tmp>/bin/owl` runs `update --source` and so rename-replaces its own file. The
+/// fake `cargo` "builds" the same binary with a trailing marker (still a valid ELF, but not
+/// the bytes already there). The unit under the temp `HOME` must name exactly
+/// `<tmp>/bin/owl` — not `<tmp>/bin/owl (deleted)`, which is what `/proc/self/exe` reads
+/// after the rename — and `<tmp>/bin/owl doctor` afterwards reports `ok binary`.
+#[cfg(target_os = "linux")]
+#[test]
+fn update_of_the_running_binary_writes_the_unit_from_the_captured_path() {
+    let (_dir, home, user_home, bin, log) = update_layout(0);
+    // Canonical, so the unit's `ExecStart` (from the canonicalised `current_exe`) compares
+    // exactly.
+    let bin = std::fs::canonicalize(&bin).unwrap();
+    let real = env!("CARGO_BIN_EXE_owl");
+    let active = bin.join("owl");
+    std::fs::copy(real, &active).unwrap();
+    std::fs::set_permissions(&active, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(
+        bin.join("cargo"),
+        format!(
+            "#!/bin/sh\necho \"cargo $*\" >> '{}'\n\
+             root=''; while [ $# -gt 0 ]; do [ \"$1\" = --root ] && root=\"$2\"; shift; done\n\
+             /bin/mkdir -p \"$root/bin\" && /bin/cat '{real}' > \"$root/bin/owl\" \
+             && printf 'owl-030 built\\n' >> \"$root/bin/owl\" && /bin/chmod 755 \"$root/bin/owl\"\n",
+            log.display()
+        ),
+    )
+    .unwrap();
+    let mut built = std::fs::read(real).unwrap();
+    built.extend_from_slice(b"owl-030 built\n");
+    let cmd = |args: &[&str]| {
+        let mut c = Command::new(&active);
+        c.env_remove("OWLPOST_HOME")
+            .env_remove("OWLPOST_UPDATE_ACTIVE")
+            .env("HOME", &user_home)
+            .env("OWLPOST_INSTALL_NO_LOAD", "1")
+            .env("PATH", &bin)
+            .arg("--home")
+            .arg(&home)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        c
+    };
+    // A concurrent fork in another test thread can hold the copy's write fd for an instant.
+    let child = loop {
+        match cmd(&UPDATE).spawn() {
+            Ok(c) => break c,
+            Err(e) if e.raw_os_error() == Some(26) => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(e) => panic!("spawning {}: {e}", active.display()),
+        }
+    };
+    let out = wait_bounded(child, "owl update");
+    let (stdout, stderr) = text(&out);
+    assert!(out.status.success(), "stdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(
+        stdout.contains(&format!("installed {}\n", active.display())),
+        "{stdout}"
+    );
+    assert_eq!(
+        std::fs::read(&active).unwrap(),
+        built,
+        "active holds the built bytes"
+    );
+    assert!(!active.with_extension("new").exists(), ".new left behind");
+    // AC1: the unit names exactly the path captured before the replacement.
+    let unit = user_home.join(".config/systemd/user/owlpost.service");
+    let unit_text = std::fs::read_to_string(&unit).unwrap();
+    let exec = unit_text
+        .lines()
+        .find(|l| l.starts_with("ExecStart="))
+        .unwrap_or_else(|| panic!("no ExecStart in:\n{unit_text}"));
+    assert_eq!(
+        exec,
+        format!(
+            "ExecStart=\"{}\" daemon --home \"{}\"",
+            active.display(),
+            home.display()
+        ),
+        "unit:\n{unit_text}"
+    );
+    assert!(!unit_text.contains("(deleted)"), "unit:\n{unit_text}");
+    assert!(!stdout.contains("(deleted)"), "{stdout}");
+    // AC3: the replaced binary, run from its new file, reports itself as the one on PATH
+    // and in the unit.
+    let out = wait_bounded(cmd(&["doctor"]).spawn().unwrap(), "owl doctor");
+    let (stdout, stderr) = text(&out);
+    let binary: Vec<&str> = stdout.lines().filter(|l| l.contains(" binary: ")).collect();
+    assert_eq!(
+        binary,
+        [format!("ok   binary: {}", active.display()).as_str()],
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(!stdout.contains("(deleted)"), "{stdout}");
+}
