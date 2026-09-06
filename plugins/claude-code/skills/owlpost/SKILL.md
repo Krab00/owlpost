@@ -163,10 +163,15 @@ the left column is the local time (`HH:MM`) and the peer's name, the right colum
 message text verbatim (no paraphrase; escape `|` inside a cell). Show only messages from
 the last 24 hours, at most the 10 newest; say in one line how many older ones were left
 out, and show them only when the human asks for them. Questions and drafts that wait for a
-decision are still printed in full, in a code block (see the answer loop).
+decision are still printed in full, in a code block (see the answer loop). Markdown tables
+have no row background, so each peer gets one fixed colour marker at the start of the left
+cell instead, in order of first appearance in the session: 🟦 🟩 🟨 🟪 🟧 🟥 (then repeat);
+the same peer keeps the same marker for the whole session.
 
-| 00:21 · Krzysztof Abramczyk | Pewnie koło 22. |
+| 🟦 00:16 · Krzysztof Abramczyk | Wszystko ok, ale późno już. |
 |---|---|
+| 🟦 00:21 · Krzysztof Abramczyk | Pewnie koło 22. |
+| 🟩 00:24 · Ana Kowalska | Retry lives in `auth/session.rs`. |
 
 ## Memory rule
 

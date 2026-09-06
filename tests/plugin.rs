@@ -423,6 +423,9 @@ fn skill_has_frontmatter_and_required_strings() {
         "message text verbatim",
         "last 24 hours, at most the 10 newest",
         "how many older ones were left",
+        "one fixed colour marker at the start of the left",
+        "🟦 🟩 🟨 🟪 🟧 🟥",
+        "the same peer keeps the same marker for the whole session",
     ] {
         assert!(
             showing.contains(needle),
