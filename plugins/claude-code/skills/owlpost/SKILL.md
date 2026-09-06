@@ -13,14 +13,16 @@ it. The `owl` CLI is the only interface; never edit files under `$OWLPOST_HOME` 
 
 Sending anything to a peer requires explicit human approval. Never run `owl send` or
 `owl ask` on your own initiative; describe what would go out, wait for a clear yes, then
-run the command.
+run the command. An `/owlpost:ask` the user typed, a mentioned `@owl:to://` contact, or the
+user asking in their own words ("ask Maciek why this retries") is that approval: run it
+without a confirmation step.
 
 ## Slash commands
 
-Every `owl` subcommand except `daemon` has a `/owlpost:<name>` command that runs it with
-the arguments and offers the next step; prefer them over typing `owl` when the user is in
-a session. `/owlpost:me` is `owl contact export`, `/owlpost:contacts` is the arrow-key
-picker over `owl contact list`.
+Every `owl` subcommand except `daemon` and `mcp` has a `/owlpost:<name>` command that runs
+it with the arguments and offers the next step; prefer them over typing `owl` when the user
+is in a session. `/owlpost:me` is `owl contact export`, `/owlpost:contacts` is the table
+over `owl contact list` ending with the `@owl:to://` mention hint.
 
 - Setup: `/owlpost:setup` (init + daemon + plugin in one go), `/owlpost:init`, `/owlpost:whoami`, `/owlpost:me`, `/owlpost:card`,
   `/owlpost:install`, `/owlpost:uninstall`, `/owlpost:doctor`, `/owlpost:update`
@@ -31,8 +33,8 @@ picker over `owl contact list`.
   `/owlpost:send`, `/owlpost:reject`
 
 `/owlpost:send`, `/owlpost:allow`, `/owlpost:deny`, `/owlpost:reject` and
-`/owlpost:uninstall` ask for one explicit confirmation before running, as `/owlpost:ask`
-does.
+`/owlpost:uninstall` ask for one explicit confirmation before running.
+`/owlpost:ask` does not: the command itself is the approval.
 
 ## When to ask a peer
 
@@ -44,10 +46,27 @@ Suggest `owl ask` when:
 - the user asks "who should I ask about `<path>`".
 
 When the user wants to ask a peer but does not name one (or is unsure of the spelling),
-start with `/owlpost:contacts`: it lists the contact book as arrow-key options, and the pick
-continues into the `/owlpost:ask` flow or just shows the contact's card.
+point them at `/owlpost:contacts`: it prints the book as a table and the hint to mention a
+contact through the `owl` MCP resources (see "Mentioned contact" below).
 
 Do not ask a peer for anything answerable from the checkout. Prefer reading the code first.
+
+## Mentioned contact
+
+`owl mcp` (registered in Claude Code at user scope by `owl setup` / `owl update`) serves
+every contact as a resource `to://<name-slug>.<email>` of the `owl` server; Claude Code
+lists them in the `@` typeahead and attaches the picked one to the prompt. To mention one,
+type @owl: and the start of the name (or e-mail), pick with the arrows, then type the
+question. An attached `@owl:to://…` resource in the user's prompt is the peer: its content
+is `{"name","fingerprint","emails"}`.
+
+- The rest of the prompt is `[path] <question>` (a path when a word contains `/` or a file
+  extension and is not a question word; otherwise the whole text is the question).
+- Run `owl ask --peer <fingerprint> "<question>"` at once, with `--file <path>` when a path
+  is given: the mention is the approval, do not confirm first.
+- Report who it went to (name and fingerprint), the path or "whole repository", and the
+  result, as `/owlpost:ask` does.
+- Several mentions send the same question to each contact, one `owl ask` per mention.
 
 ## How to run `owl ask`
 
@@ -60,8 +79,10 @@ owl ask <peer> "<question>"                  # no path: a question about the rep
 
 1. Prefer `--file <path>`. It proposes peers from `git blame` of that file and uses the
    file as the question's path. Add `--peer` only when the user already named the peer.
-2. Always show the human the chosen peer (name and fingerprint), the path and the exact
-   question text before sending, and ask for approval. Only then run the command.
+2. When the user asked for it (an `/owlpost:ask`, an `@owl:to://` mention, or "ask X …" in
+   their own words), run the command at once and report the peer (name and fingerprint),
+   the path and the question with the result. Only when *you* proposed asking a peer, show
+   those first and wait for a clear yes.
 3. Read the result. `accepted` means the question was delivered; add `--wait <secs>` when
    the user wants to block for the answer. Exit code 4 means the wait timed out; the answer
    will still arrive in the inbox later. Do not retry a rejected or denied question.
@@ -134,6 +155,23 @@ Every step needs the human's go-ahead before moving to the next one.
 
 Never chain `owl draft` and `owl send` in one step. Never send a draft the human has not
 seen in full.
+
+## Showing messages
+
+Received messages (answers from peers, history rows) are shown as one table, newest last:
+the left column is the local time (`HH:MM`) and the peer's name, the right column the
+message text verbatim (no paraphrase; escape `|` inside a cell). Show only messages from
+the last 24 hours, at most the 10 newest; say in one line how many older ones were left
+out, and show them only when the human asks for them. Questions and drafts that wait for a
+decision are still printed in full, in a code block (see the answer loop). Markdown tables
+have no row background, so each peer gets one fixed colour marker at the start of the left
+cell instead, in order of first appearance in the session: 🟦 🟩 🟨 🟪 🟧 🟥 (then repeat);
+the same peer keeps the same marker for the whole session.
+
+| 🟦 00:16 · Krzysztof Abramczyk | Wszystko ok, ale późno już. |
+|---|---|
+| 🟦 00:21 · Krzysztof Abramczyk | Pewnie koło 22. |
+| 🟩 00:24 · Ana Kowalska | Retry lives in `auth/session.rs`. |
 
 ## Memory rule
 

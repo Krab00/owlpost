@@ -6,14 +6,15 @@ The Claude Code harness adapter for owlpost (`docs/concept.md` "Harness adapters
 | Piece | Path | What it does |
 |---|---|---|
 | Hooks | `hooks/hooks.json`, `hooks/owl-count.sh` | On `SessionStart`, `UserPromptSubmit` and `PostToolUse` runs `owl inbox --count --format claude` (5 s timeout) and injects the unseen-question counter line. Silent no-op when `owl` is missing or fails. |
-| Skill | `skills/owlpost/SKILL.md` | When to ask a peer, how to run `owl ask`, how to react to the counter, the answer loop, the memory rule. |
+| Skill | `skills/owlpost/SKILL.md` | When to ask a peer, how to run `owl ask`, the mentioned contact, how to react to the counter, the answer loop, the memory rule. |
+| MCP server | `owl mcp`, registered at user scope by `owl setup` / `owl update` | Serves every contact as an `@owl:to://…` resource in the `@` typeahead (stdio); see "Mention a contact" below. |
 | Commands | `commands/<name>.md`, one per `owl` subcommand (all except `daemon`) | `/owlpost:<name>` runs `owl <name>` with the arguments and offers the next step; see the table below. |
 | Manifests | `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json` | Plugin metadata; a one-plugin marketplace so the directory can be added from a local path. |
 
 ## Commands
 
 Every `owl` subcommand except `daemon` (a service: `install`, `uninstall` and `doctor`
-cover it) is one `commands/<name>.md`. Each is a thin wrapper: run the command with the
+cover it) and `mcp` (started by Claude Code, not by hand) is one `commands/<name>.md`. Each is a thin wrapper: run the command with the
 arguments, show the output, offer the natural next step. `send`, `allow`, `deny`, `reject`
 and `uninstall` ask for one explicit confirmation with `AskUserQuestion` before running.
 `allowed-tools` in each file is limited to its own `owl <sub>:*` pattern (plus the `owl`
@@ -25,12 +26,12 @@ patterns of the next steps a file runs itself); `tests/plugin.rs` pins the rule.
 | `/owlpost:whoami` | `commands/whoami.md` | `owl whoami` — identity summary |
 | `/owlpost:me` | `commands/me.md` | `owl contact export` — own peer file to hand to a colleague |
 | `/owlpost:card [peer]` | `commands/card.md` | `owl card` — own card, or fetch a peer's |
-| `/owlpost:contacts` | `commands/contacts.md` | `owl contact list --json` — pick a peer with the arrow keys, then ask or show the card |
+| `/owlpost:contacts` | `commands/contacts.md` | `owl contact list --json` — the book as one table, then the hint to mention a contact with `@owl:to://…` |
 | `/owlpost:contact <show\|export\|remove> ...` | `commands/contact.md` | `owl contact show|export|remove` |
 | `/owlpost:add <peer json\|file> [--local]` | `commands/add.md` | `owl add` — add a peer file |
 | `/owlpost:allow <peer> [--once\|--always]` | `commands/allow.md` | `owl allow` — release held questions, set policy (confirms first) |
 | `/owlpost:deny <peer>` | `commands/deny.md` | `owl deny` — policy never (confirms first) |
-| `/owlpost:ask <peer> [path] <question>` | `commands/ask.md` | `owl ask` — send a question (confirms first) |
+| `/owlpost:ask <peer> [path] <question>` | `commands/ask.md` | `owl ask` — send a question at once; the command is the approval, no confirmation step |
 | `/owlpost:inbox` | `commands/inbox.md` | `owl inbox --json` — walk the records: question verbatim, consent picker (allow once/always, deny), draft, verbatim draft, send/edit/reject picker |
 | `/owlpost:show <id>` | `commands/show.md` | `owl show` — full record, offer draft/send/reject |
 | `/owlpost:draft <id> [--harness <name>]` | `commands/draft.md` | `owl draft` — run the responder, show the draft |
@@ -45,6 +46,24 @@ patterns of the next steps a file runs itself); `tests/plugin.rs` pins the rule.
 | `/owlpost:doctor` | `commands/doctor.md` | `owl doctor` — check the setup, offer the fix per failure |
 | `/owlpost:update [--source <dir>]` | `commands/update.md` | `owl update` — binary, daemon, plugin |
 
+## Mention a contact
+
+Type `@owl:` and the start of the contact's name (or e-mail, or domain) in the prompt, for
+example `@owl:krz`: the `owl` MCP server lists every contact of the merged book as a
+resource `to://<name-slug>.<email>`, so the typeahead ranks `owl:to://krzysztof-…` near the
+top; `@owl:` alone lists the whole book. Pick with the arrows and type the question, for
+example `@owl:to://ana-kowalska.ana@acme.pl src/auth/session.rs why does this retry?`; the
+skill runs `owl ask --peer <fingerprint>` at once, the mention is the approval. (`@krz`
+without the `owl:` prefix never beats files and connectors: that ranking is Claude Code's.)
+
+The server is registered in Claude Code at user scope by `owl setup` and `owl update`
+(idempotent: `mcp server owl already registered` when it is there), or by hand with
+`claude mcp add --scope user owl -- owl mcp`. It runs `owl mcp` over stdio, so it needs
+`owl` on `PATH` like the hooks; it is resources-only and adds no tools to the model
+context. `owl doctor` reports it as the `mcp` check (`warn` with the `claude mcp add` line
+when it is missing). The plugin bundles no server of its own: one bundled through a plugin
+is named `plugin:owlpost:owl`, and that prefix sinks the contacts in the typeahead ranking.
+
 ## Requirements
 
 - `owl` on `PATH` (`cargo install --path .` from the repo root, or the release binary).
@@ -58,7 +77,8 @@ patterns of the next steps a file runs itself); `tests/plugin.rs` pins the rule.
 
 ## Install
 
-In one go (also creates the identity and installs the daemon): `owl setup`, or
+In one go (also creates the identity, installs the daemon and registers the `owl` MCP
+server): `owl setup`, or
 `owl setup --plugin-source /absolute/path/to/owlpost/plugins/claude-code` from a checkout.
 
 By hand from a local checkout:
