@@ -25,15 +25,15 @@ const FAKE_HARNESS: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/fixtures/fake-harness.sh"
 );
-const CLAUDE_TWO: &str = r#"{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"owlpost: 2 new questions (Maciek 2). Say \"show owlpost inbox\" or run `owl inbox`."}}"#;
+const CLAUDE_TWO: &str = r#"{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"🦉 owlpost: 2 new questions (Maciek 2). Say \"show owlpost inbox\" or run `owl inbox`."}}"#;
 const SENTENCE_TWO: &str =
-    "owlpost: 2 new questions (Maciek 2). Say \"show owlpost inbox\" or run `owl inbox`.";
+    "🦉 owlpost: 2 new questions (Maciek 2). Say \"show owlpost inbox\" or run `owl inbox`.";
 const FORMATS: [&str; 4] = ["plain", "claude", "codex", "kimi"];
 /// OWL-023 AC1 literals: the arm sentence alone (0 unseen) and after the counter (2 unseen).
 const ARM: &str = "owlpost: arm the inbox watch (see /owlpost:watch)";
 const CLAUDE_ARM_ZERO: &str = r#"{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"owlpost: arm the inbox watch (see /owlpost:watch)"}}"#;
 const PREVIEW_TWO: &str = "- Maciek question [pending] on src/auth/session.rs: Why is the refresh token rotated?\n- Maciek question [consent] on src/auth/session.rs: Where is the retry policy?\nowlpost: run /owlpost:inbox now.";
-const CLAUDE_ARM_TWO: &str = r#"{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"owlpost: 2 new questions (Maciek 2). Say \"show owlpost inbox\" or run `owl inbox`. owlpost: arm the inbox watch (see /owlpost:watch)\n- Maciek question [pending] on src/auth/session.rs: Why is the refresh token rotated?\n- Maciek question [consent] on src/auth/session.rs: Where is the retry policy?\nowlpost: run /owlpost:inbox now."}}"#;
+const CLAUDE_ARM_TWO: &str = r#"{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"🦉 owlpost: 2 new questions (Maciek 2). Say \"show owlpost inbox\" or run `owl inbox`. owlpost: arm the inbox watch (see /owlpost:watch)\n- Maciek question [pending] on src/auth/session.rs: Why is the refresh token rotated?\n- Maciek question [consent] on src/auth/session.rs: Where is the retry policy?\nowlpost: run /owlpost:inbox now."}}"#;
 
 struct Home {
     dir: TempDir,
@@ -248,7 +248,7 @@ fn count_and_formats() {
         hook["additionalContext"]
             .as_str()
             .unwrap()
-            .starts_with("owlpost: 2 new questions"),
+            .starts_with("🦉 owlpost: 2 new questions"),
         "{hook}"
     );
     assert_eq!(h.ok(&["inbox", "--count", "--format", "codex"]), claude);
@@ -403,7 +403,7 @@ fn hook_line_singular_and_per_peer_counts() {
     for f in FORMATS {
         let out = h.ok(&["inbox", "--count", "--format", f]);
         let expected =
-            "owlpost: 1 new question (Maciek 1). Say \"show owlpost inbox\" or run `owl inbox`.";
+            "🦉 owlpost: 1 new question (Maciek 1). Say \"show owlpost inbox\" or run `owl inbox`.";
         match f {
             "claude" | "codex" => assert_eq!(
                 out,
@@ -421,14 +421,14 @@ fn hook_line_singular_and_per_peer_counts() {
     h.put(&h.ana, "three?", "pending");
     assert_eq!(
         h.ok(&["inbox", "--count", "--format", "plain"]),
-        "owlpost: 3 new questions (Ana 2, Maciek 1). Say \"show owlpost inbox\" or run `owl inbox`.\n"
+        "🦉 owlpost: 3 new questions (Ana 2, Maciek 1). Say \"show owlpost inbox\" or run `owl inbox`.\n"
     );
     let stranger = id(9);
     h.put(&stranger, "four?", "consent");
     assert_eq!(
         h.ok(&["inbox", "--count", "--format", "kimi"]),
         format!(
-            "owlpost: 4 new questions (Ana 2, Maciek 1, {} 1). Say \"show owlpost inbox\" or run `owl inbox`.\n",
+            "🦉 owlpost: 4 new questions (Ana 2, Maciek 1, {} 1). Say \"show owlpost inbox\" or run `owl inbox`.\n",
             fp(&stranger)
         )
     );
@@ -1705,7 +1705,7 @@ fn count_json_separates_questions_from_answers() {
     // The hook line names both kinds.
     assert_eq!(
         h.ok(&["inbox", "--count", "--format", "plain"]),
-        "owlpost: 1 new question, 1 new answer (Maciek 2). Say \"show owlpost inbox\" or run `owl inbox`.\n"
+        "🦉 owlpost: 1 new question, 1 new answer (Maciek 2). Say \"show owlpost inbox\" or run `owl inbox`.\n"
     );
 }
 

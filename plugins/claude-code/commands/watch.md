@@ -49,8 +49,8 @@ prev=""; while true; do cur=$(owl inbox --count --format plain 2>/dev/null || tr
 - The watch only counts. It never runs `owl inbox` without `--count` (listing marks records
   seen), and it never runs owl show, owl draft or owl send. Nothing is opened, drafted or sent
   because of a watch event.
-- When an event lands, say one line built from the counter ("owlpost: 1 new answer from
-  Maciek") and offer `/owlpost:inbox`; then wait for the human.
+- When an event lands, say one line built from the counter, for example
+  `🦉 owlpost: 1 new answer from Maciek`, and offer `/owlpost:inbox`; then wait for the human.
 - Arm at most one watch per session. The `SessionStart` hook asks for it once through the
   injected sentence; `/owlpost:watch on` is the manual way to do the same.
 - Blocking on a single record (`owl watch [--id <id>] [--timeout <secs>]`, exit 4 on

@@ -28,8 +28,9 @@ stop.
 
 For every record in state `consent`:
 
-1. Run `owl show <id>` and print the question verbatim in a code block, headed by the peer
-   name, the fingerprint, the project and the path (or "whole repository").
+1. Run `owl show <id>` and print the framed message block (see the skill, "Framed message"):
+   the question verbatim, headed by the peer name, the fingerprint, the project and the path
+   (or "whole repository").
 2. `AskUserQuestion` with four options:
    - **Allow once** — `owl allow <fingerprint> --once`: releases this peer's held questions
      without setting a policy; the next question is held again.
@@ -48,10 +49,11 @@ For every record in state `consent`:
 
 ## 3. `pending` records (question with no draft yet)
 
-- One `pending` record: run `owl show <id>` and print the question at once, verbatim in a
-  code block with peer name, project and path.
+- One `pending` record: run `owl show <id>` and, at once,
+  print the framed message block (see the skill, "Framed message"): the question verbatim,
+  with peer name, project and path.
 - Several: print the table (id, peer, path, age), `AskUserQuestion` to pick one, then run
-  `owl show <id>` for the pick and print the question verbatim.
+  `owl show <id>` for the pick and print the framed message block.
 
 Then `AskUserQuestion` with **Draft / Draft & send / Reject / Skip**:
 
@@ -91,6 +93,8 @@ Never chain `owl draft` and `owl send` unless the human picked "Draft & send" (o
 Run `owl show <id>` for each answer and show them all in one table (see the owlpost skill,
 "Showing messages"): left column the local time and the peer name, right column the answer
 verbatim, newest last, only the last 24 hours and at most the 10 newest; name the question
-each one replies to above the table or in the left cell. Then apply the memory rule from the
+each one replies to above the table or in the left cell. The table keeps the per-peer
+colour markers and is not framed; for a single answer shown on its own,
+print the framed message block (see the skill, "Framed message"). Then apply the memory rule from the
 owlpost skill: only when the human accepts an answer, save it as a `reference` fact with
 provenance `owlpost:<peer>:<question id>` and today's date.
