@@ -52,6 +52,16 @@ fn run(args: &[&str], get_exit: i32) -> (String, Vec<String>) {
         "{args:?}: exit {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
         out.status
     );
+    if !args.contains(&"--dry-run") {
+        // OWL-030: the unit runs the path the caller passed — `owl setup` the canonical test
+        // binary, `owl update` the active file it replaced (not the test binary running it).
+        let program = if args[0] == "setup" {
+            std::fs::canonicalize(env!("CARGO_BIN_EXE_owl")).unwrap()
+        } else {
+            active.clone()
+        };
+        assert_unit_runs(&user_home, &program, &home);
+    }
     if args[0] == "update" && !args.contains(&"--dry-run") {
         // OWL-029 AC1: the active file now holds the fake build, and the line says so.
         assert_eq!(std::fs::read_to_string(&active).unwrap(), "fake owl\n");
@@ -250,6 +260,26 @@ fn update_layout(
     (dir, home, user_home, bin, log)
 }
 
+/// The systemd unit under `user_home` has exactly `ExecStart="<program>" daemon --home "<home>"`.
+fn assert_unit_runs(user_home: &Path, program: &Path, home: &Path) {
+    let unit = user_home.join(".config/systemd/user/owlpost.service");
+    let unit_text = std::fs::read_to_string(&unit).unwrap();
+    let exec = unit_text
+        .lines()
+        .find(|l| l.starts_with("ExecStart="))
+        .unwrap_or_else(|| panic!("no ExecStart in:\n{unit_text}"));
+    assert_eq!(
+        exec,
+        format!(
+            "ExecStart=\"{}\" daemon --home \"{}\"",
+            program.display(),
+            home.display()
+        ),
+        "unit:\n{unit_text}"
+    );
+    assert!(!unit_text.contains("(deleted)"), "unit:\n{unit_text}");
+}
+
 /// No daemon unit was written under `user_home` (neither the systemd nor the launchd path).
 fn assert_no_unit(user_home: &Path) {
     assert!(!user_home.join(".config").exists(), "systemd unit written");
@@ -292,6 +322,8 @@ fn update_replaces_a_running_active_binary_end_to_end() {
     let mode = std::fs::metadata(&active).unwrap().permissions().mode();
     assert_eq!(mode & 0o777, 0o755, "mode {mode:o}");
     assert!(!active.with_extension("new").exists(), ".new left behind");
+    // OWL-030: the unit names the replaced file, not the test binary that ran the update.
+    assert_unit_runs(&user_home, &active, &home);
     let installed = format!("installed {}\n", active.display());
     assert!(stdout.contains(&installed), "{stdout}");
     // The replacement is printed before the unit reinstall and the plugin steps.
@@ -462,22 +494,7 @@ fn update_of_the_running_binary_writes_the_unit_from_the_captured_path() {
     );
     assert!(!active.with_extension("new").exists(), ".new left behind");
     // AC1: the unit names exactly the path captured before the replacement.
-    let unit = user_home.join(".config/systemd/user/owlpost.service");
-    let unit_text = std::fs::read_to_string(&unit).unwrap();
-    let exec = unit_text
-        .lines()
-        .find(|l| l.starts_with("ExecStart="))
-        .unwrap_or_else(|| panic!("no ExecStart in:\n{unit_text}"));
-    assert_eq!(
-        exec,
-        format!(
-            "ExecStart=\"{}\" daemon --home \"{}\"",
-            active.display(),
-            home.display()
-        ),
-        "unit:\n{unit_text}"
-    );
-    assert!(!unit_text.contains("(deleted)"), "unit:\n{unit_text}");
+    assert_unit_runs(&user_home, &active, &home);
     assert!(!stdout.contains("(deleted)"), "{stdout}");
     // AC3: the replaced binary, run from its new file, reports itself as the one on PATH
     // and in the unit.
