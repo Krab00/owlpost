@@ -277,6 +277,10 @@ fn update_docs_name_the_captured_path_and_the_bootstrap() {
             "running process's own path (`/proc/self/exe`) reads `<path> (deleted)` after a rename over",
         ),
         (
+            "docs/technical-design.md",
+            "it, and `install::owl_path()` strips that suffix before canonicalising, so `owl doctor` and",
+        ),
+        (
             "README.md",
             "`cp ~/.cargo/bin/owl ~/.local/bin/owl.new && mv ~/.local/bin/owl.new ~/.local/bin/owl`",
         ),
