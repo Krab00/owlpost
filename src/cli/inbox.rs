@@ -6,18 +6,28 @@
 //! total) and never marks anything; with `--format` it prints the harness injection line
 //! instead, or nothing at all when the count is 0.
 //!
-//! `--count --format claude` (the plugin hook) reads the hook's stdin JSON when stdin is not
-//! a terminal and takes `session_id` from it (OWL-029). The [`arm_sentence`] is added on
-//! `--hook-event SessionStart` and `UserPromptSubmit` when `$OWLPOST_HOME/plugin.json` does
-//! not say `{"watch": false}` and no live marker `$OWLPOST_HOME/watch/<session id>` exists
-//! (a marker whose pid is dead is removed); without a session id the sentence goes out on
-//! `SessionStart` only. `--hook-event SessionStart` also adds one preview line per unseen
-//! record (`- <name> <kind> [<state>] on <path>: <first line>`) and the `OPEN_SENTENCE` so
-//! the first turn opens the inbox instead of reporting a counter; the preview never marks
-//! anything seen.
+//! `--count --format claude` (the plugin hook) is event-driven (OWL-031). On `--hook-event
+//! SessionStart` the line always goes out (also at count 0) and its `hookSpecificOutput`
+//! carries `watchPaths: ["<home>/spool/inbox"]` — Claude Code watches that directory and
+//! runs the `FileChanged` hook on every `add`/`change`/`unlink` there — unless
+//! `$OWLPOST_HOME/plugin.json` says `{"watch": false}` (then the key is absent and count 0
+//! prints nothing). `additionalContext` is present only when there is text: the counter
+//! sentence, on `SessionStart` one preview line per unseen record (`- <name> <kind> [<state>]
+//! on <path>: <first line>`) and the `OPEN_SENTENCE` so the first turn opens the inbox
+//! instead of reporting a counter; the preview never marks anything seen. `SessionStart`
+//! also sweeps `$OWLPOST_HOME/watch/`: every marker whose pid is dead is removed, live ones
+//! stay, and the sweep never fails the hook.
 //!
-//! `--count --follow [--session <id>]` is the live watch itself (plain format only): with
-//! `--session` it writes its pid to the marker, then polls the count every 5 s
+//! `--count --format claude --hook-event FileChanged` is the wake: it reads the hook's stdin
+//! JSON and, when `event` is `add`, the unseen count is above 0 and the watch is enabled,
+//! prints the counter sentence to stderr and exits 2 — the one exit code Claude Code's
+//! `asyncRewake` hook turns into a new model turn; every other case (`change`, `unlink`, count
+//! 0, watch off, a terminal, empty or unparseable stdin, no `event`) exits 0 silently. Keying
+//! on `add` is the de-duplication: marking seen and moving to `done/` are `change`/`unlink`.
+//! Nothing is ever marked seen.
+//!
+//! `--count --follow [--session <id>]` is a poll loop any harness can run (plain format
+//! only): with `--session` it writes its pid to the marker, then polls the count every 5 s
 //! (`OWLPOST_FOLLOW_SECS`), prints the counter sentence only when it changed, nothing at zero,
 //! never marks anything seen, and ends (removing the marker) when the marker is removed from
 //! outside or its stdout is closed.
@@ -54,41 +64,19 @@ pub struct Opts {
     pub hook_event: String,
 }
 
-/// The live-watch command template, byte-identical to the fenced line in
-/// `plugins/claude-code/commands/watch.md` (OWL-029 AC5; a unit test compares the two). It is
-/// stated here once and nowhere else in Rust; [`arm_sentence`] fills in the session id.
-pub const WATCH_COMMAND: &str = "owl inbox --count --follow --session <session id>";
-/// The placeholder [`WATCH_COMMAND`] carries.
-const SESSION_PLACEHOLDER: &str = "<session id>";
-/// Every arm sentence starts with this (pinned by the plugin docs and tests).
-pub const ARM_PREFIX: &str = "owlpost: before handling this prompt";
 /// Session ids: `[A-Za-z0-9._-]{1,128}`, so `watch/<id>` can never leave `watch/`.
 pub const SESSION_ID_RULE: &str = "[A-Za-z0-9._-]{1,128}";
 /// Poll interval of `--follow` in seconds (fractions allowed); default 5.
 pub const FOLLOW_SECS_ENV: &str = "OWLPOST_FOLLOW_SECS";
 /// Where a running follow leaves its pid: `$OWLPOST_HOME/watch/<session id>`.
 pub const MARKER_DIR: &str = "watch";
+/// The hook event that wakes the session (Claude Code's `FileChanged`, OWL-031).
+pub const FILE_CHANGED: &str = "FileChanged";
+/// The exit code Claude Code's `asyncRewake` hook turns into a new model turn.
+pub const WAKE_EXIT: i32 = 2;
 
 /// Prefix of every counter sentence: incoming messages wear the owl (OWL-027).
 pub const ICON: &str = "🦉 ";
-
-/// The second `additionalContext` sentence of the `claude` injection (§9): a self-contained
-/// imperative (OWL-026) that carries the whole Monitor call, so the turn arms the watch
-/// without looking anything up — even when that turn is a slash command. With a session id
-/// the command is [`WATCH_COMMAND`] with the id filled in; without one (a harness that sends
-/// no stdin) it is the command without `--session`, which runs the same loop without a marker.
-pub fn arm_sentence(session: Option<&str>) -> String {
-    let command = match session {
-        Some(id) => WATCH_COMMAND.replace(SESSION_PLACEHOLDER, id),
-        None => WATCH_COMMAND
-            .strip_suffix(&format!(" --session {SESSION_PLACEHOLDER}"))
-            .expect("WATCH_COMMAND ends with the session flag")
-            .to_string(),
-    };
-    format!(
-        "{ARM_PREFIX}, arm the inbox watch for this session: call Monitor with persistent: true, description \"owlpost inbox\" and this command (verbatim): `{command}`. Then handle the prompt."
-    )
-}
 
 /// `[A-Za-z0-9._-]{1,128}`.
 pub fn valid_session_id(id: &str) -> bool {
@@ -137,36 +125,50 @@ pub fn marker_is_live(path: &Path) -> bool {
         .is_some_and(|pid| pid > 0 && pid_alive(pid))
 }
 
-/// Whether a live follow runs for `id`; a stale marker (dead pid) is removed on the way.
-fn live_watch(home: &Path, id: &str) -> bool {
-    let marker = marker_path(home, id);
-    if !marker.exists() {
-        return false;
+/// Removes every marker under `$OWLPOST_HOME/watch/` whose pid is dead, whatever its session
+/// id; live markers stay. Never fails: an absent or unreadable directory is nothing to sweep.
+pub fn sweep_markers(home: &Path) {
+    let Ok(entries) = std::fs::read_dir(home.join(MARKER_DIR)) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_file() && !marker_is_live(&path) {
+            let _ = std::fs::remove_file(&path);
+        }
     }
-    if marker_is_live(&marker) {
-        return true;
-    }
-    let _ = std::fs::remove_file(&marker);
-    false
 }
 
-/// `session_id` from the hook's stdin JSON (`{"session_id": "...", ...}`); `None` on a
-/// terminal, on empty or unparseable input, and for an id outside the rule.
-pub fn session_id_from_stdin() -> Option<String> {
+/// The hook input JSON Claude Code writes to the hook's stdin; `None` on a terminal, on
+/// empty or unparseable input.
+pub fn hook_input_from_stdin() -> Option<Value> {
     let mut stdin = std::io::stdin();
     if stdin.is_terminal() {
         return None;
     }
     let mut raw = String::new();
     stdin.read_to_string(&mut raw).ok()?;
-    session_id_from_json(&raw)
+    serde_json::from_str(&raw).ok()
 }
 
-/// The validated `session_id` of a hook input JSON text.
-pub fn session_id_from_json(raw: &str) -> Option<String> {
-    let v: Value = serde_json::from_str(raw).ok()?;
-    let id = v.get("session_id")?.as_str()?;
-    valid_session_id(id).then(|| id.to_string())
+/// The `event` of a `FileChanged` hook input (`add` | `change` | `unlink`); `None` when absent
+/// or not a string.
+pub fn file_changed_event(input: &Value) -> Option<&str> {
+    input.get("event")?.as_str()
+}
+
+/// The directory Claude Code watches for the wake: `<home>/spool/inbox`, absolute —
+/// canonicalised when it exists, otherwise resolved against the current directory.
+pub fn inbox_watch_path(home: &Path) -> PathBuf {
+    let inbox = home.join("spool").join("inbox");
+    if let Ok(real) = inbox.canonicalize() {
+        return real;
+    }
+    if inbox.is_absolute() {
+        inbox
+    } else {
+        std::env::current_dir().map_or(inbox.clone(), |cwd| cwd.join(inbox))
+    }
 }
 
 /// `OWLPOST_FOLLOW_SECS` as a duration; unset, empty, unparseable or negative → 5 s.
@@ -261,22 +263,23 @@ pub fn sentence(per_peer: &[(String, usize)], answers: usize) -> String {
     format!("{ICON}owlpost: {what} ({peers}). Say \"show owlpost inbox\" or run `owl inbox`.")
 }
 
-/// The exact §9 injection line for `format`; `None` when there is nothing to inject. With
-/// `arm` (the [`arm_sentence`]), `Format::Claude` adds it: after the counter sentence
-/// (space-separated) when there is one, alone when the count is 0. Non-empty `previews`
-/// (session start with unseen records) follow on their own lines, closed by
-/// [`OPEN_SENTENCE`]. Other formats ignore `arm` and `previews`.
+/// The exact §9 injection line for `format`; `None` when there is nothing to inject.
+/// Non-empty `previews` (session start with unseen records) follow the counter on their own
+/// lines, closed by [`OPEN_SENTENCE`]. With `watch_path` (OWL-031: `SessionStart` with the
+/// watch enabled) `Format::Claude` emits the line even at count 0, its `hookSpecificOutput`
+/// carrying `watchPaths: [<path>]` and `additionalContext` only when there is text. Other
+/// formats ignore `previews` and `watch_path`.
 pub fn injection(
     format: Format,
     per_peer: &[(String, usize)],
     answers: usize,
-    arm: Option<&str>,
     previews: &[String],
     event: &str,
+    watch_path: Option<&Path>,
 ) -> Option<String> {
-    let arm = arm.filter(|_| format == Format::Claude);
+    let watch_path = watch_path.filter(|_| format == Format::Claude);
     let empty = per_peer.iter().all(|(_, n)| *n == 0);
-    if empty && arm.is_none() {
+    if empty && watch_path.is_none() {
         return None;
     }
     let mut text = if empty {
@@ -284,12 +287,6 @@ pub fn injection(
     } else {
         sentence(per_peer, answers)
     };
-    if let Some(arm) = arm {
-        if !text.is_empty() {
-            text.push(' ');
-        }
-        text.push_str(arm);
-    }
     if format == Format::Claude && !empty && !previews.is_empty() {
         for p in previews {
             text.push('\n');
@@ -310,12 +307,16 @@ pub fn injection(
             #[serde(rename_all = "camelCase")]
             struct Inner<'a> {
                 hook_event_name: &'a str,
-                additional_context: &'a str,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                additional_context: Option<&'a str>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                watch_paths: Option<[String; 1]>,
             }
             serde_json::to_string(&Hook {
                 hook_specific_output: Inner {
                     hook_event_name: event,
-                    additional_context: &text,
+                    additional_context: (!text.is_empty()).then_some(text.as_str()),
+                    watch_paths: watch_path.map(|p| [p.to_string_lossy().into_owned()]),
                 },
             })
             .expect("hook line is always serialisable")
@@ -459,12 +460,26 @@ fn count(
     let Opts { all, json, .. } = *opts;
     let event = opts.hook_event.as_str();
     let session_start = event == "SessionStart";
+    if session_start {
+        sweep_markers(home);
+    }
     let Counts {
         records,
         per_peer,
         questions,
     } = counts(spool, book, all)?;
     let total = records.len();
+    if format == Some(Format::Claude) && event == FILE_CHANGED {
+        // The wake (OWL-031): only a new record (`add`) with something unseen, and only while
+        // the watch is on. Anything else, including unusable stdin, is a silent exit 0.
+        let input = hook_input_from_stdin();
+        let added = input.as_ref().and_then(file_changed_event) == Some("add");
+        if added && watch && total > 0 {
+            eprintln!("{}", sentence(&per_peer, total - questions));
+            std::process::exit(WAKE_EXIT);
+        }
+        return Ok(());
+    }
     let previews = if session_start {
         records
             .iter()
@@ -475,27 +490,14 @@ fn count(
     };
     match format {
         Some(f) => {
-            let session = if f == Format::Claude {
-                session_id_from_stdin()
-            } else {
-                None
-            };
-            let arm = watch
-                && match session.as_deref() {
-                    Some(id) => {
-                        matches!(event, "SessionStart" | "UserPromptSubmit")
-                            && !live_watch(home, id)
-                    }
-                    None => session_start,
-                };
-            let sentence = arm.then(|| arm_sentence(session.as_deref()));
+            let watch_path = (session_start && watch).then(|| inbox_watch_path(home));
             if let Some(line) = injection(
                 f,
                 &per_peer,
                 total - questions,
-                sentence.as_deref(),
                 &previews,
                 event,
+                watch_path.as_deref(),
             ) {
                 println!("{line}");
             }
@@ -522,13 +524,16 @@ fn poll(home: &Path, all: bool) -> Option<String> {
         Format::Plain,
         &c.per_peer,
         c.records.len() - c.questions,
-        None,
         &[],
         "",
+        None,
     )
 }
 
 /// `owl inbox --count --follow [--session <id>]`: see the module doc.
+// ponytail: the poll loop is the live-watch fallback for hosts without a `FileChanged` hook
+// (Codex, Kimi, an older Claude Code); the Claude plugin no longer references it — drop it
+// when every harness offers an event-driven wake.
 pub fn follow(home: &Path, session: Option<&str>, all: bool) -> anyhow::Result<()> {
     let marker = session.map(|id| marker_path(home, id));
     if let Some(m) = &marker {
@@ -546,7 +551,7 @@ pub fn follow(home: &Path, session: Option<&str>, all: bool) -> anyhow::Result<(
             && let Some(line) = &cur
             && (writeln!(out, "{line}").is_err() || out.flush().is_err())
         {
-            // The reader is gone (the Monitor was stopped): a clean end.
+            // The reader is gone (the host stopped the loop): a clean end.
             break;
         }
         prev = cur;
@@ -564,6 +569,8 @@ pub fn follow(home: &Path, session: Option<&str>, all: bool) -> anyhow::Result<(
 
 #[cfg(test)]
 mod tests {
+    use std::process::Command;
+
     use super::*;
 
     fn peers(v: &[(&str, usize)]) -> Vec<(String, usize)> {
@@ -597,33 +604,33 @@ mod tests {
     #[test]
     fn injection_shapes_per_format() {
         let p = peers(&[("Maciek", 2)]);
-        let claude = injection(Format::Claude, &p, 0, None, &[], "UserPromptSubmit").unwrap();
+        let claude = injection(Format::Claude, &p, 0, &[], "UserPromptSubmit", None).unwrap();
         assert_eq!(
             claude,
             r#"{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"🦉 owlpost: 2 new questions (Maciek 2). Say \"show owlpost inbox\" or run `owl inbox`."}}"#
         );
         assert_eq!(
-            injection(Format::Codex, &p, 0, None, &[], "UserPromptSubmit").unwrap(),
+            injection(Format::Codex, &p, 0, &[], "UserPromptSubmit", None).unwrap(),
             claude
         );
         assert_eq!(
-            injection(Format::Kimi, &p, 0, None, &[], "UserPromptSubmit").unwrap(),
+            injection(Format::Kimi, &p, 0, &[], "UserPromptSubmit", None).unwrap(),
             sentence(&p, 0)
         );
         assert_eq!(
-            injection(Format::Plain, &p, 0, None, &[], "UserPromptSubmit").unwrap(),
+            injection(Format::Plain, &p, 0, &[], "UserPromptSubmit", None).unwrap(),
             sentence(&p, 0)
         );
         for f in [Format::Plain, Format::Claude, Format::Codex, Format::Kimi] {
-            assert_eq!(injection(f, &[], 0, None, &[], "UserPromptSubmit"), None);
+            assert_eq!(injection(f, &[], 0, &[], "UserPromptSubmit", None), None);
             assert_eq!(
                 injection(
                     f,
                     &peers(&[("Maciek", 0)]),
                     0,
-                    None,
                     &[],
-                    "UserPromptSubmit"
+                    "UserPromptSubmit",
+                    None
                 ),
                 None
             );
@@ -638,126 +645,154 @@ mod tests {
         )
     }
 
+    /// OWL-031 AC1: `watch_path` makes the Claude line go out at count 0 with `watchPaths`
+    /// alone; with a count the context comes first and `watchPaths` follows; every other
+    /// format ignores it. No output ever carries the retired arm sentence.
     #[test]
-    fn arm_sentence_is_self_contained_and_embeds_the_watch_command() {
-        // OWL-026 AC1 / OWL-029: the required fragments, in one imperative sentence.
-        let armed = arm_sentence(Some("abc-123"));
-        assert_eq!(
-            armed,
-            "owlpost: before handling this prompt, arm the inbox watch for this session: call Monitor with persistent: true, description \"owlpost inbox\" and this command (verbatim): `owl inbox --count --follow --session abc-123`. Then handle the prompt."
-        );
-        assert!(armed.starts_with(ARM_PREFIX));
-        for needle in [
-            "persistent: true",
-            "description \"owlpost inbox\"",
-            "`owl inbox --count --follow --session abc-123`",
-        ] {
-            assert!(armed.contains(needle), "arm sentence lacks {needle:?}");
-        }
-        assert!(!armed.contains('\n'), "one line");
-        assert!(!armed.contains(SESSION_PLACEHOLDER), "{armed}");
-        // Without a session id the same loop runs without a marker.
-        let bare = arm_sentence(None);
-        assert!(
-            bare.contains("`owl inbox --count --follow`. Then handle the prompt."),
-            "{bare}"
-        );
-        assert!(!bare.contains("--session"), "{bare}");
-        assert!(bare.starts_with(ARM_PREFIX));
-        // OWL-029 AC5: the template is stated once here and once in commands/watch.md; the
-        // two are byte-identical (the fenced block holds exactly one line starting
-        // `owl inbox --count --follow`).
-        let md = std::fs::read_to_string(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/plugins/claude-code/commands/watch.md"
-        ))
-        .unwrap();
-        let in_md: Vec<&str> = md
-            .lines()
-            .filter(|l| l.starts_with("owl inbox --count --follow"))
-            .collect();
-        assert_eq!(in_md, vec![WATCH_COMMAND]);
-    }
-
-    #[test]
-    fn arm_sentence_is_claude_only_and_stands_alone_at_zero() {
+    fn watch_path_is_claude_only_and_stands_alone_at_zero() {
         let p = peers(&[("Maciek", 2)]);
-        let arm = arm_sentence(Some("S"));
-        // Counter + arm, one space between the two sentences, counter text unchanged.
-        let two = injection(Format::Claude, &p, 0, Some(&arm), &[], "SessionStart").unwrap();
+        let inbox = Path::new("/h/spool/inbox");
+        let zero = injection(Format::Claude, &[], 0, &[], "SessionStart", Some(inbox)).unwrap();
         assert_eq!(
-            two,
-            session_start_line(&format!("{} {arm}", sentence(&p, 0)))
-        );
-        // Valid JSON despite the `"` in the sentence, with the sentence intact.
-        let v: serde_json::Value = serde_json::from_str(&two).unwrap();
-        assert_eq!(
-            v,
-            json!({"hookSpecificOutput": {"hookEventName": "SessionStart",
-                "additionalContext": format!("{} {arm}", sentence(&p, 0))}})
-        );
-        // Zero unseen + arm: the arm sentence alone, in the same JSON shape.
-        let zero = session_start_line(&arm);
-        assert_eq!(
-            injection(Format::Claude, &[], 0, Some(&arm), &[], "SessionStart").unwrap(),
-            zero
+            zero,
+            r#"{"hookSpecificOutput":{"hookEventName":"SessionStart","watchPaths":["/h/spool/inbox"]}}"#
         );
         assert_eq!(
             injection(
                 Format::Claude,
                 &peers(&[("Maciek", 0)]),
                 0,
-                Some(&arm),
                 &[],
-                "SessionStart"
+                "SessionStart",
+                Some(inbox)
             )
             .unwrap(),
             zero
         );
-        // Every other format ignores `arm`: same as without, nothing at zero.
+        let v: serde_json::Value = serde_json::from_str(&zero).unwrap();
+        assert!(v["hookSpecificOutput"].get("additionalContext").is_none());
+        let two = injection(Format::Claude, &p, 0, &[], "SessionStart", Some(inbox)).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&two).unwrap();
+        assert_eq!(
+            v,
+            json!({"hookSpecificOutput": {"hookEventName": "SessionStart",
+                "additionalContext": sentence(&p, 0), "watchPaths": ["/h/spool/inbox"]}})
+        );
+        assert_eq!(
+            two,
+            format!(
+                r#"{{"hookSpecificOutput":{{"hookEventName":"SessionStart","additionalContext":{},"watchPaths":["/h/spool/inbox"]}}}}"#,
+                serde_json::to_string(&sentence(&p, 0)).unwrap()
+            )
+        );
+        // Without a watch path the line is the plain counter (or nothing at zero).
+        assert_eq!(
+            injection(Format::Claude, &p, 0, &[], "SessionStart", None).unwrap(),
+            session_start_line(&sentence(&p, 0))
+        );
+        assert_eq!(
+            injection(Format::Claude, &[], 0, &[], "SessionStart", None),
+            None
+        );
+        // Every other format ignores `watch_path`: same as without, nothing at zero.
         for f in [Format::Plain, Format::Codex, Format::Kimi] {
             assert_eq!(
-                injection(f, &p, 0, Some(&arm), &[], "SessionStart"),
-                injection(f, &p, 0, None, &[], "SessionStart"),
+                injection(f, &p, 0, &[], "SessionStart", Some(inbox)),
+                injection(f, &p, 0, &[], "SessionStart", None),
                 "{f:?}"
             );
             assert_eq!(
-                injection(f, &[], 0, Some(&arm), &[], "SessionStart"),
+                injection(f, &[], 0, &[], "SessionStart", Some(inbox)),
                 None,
+                "{f:?}"
+            );
+        }
+        for line in [&zero, &two] {
+            assert!(
+                !line.contains("owlpost: before handling this prompt"),
+                "{line}"
+            );
+            assert!(!line.contains("--follow"), "{line}");
+        }
+    }
+
+    #[test]
+    fn previews_follow_the_counter_and_close_with_open_sentence_claude_only() {
+        let p = peers(&[("Maciek", 1)]);
+        let inbox = Path::new("/h/spool/inbox");
+        let pv = vec!["- Maciek question [consent] on src/a.rs: why?".to_string()];
+        let line = injection(Format::Claude, &p, 0, &pv, "SessionStart", Some(inbox)).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(
+            v["hookSpecificOutput"]["additionalContext"],
+            format!("{}\n{}\n{OPEN_SENTENCE}", sentence(&p, 0), pv[0])
+        );
+        assert_eq!(
+            v["hookSpecificOutput"]["watchPaths"],
+            json!(["/h/spool/inbox"])
+        );
+        // Watch off: previews still go out, without `watchPaths`.
+        let line = injection(Format::Claude, &p, 0, &pv, "SessionStart", None).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(
+            v["hookSpecificOutput"]["additionalContext"],
+            format!("{}\n{}\n{OPEN_SENTENCE}", sentence(&p, 0), pv[0])
+        );
+        assert!(v["hookSpecificOutput"].get("watchPaths").is_none());
+        // Zero unseen: no previews, no open sentence.
+        assert_eq!(
+            injection(Format::Claude, &[], 0, &pv, "SessionStart", Some(inbox)).unwrap(),
+            injection(Format::Claude, &[], 0, &[], "SessionStart", Some(inbox)).unwrap()
+        );
+        for f in [Format::Plain, Format::Codex, Format::Kimi] {
+            assert_eq!(
+                injection(f, &p, 0, &pv, "SessionStart", None),
+                injection(f, &p, 0, &[], "SessionStart", None),
                 "{f:?}"
             );
         }
     }
 
     #[test]
-    fn previews_follow_arm_and_close_with_open_sentence_claude_only() {
-        let p = peers(&[("Maciek", 1)]);
-        let arm = arm_sentence(Some("S"));
-        let pv = vec!["- Maciek question [consent] on src/a.rs: why?".to_string()];
-        let line = injection(Format::Claude, &p, 0, Some(&arm), &pv, "SessionStart").unwrap();
-        let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+    fn inbox_watch_path_is_absolute_and_canonical_when_it_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        // Absent: the absolute join, untouched.
+        assert_eq!(inbox_watch_path(home), home.join("spool").join("inbox"));
+        // Present: canonicalised (a symlinked home resolves to the real directory).
+        std::fs::create_dir_all(home.join("spool").join("inbox")).unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(home, &link).unwrap();
         assert_eq!(
-            v["hookSpecificOutput"]["additionalContext"],
-            format!("{} {arm}\n{}\n{OPEN_SENTENCE}", sentence(&p, 0), pv[0])
+            inbox_watch_path(&link),
+            home.canonicalize().unwrap().join("spool").join("inbox")
         );
-        // Watch off: previews still go out, without the arm sentence.
-        let line = injection(Format::Claude, &p, 0, None, &pv, "SessionStart").unwrap();
-        let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert!(inbox_watch_path(&link).is_absolute());
+        // A relative home is resolved against the current directory.
+        let rel = inbox_watch_path(Path::new("rel-home"));
+        assert!(rel.is_absolute(), "{}", rel.display());
+        assert!(rel.ends_with("rel-home/spool/inbox"), "{}", rel.display());
+    }
+
+    #[test]
+    fn file_changed_event_reads_the_event_string_only() {
+        let v = |s: &str| serde_json::from_str::<Value>(s).unwrap();
         assert_eq!(
-            v["hookSpecificOutput"]["additionalContext"],
-            format!("{}\n{}\n{OPEN_SENTENCE}", sentence(&p, 0), pv[0])
+            file_changed_event(&v(
+                r#"{"session_id":"S","hook_event_name":"FileChanged","file_path":"/x","event":"add"}"#
+            )),
+            Some("add")
         );
-        // Zero unseen: no previews, no open sentence.
         assert_eq!(
-            injection(Format::Claude, &[], 0, Some(&arm), &pv, "SessionStart").unwrap(),
-            injection(Format::Claude, &[], 0, Some(&arm), &[], "SessionStart").unwrap()
+            file_changed_event(&v(r#"{"event":"change"}"#)),
+            Some("change")
         );
-        for f in [Format::Plain, Format::Codex, Format::Kimi] {
-            assert_eq!(
-                injection(f, &p, 0, None, &pv, "SessionStart"),
-                injection(f, &p, 0, None, &[], "SessionStart"),
-                "{f:?}"
-            );
+        assert_eq!(
+            file_changed_event(&v(r#"{"event":"unlink"}"#)),
+            Some("unlink")
+        );
+        for raw in ["{}", r#"{"event": 5}"#, r#"{"Event": "add"}"#, "[]", "null"] {
+            assert_eq!(file_changed_event(&v(raw)), None, "{raw:?}");
         }
     }
 
@@ -790,26 +825,6 @@ mod tests {
     }
 
     #[test]
-    fn session_id_from_json_takes_only_a_valid_session_id() {
-        assert_eq!(
-            session_id_from_json(r#"{"session_id":"S1","hook_event_name":"SessionStart"}"#),
-            Some("S1".to_string())
-        );
-        for raw in [
-            "",
-            "not json",
-            "{}",
-            r#"{"session_id": 5}"#,
-            r#"{"session_id": ""}"#,
-            r#"{"session_id": "a/b"}"#,
-            r#"{"sessionId": "S1"}"#,
-            "[]",
-        ] {
-            assert_eq!(session_id_from_json(raw), None, "{raw:?}");
-        }
-    }
-
-    #[test]
     fn marker_is_live_only_for_a_running_pid() {
         let dir = tempfile::tempdir().unwrap();
         let marker = dir.path().join("m");
@@ -836,24 +851,42 @@ mod tests {
         assert!(marker_is_live(&marker));
     }
 
+    /// OWL-031 AC3: the sweep removes every dead marker whatever its name, keeps live ones,
+    /// leaves non-files alone and never fails on an absent or unreadable directory.
     #[test]
-    fn live_watch_ignores_and_removes_a_stale_marker() {
+    fn sweep_markers_removes_dead_markers_of_any_session_and_keeps_live_ones() {
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path();
-        assert!(!live_watch(home, "S"), "no marker");
-        let marker = marker_path(home, "S");
-        std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
-        std::fs::write(&marker, std::process::id().to_string()).unwrap();
-        assert!(live_watch(home, "S"), "own pid");
-        assert!(marker.exists(), "a live marker stays");
-        let mut child = std::process::Command::new("true").spawn().unwrap();
-        child.wait().unwrap();
-        std::fs::write(&marker, child.id().to_string()).unwrap();
-        assert!(!live_watch(home, "S"), "reaped pid");
-        assert!(!marker.exists(), "the stale marker is removed");
-        // Another session's marker is not this session's.
-        std::fs::write(marker_path(home, "T"), std::process::id().to_string()).unwrap();
-        assert!(!live_watch(home, "S"));
+        sweep_markers(home); // no watch dir: nothing happens
+        assert!(!home.join(MARKER_DIR).exists());
+        std::fs::create_dir_all(home.join(MARKER_DIR)).unwrap();
+        let mut reaped = Command::new("true").spawn().unwrap();
+        reaped.wait().unwrap();
+        let mut sleeper = Command::new("sleep").arg("30").spawn().unwrap();
+        std::fs::write(marker_path(home, "dead-1"), reaped.id().to_string()).unwrap();
+        std::fs::write(marker_path(home, "dead-2"), "abc").unwrap();
+        std::fs::write(marker_path(home, "dead-3"), "").unwrap();
+        std::fs::write(marker_path(home, "live-1"), sleeper.id().to_string()).unwrap();
+        std::fs::write(marker_path(home, "live-2"), std::process::id().to_string()).unwrap();
+        std::fs::create_dir(marker_path(home, "a-dir")).unwrap();
+        sweep_markers(home);
+        for gone in ["dead-1", "dead-2", "dead-3"] {
+            assert!(!marker_path(home, gone).exists(), "{gone} removed");
+        }
+        for kept in ["live-1", "live-2", "a-dir"] {
+            assert!(marker_path(home, kept).exists(), "{kept} kept");
+        }
+        // Once the sleeper is gone its marker goes too; the others stay.
+        sleeper.kill().unwrap();
+        sleeper.wait().unwrap();
+        sweep_markers(home);
+        assert!(!marker_path(home, "live-1").exists());
+        assert!(marker_path(home, "live-2").exists());
+        // `watch` being a file, not a directory: nothing to sweep, no error.
+        let other = tempfile::tempdir().unwrap();
+        std::fs::write(other.path().join(MARKER_DIR), "x").unwrap();
+        sweep_markers(other.path());
+        assert!(other.path().join(MARKER_DIR).is_file());
     }
 
     #[test]

@@ -318,6 +318,19 @@ fn main() -> ExitCode {
         Cmd::Add { source, local } => cli::add::run(&home, &source, local),
         Cmd::Daemon { foreground } => daemon_cmd(&home, foreground),
         Cmd::Inbox {
+            format, hook_event, ..
+        } if hook_event == cli::inbox::FILE_CHANGED && format.as_deref() != Some("claude") => {
+            // Only Claude Code has a FileChanged hook: a usage error (exit 2) whose stderr
+            // text tells it apart from the wake's exit 2.
+            use clap::{CommandFactory, error::ErrorKind};
+            Cli::command()
+                .error(
+                    ErrorKind::ArgumentConflict,
+                    "--hook-event FileChanged requires --format claude",
+                )
+                .exit()
+        }
+        Cmd::Inbox {
             count,
             new,
             all,

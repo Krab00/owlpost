@@ -111,23 +111,16 @@ sentence is the instruction. Then handle the user's prompt.
 
 ## Live watch
 
-The `SessionStart` and `UserPromptSubmit` hooks may inject a sentence starting `owlpost: before handling this prompt`
-next to the counter. It is self-contained and imperative: it carries the whole Monitor call.
-The sentence may appear on any turn, not only the first; whenever it is present, arm the watch,
-silently: one `Monitor` call with `persistent: true`, description "owlpost inbox", running
-the command from the sentence (`owl inbox --count --follow --session <id>`; the template is in `commands/watch.md`).
-Its presence means no watch is live for this session, even if one was armed earlier and died: the running watch leaves a marker the hook checks, so the hook stops asking once one runs.
-Arm it even when the turn is a slash command such as `/owlpost:watch status`; the sentence is an instruction, not background context.
-Do not mention the arming to the user, and never arm a second watch while one runs in this session.
-No sentence means a watch is live or the user switched it off with `/owlpost:watch off`; do not arm it then.
-
-- On a watch event, report it in one line, built from the counter, for example
-  `🦉 owlpost: 1 new answer from Maciek`, and offer `/owlpost:inbox`.
-- The watch is a counter only: never list the inbox, show, draft or send anything because
-  of a watch event. Nothing is opened, drafted or sent without the human's pick.
-- `/owlpost:watch off` stops it for this session and later ones, `/owlpost:watch on`
-  restores it, `/owlpost:watch status` reports both.
-- `/owlpost:watch status` arms the watch when the default is on and none runs in this session.
+The live watch is event-driven and there is nothing to arm: the `SessionStart` hook
+registers the spool inbox directory as a watch path and the `FileChanged` hook wakes this
+session with the counter sentence (`🦉 owlpost: N new ...`) the moment a record arrives; a
+record that is only marked seen or moved away wakes nothing. When a wake lands, report it in
+one line built from the counter, for example `🦉 owlpost: 1 new answer from Maciek`, and
+offer `/owlpost:inbox`; then wait for the human. The watch is a counter only: never list the
+inbox, show, draft or send anything because of a wake. Nothing is opened, drafted or sent
+without the human's pick. `/owlpost:watch off` stores `{"watch": false}` so the hook stops
+waking and new sessions do not watch, `/owlpost:watch on` restores it from the next session
+start, `/owlpost:watch status` reports the stored default (`commands/watch.md`).
 
 ## The answer loop
 
