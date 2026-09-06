@@ -74,7 +74,7 @@ Then `AskUserQuestion` with **Draft / Draft & send / Reject / Skip**:
    say so in one line before the picker and recommend Edit.
 2. `AskUserQuestion` with **Send / Edit / Reject**:
    - **Send** — run `owl send <id>`: signs the draft and moves it to the outbox. This is the
-     only pick that runs `owl send`.
+     only pick in this picker that runs `owl send`.
    - **Edit** — `owl edit <id>` opens `$EDITOR`, which cannot run inside a session (see
      `commands/edit.md`): tell the human to run `owl edit <id>` in a terminal and say when
      they are done. Then run `owl show <id>` again, print the edited draft verbatim in a code
