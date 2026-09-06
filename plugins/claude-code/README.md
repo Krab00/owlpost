@@ -5,7 +5,7 @@ The Claude Code harness adapter for owlpost (`docs/concept.md` "Harness adapters
 
 | Piece | Path | What it does |
 |---|---|---|
-| Hooks | `hooks/hooks.json`, `hooks/owl-count.sh` | On `SessionStart`, `UserPromptSubmit` and `PostToolUse` runs `owl inbox --count --format claude` (5 s timeout) and injects the unseen-question counter line. Silent no-op when `owl` is missing or fails. |
+| Hooks | `hooks/hooks.json`, `hooks/owl-count.sh` | On `SessionStart`, `UserPromptSubmit` and `PostToolUse` runs `owl inbox --count --format claude` (5 s timeout) and injects the unseen-question counter line; `SessionStart` also registers `$OWLPOST_HOME/spool/inbox` as a `watchPaths` entry, and the `FileChanged` hook (`asyncRewake`) wakes the idle session — exit 2 with the counter sentence — when a record is added there. Silent no-op when `owl` is missing or fails. |
 | Skill | `skills/owlpost/SKILL.md` | When to ask a peer, how to run `owl ask`, the mentioned contact, how to react to the counter, the answer loop, the memory rule. |
 | MCP server | `owl mcp`, registered at user scope by `owl setup` / `owl update` | Serves every contact as an `@owl:to://…` resource in the `@` typeahead (stdio); see "Mention a contact" below. |
 | Commands | `commands/<name>.md`, one per `owl` subcommand (all except `daemon`) | `/owlpost:<name>` runs `owl <name>` with the arguments and offers the next step; see the table below. |
@@ -39,7 +39,7 @@ patterns of the next steps a file runs itself); `tests/plugin.rs` pins the rule.
 | `/owlpost:send <id>` | `commands/send.md` | `owl send` — sign and move to outbox (confirms first) |
 | `/owlpost:reject <id>` | `commands/reject.md` | `owl reject` — discard a record (confirms first) |
 | `/owlpost:history [--peer] [--path] [--since]` | `commands/history.md` | `owl history` — finished exchanges |
-| `/owlpost:watch [on\|off\|status]` | `commands/watch.md` | Monitor over `owl inbox --count --follow --session <id>` — live one-line notifications when the inbox changes; `off` stops it and stores `{"watch": false}` in `$OWLPOST_HOME/plugin.json`, `on` restores it, `status` reports both and arms the watch when the default is on and none runs; the `SessionStart` and `UserPromptSubmit` hooks inject a self-contained arm instruction starting `owlpost: before handling this prompt` whenever no watch is live for the session (a running watch leaves its pid in `$OWLPOST_HOME/watch/<session id>`) |
+| `/owlpost:watch [on\|off\|status]` | `commands/watch.md` | event-driven inbox watch, nothing to arm: the `SessionStart` hook registers `$OWLPOST_HOME/spool/inbox` as a watch path and the `FileChanged` hook wakes the session with the counter line when a record lands there; `off` stores `{"watch": false}` in `$OWLPOST_HOME/plugin.json` (the hook stops waking at once, new sessions do not watch), `on` restores it from the next session start, `status` reports the stored default |
 | `/owlpost:setup [--name] [--email] [--plugin-source] [--dry-run]` | `commands/setup.md` | `owl setup` — init, daemon, plugin in one go |
 | `/owlpost:install [--dry-run]` | `commands/install.md` | `owl install` — register the daemon service |
 | `/owlpost:uninstall` | `commands/uninstall.md` | `owl uninstall` — remove the service (confirms first) |

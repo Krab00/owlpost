@@ -176,90 +176,187 @@ fn readme_describes_the_owl_icon_and_orange_frame() {
         );
     }
 }
-/// OWL-026 AC2 and the doc quotes of the new injection prefix: `/owlpost:watch status` arms
-/// the watch when the default is on and none runs (one line in `commands/watch.md`, pinned
-/// whole); the plugin README, the skill and the design doc name the sentence by its prefix.
+/// Every regular file under `dir`, recursively.
+fn walk(dir: &Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    for entry in fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            out.extend(walk(&path));
+        } else {
+            out.push(path);
+        }
+    }
+    out
+}
+
+/// OWL-031 AC5: the plugin docs, the design doc and the README describe the event-driven
+/// wake (`watchPaths`, `FileChanged`, `asyncRewake`, exit 2, the `add`-only rule, the
+/// dead-marker sweep) and nothing of the Monitor era is left — each literal pinned on one
+/// line, each retired phrase asserted absent over `plugins/claude-code/`, `docs/` and
+/// `README.md`.
 #[test]
-fn watch_status_arms_and_docs_quote_the_arm_prefix() {
-    let watch = repo_file("plugins/claude-code/commands/watch.md");
-    let status = watch
-        .split("## `status` (or no argument)")
-        .nth(1)
-        .and_then(|s| s.split("\n## ").next())
-        .expect("watch.md status section");
+fn watch_docs_describe_the_event_driven_wake_and_drop_the_arm_sentence() {
+    let design = repo_file("docs/technical-design.md");
+    let section = |name: &str| -> String {
+        let start = design
+            .find(&format!("\n## {name}"))
+            .unwrap_or_else(|| panic!("§{name}"));
+        let body = &design[start + 1..];
+        let end = body[1..].find("\n## ").map_or(body.len(), |i| i + 1);
+        body[..end].to_string()
+    };
+    let s9 = section("9. CLI contract");
+    for needle in [
+        "`watchPaths`",
+        "`FileChanged`",
+        "`asyncRewake`",
+        "exit 2",
+        "carries `watchPaths: [\"<home>/spool/inbox\"]`",
+        "(absolute; `<home>` is the resolved `$OWLPOST_HOME`, canonicalised when it exists) next to",
+        "`additionalContext` is present only when there is text",
+        "When `$OWLPOST_HOME/plugin.json` reads `{\"watch\": false}` the `watchPaths`",
+        "key is absent and count 0 prints nothing",
+        "`UserPromptSubmit` and `PostToolUse` never carry `watchPaths`",
+        "`SessionStart` also sweeps `$OWLPOST_HOME/watch/`: every marker whose pid is dead is removed",
+        "(all session ids), live ones stay, and an absent or unreadable directory never fails the hook.",
+        "is `add`, the unseen count is above 0 and the watch is on, prints the counter sentence",
+        "(`sentence()`, 🦉 icon, byte-identical to `--follow`) to stderr and exits `2` — the exit",
+        "code Claude Code's `asyncRewake` hook turns into a new model turn, showing the hook's stderr",
+        "Keying on `add` only is the de-duplication:",
+        "marking seen and moving to `done/` are `change`/`unlink`, so they never wake",
+        "`--format plain|codex|kimi` (or no `--format`) is a clap usage error (exit 2, distinct from the wake by its",
+        "`--count --follow` (plain only) is the poll-loop fallback for hosts without a `FileChanged` hook",
+    ] {
+        assert!(
+            s9.lines().any(|l| l.contains(needle)),
+            "design §9 lacks {needle:?} on one line"
+        );
+    }
+    let s11 = section("11. Notifications and service install");
+    for needle in [
+        "- Claude Code live watch (OWL-031): the plugin's `SessionStart` hook returns `watchPaths`",
+        "with the spool inbox directory and its `FileChanged` hook runs with `asyncRewake: true`",
+        "exits 2 with the counter sentence when a record is added, which wakes the idle session with",
+        "stays as the poll-loop fallback for hosts without such a hook; its marker under",
+        "`$OWLPOST_HOME/watch/` is informational and dead ones are swept on `SessionStart`.",
+    ] {
+        assert!(
+            s11.lines().any(|l| l.contains(needle)),
+            "design §11 lacks {needle:?} on one line"
+        );
+    }
+    let s12 = section("12. Testing strategy");
+    for needle in [
+        "`scripts/e2e-watch-wake.sh` (OWL-031)",
+        "waits for the first `result` event, drops one unseen question record into `spool/inbox/`",
+        "`hook_response` for `FileChanged` with `exit_code` 2 and the 🦉 sentence followed by a second `assistant` event with no second user message sent",
+    ] {
+        assert!(
+            s12.lines().any(|l| l.contains(needle)),
+            "design §12 lacks {needle:?} on one line"
+        );
+    }
     assert!(
-        status.lines().any(|l| l == "4. When no \"owlpost inbox\" watch runs in this session and the stored default is on, arm it exactly as `on` does (same `Monitor` call, the command from this turn's sentence) and say `owlpost watch: running; default on` instead."),
-        "watch.md status lacks the arming line"
+        design.lines().any(|l| l.contains(
+            "e2e-watch-wake.sh  one `claude -p` stream-json session; proves the FileChanged hook wakes it (exit 2) when a record lands"
+        )),
+        "design §2 scripts row"
     );
     for (rel, needle) in [
         (
-            "plugins/claude-code/README.md",
-            "`status` reports both and arms the watch when the default is on and none runs; the `SessionStart` and `UserPromptSubmit` hooks inject a self-contained arm instruction starting `owlpost: before handling this prompt` whenever no watch is live for the session (a running watch leaves its pid in `$OWLPOST_HOME/watch/<session id>`)",
-        ),
-        (
             "plugins/claude-code/skills/owlpost/SKILL.md",
-            "`/owlpost:watch status` arms the watch when the default is on and none runs in this session.",
+            "nothing to arm",
         ),
+        ("plugins/claude-code/README.md", "nothing to arm"),
         (
-            "plugins/claude-code/skills/owlpost/SKILL.md",
-            "whenever it is present, arm",
+            "plugins/claude-code/commands/watch.md",
+            "`owlpost watch: on; the inbox is watched from the next session start`",
         ),
         (
             "plugins/claude-code/commands/watch.md",
+            "`owlpost watch: off; this session stops waking now, new sessions do not watch`",
+        ),
+        (
+            "plugins/claude-code/commands/watch.md",
+            "`owlpost watch: default on|off; event-driven (FileChanged), nothing to arm`",
+        ),
+    ] {
+        assert!(
+            repo_file(rel).lines().any(|l| l.contains(needle)),
+            "{rel} lacks {needle:?} on one line"
+        );
+    }
+    // The README `/owlpost:watch` row and the SKILL "Live watch" section carry the phrase.
+    let row = repo_file("plugins/claude-code/README.md")
+        .lines()
+        .find(|l| l.contains("`/owlpost:watch [on\\|off\\|status]`"))
+        .expect("README /owlpost:watch row")
+        .to_string();
+    assert!(row.contains("nothing to arm"), "{row}");
+    let skill = repo_file("plugins/claude-code/skills/owlpost/SKILL.md");
+    let live = skill
+        .split("\n## Live watch\n")
+        .nth(1)
+        .and_then(|s| s.split("\n## ").next())
+        .expect("SKILL.md Live watch section");
+    assert!(live.contains("nothing to arm"), "{live}");
+    // The retired phrases are gone from every file the AC names.
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut files = walk(&root.join("plugins/claude-code"));
+    files.extend(walk(&root.join("docs")));
+    files.push(root.join("README.md"));
+    for path in files {
+        let Ok(text) = fs::read_to_string(&path) else {
+            continue;
+        };
+        for gone in [
+            "owlpost: before handling this prompt",
+            "arm the inbox watch",
             "it arms on your next prompt",
-        ),
-        (
-            "docs/technical-design.md",
-            "sentence starting `owlpost: before handling this prompt` (OWL-026: a self-contained",
-        ),
-        (
-            "docs/technical-design.md",
-            "the template byte-identical to `commands/watch.md`",
-        ),
-        // OWL-029 AC5: §9 describes the marker and the per-turn re-arm, §11 the update.
-        (
-            "docs/technical-design.md",
-            "the sentence goes out when no live marker `$OWLPOST_HOME/watch/<session id>` exists",
-        ),
-        (
-            "docs/technical-design.md",
-            "so a watch that was never armed or died is asked for again on the next prompt",
-        ),
-        ("docs/technical-design.md", "never on `PostToolUse`."),
-        (
-            "docs/technical-design.md",
-            "`--count --follow` (plain only) is the live watch: with `--session <id>` (`[A-Za-z0-9._-]{1,128}`",
-        ),
-        (
-            "docs/technical-design.md",
-            "`ok binary: <path>` when the first `owl` on `PATH`, canonicalised, is the running file",
-        ),
-        (
-            "docs/technical-design.md",
-            "`rename`s it over the active file — a plain copy fails with",
-        ),
-        (
-            "docs/technical-design.md",
-            "`installed <active>`; a mismatch is a hard error naming both paths",
-        ),
-        ("docs/technical-design.md", "`would replace <active>`"),
-    ] {
-        assert!(repo_file(rel).contains(needle), "{rel} lacks {needle:?}");
+            "e2e-watch-arm",
+        ] {
+            assert!(
+                !text.contains(gone),
+                "{} still contains {gone:?}",
+                path.display()
+            );
+        }
+        if path.starts_with(root.join("plugins/claude-code")) {
+            assert!(
+                !text.contains("Monitor"),
+                "{} still says Monitor",
+                path.display()
+            );
+        }
     }
-    for (rel, gone) in [
-        (
-            "docs/technical-design.md",
-            "--session-start` (the `SessionStart` hook)",
-        ),
-        ("docs/technical-design.md", "poll script one-liner"),
-        ("plugins/claude-code/hooks/hooks.json", "--session-start"),
+    for gone in [
+        "--session-start` (the `SessionStart` hook)",
+        "poll script one-liner",
+        "the template byte-identical to `commands/watch.md`",
+        "so a watch that was never armed or died is asked for again on the next prompt",
+        "OWL-029 per-turn re-arm",
     ] {
-        assert!(!repo_file(rel).contains(gone), "{rel} still says {gone:?}");
+        assert!(!design.contains(gone), "design doc still says {gone:?}");
     }
-    assert!(
-        !repo_file("docs/technical-design.md").contains("arm the inbox watch (see /owlpost:watch)"),
-        "design doc still quotes the OWL-023 pointer sentence"
-    );
+    assert!(!repo_file("plugins/claude-code/hooks/hooks.json").contains("--session-start"));
+}
+
+/// OWL-029 AC5/AC6 doc pins that survive OWL-031: the `owl update` and `owl doctor` binary
+/// sentences in the design doc.
+#[test]
+fn update_and_doctor_docs_name_the_binary_check_and_the_rename() {
+    for needle in [
+        "`ok binary: <path>` when the first `owl` on `PATH`, canonicalised, is the running file",
+        "`rename`s it over the active file — a plain copy fails with",
+        "`installed <active>`; a mismatch is a hard error naming both paths",
+        "`would replace <active>`",
+    ] {
+        assert!(
+            repo_file("docs/technical-design.md").contains(needle),
+            "docs/technical-design.md lacks {needle:?}"
+        );
+    }
 }
 
 /// OWL-030 AC4: the design doc says the unit is rewritten from the path captured before the
@@ -296,38 +393,68 @@ fn update_docs_name_the_captured_path_and_the_bootstrap() {
     }
 }
 
-/// OWL-029 AC7 (data guard): the real-harness proof script exists, is executable, is plain
-/// `sh`, and names the three first prompts, the evidence knobs and the bounds.
+/// OWL-031 AC6 (data guard): the real-harness proof script exists, is executable, is plain
+/// `sh`, uses the stream-json input, drops the record only after the first `result` event
+/// and asserts the `FileChanged` wake followed by a second assistant event; the old
+/// `e2e-watch-arm.sh` is gone.
 #[test]
-fn e2e_watch_arm_script_is_executable_and_names_the_three_prompts() {
+fn e2e_watch_wake_script_is_executable_and_pins_the_flow() {
     use std::os::unix::fs::PermissionsExt;
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/e2e-watch-arm.sh");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    assert!(
+        !root.join("scripts/e2e-watch-arm.sh").exists(),
+        "scripts/e2e-watch-arm.sh must be deleted"
+    );
+    let path = root.join("scripts/e2e-watch-wake.sh");
     let mode = fs::metadata(&path)
         .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
         .permissions()
         .mode();
-    assert_ne!(mode & 0o111, 0, "e2e-watch-arm.sh must be executable");
+    assert_ne!(mode & 0o111, 0, "e2e-watch-wake.sh must be executable");
     let s = fs::read_to_string(&path).unwrap();
     assert!(s.starts_with("#!/bin/sh\n"));
     for needle in [
-        "/owlpost:watch status",
-        "/owlpost:whoami",
-        "what is 2+2? answer with the number only",
+        "--input-format stream-json",
         "--output-format stream-json",
         "--verbose",
-        "--max-turns 6",
-        "timeout 180",
+        "--include-hook-events",
+        "--permission-mode bypassPermissions",
+        "--plugin-dir",
         "E2E_PLUGIN_DIR",
         "E2E_OUT",
-        "--plugin-dir",
         "owl init",
-        "\"description\":\"owlpost inbox\"",
-        "\"name\":\"Monitor\"",
-        "PASS ",
-        "FAIL ",
+        "timeout 180",
+        "Reply with exactly the word: ready",
+        "\"type\":\"result\"",
+        "\"hook_response\"",
+        "\"hook_event\":\"FileChanged\"",
+        "\"exit_code\":2",
+        "owlpost: 1 new question",
+        "\"type\":\"assistant\"",
+        "spool/inbox/",
+        "echo \"PASS",
+        "echo \"FAIL $reason\"",
+        "exit 1",
     ] {
-        assert!(s.contains(needle), "e2e-watch-arm.sh lacks {needle:?}");
+        assert!(s.contains(needle), "e2e-watch-wake.sh lacks {needle:?}");
     }
+    // Order: one user message is sent, the first result event is awaited, only then is the
+    // record dropped into spool/inbox/, then the wake is asserted.
+    let send = s.find("Reply with exactly the word: ready").unwrap();
+    let wait_result = s[send..].find("\"type\":\"result\"").unwrap() + send;
+    let drop = s[wait_result..]
+        .find("mv \"$WORK/$id.json\" \"$HOME_DIR/spool/inbox/$id.json\"")
+        .unwrap()
+        + wait_result;
+    let wake = s[drop..].find("\"hook_event\":\"FileChanged\"").unwrap() + drop;
+    assert!(send < wait_result && wait_result < drop && drop < wake);
+    // Exactly one user message is ever written to the FIFO.
+    assert_eq!(
+        s.matches("\"type\":\"user\"").count(),
+        1,
+        "one user message"
+    );
     let design = repo_file("docs/technical-design.md");
-    assert!(design.contains("`scripts/e2e-watch-arm.sh` (OWL-029)"));
+    assert!(design.contains("`scripts/e2e-watch-wake.sh` (OWL-031)"));
+    assert!(!design.contains("e2e-watch-arm"));
 }
