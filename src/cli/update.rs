@@ -224,7 +224,10 @@ mod tests {
         }
         replace_binary(&active, &built).unwrap();
         assert_eq!(std::fs::read(&active).unwrap(), b"#!/bin/sh\necho new\n");
-        assert!(!active.with_extension("new").exists(), "temp file renamed away");
+        assert!(
+            !active.with_extension("new").exists(),
+            "temp file renamed away"
+        );
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;

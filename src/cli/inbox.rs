@@ -483,7 +483,8 @@ fn count(
             let arm = watch
                 && match session.as_deref() {
                     Some(id) => {
-                        matches!(event, "SessionStart" | "UserPromptSubmit") && !live_watch(home, id)
+                        matches!(event, "SessionStart" | "UserPromptSubmit")
+                            && !live_watch(home, id)
                     }
                     None => session_start,
                 };

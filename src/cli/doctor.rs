@@ -982,11 +982,7 @@ mod tests {
         assert_eq!(ok[0].status, Status::Ok);
         std::fs::write(
             &unit,
-            crate::cli::install::unit_text(
-                crate::cli::install::Os::Linux,
-                &other,
-                Path::new("/h"),
-            ),
+            crate::cli::install::unit_text(crate::cli::install::Os::Linux, &other, Path::new("/h")),
         )
         .unwrap();
         let unit_warn = binary_checks(Some(&path(&[&a])), &current, Some(&unit));
@@ -1017,11 +1013,7 @@ mod tests {
         let plist = dir.path().join("dev.owlpost.owl.plist");
         std::fs::write(
             &plist,
-            crate::cli::install::unit_text(
-                crate::cli::install::Os::MacOs,
-                &other,
-                Path::new("/h"),
-            ),
+            crate::cli::install::unit_text(crate::cli::install::Os::MacOs, &other, Path::new("/h")),
         )
         .unwrap();
         let mac = binary_checks(Some(&path(&[&a])), &current, Some(&plist));
@@ -1035,9 +1027,11 @@ mod tests {
         std::fs::write(&unit, "[Service]\nRestart=always\n").unwrap();
         let junk = binary_checks(Some(&path(&[&a])), &current, Some(&unit));
         assert_eq!(junk[0].status, Status::Ok, "{junk:?}");
-        assert!(binary_checks(None, &current, Some(&unit))
-            .iter()
-            .all(|c| c.status != Status::Fail));
+        assert!(
+            binary_checks(None, &current, Some(&unit))
+                .iter()
+                .all(|c| c.status != Status::Fail)
+        );
     }
 
     #[test]
