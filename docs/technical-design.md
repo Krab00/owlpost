@@ -376,6 +376,10 @@ Answer in at most 300 words.
   `ETXTBSY` while the daemon runs it — then compares the two byte for byte and prints
   `installed <active>`; a mismatch is a hard error naming both paths. Then
   `owl uninstall && owl install` (the unit keeps naming that path) and the plugin steps.
+  The unit is rewritten from the path captured before the replacement (OWL-030): on Linux a
+  running process's own path (`/proc/self/exe`) reads `<path> (deleted)` after a rename over
+  it, and `install::owl_path()` strips that suffix before canonicalising, so `owl doctor` and
+  `owl install` report the real file after an in-place update.
   `--dry-run` prints `would run: …` for the build step, `would replace <active>` and the
   remaining `would run:` lines. `owl doctor`'s `binary` check (§9) reports when `PATH` or the
   unit name another copy.
