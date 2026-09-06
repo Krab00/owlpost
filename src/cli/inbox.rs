@@ -43,12 +43,27 @@ pub struct Opts {
     pub hook_event: String,
 }
 
-/// The second `additionalContext` sentence of the `claude` injection at session start (§9):
-/// the skill arms the Monitor-based inbox watch once when it sees it.
+/// The live-watch poll script, byte-identical to the fenced block in
+/// `plugins/claude-code/commands/watch.md` (OWL-026 AC4; a unit test compares the two). A
+/// macro rather than a `const` so `concat!` can embed it in [`ARM_SENTENCE`]; it is stated
+/// here once and nowhere else in Rust.
+macro_rules! watch_poll_script {
+    () => {
+        r#"prev=""; while true; do cur=$(owl inbox --count --format plain 2>/dev/null || true); [ "$cur" != "$prev" ] && [ -n "$cur" ] && echo "$cur"; prev="$cur"; sleep 5; done"#
+    };
+}
+
 /// Prefix of every counter sentence: incoming messages wear the owl (OWL-027).
 pub const ICON: &str = "🦉 ";
 
-pub const ARM_SENTENCE: &str = "owlpost: arm the inbox watch (see /owlpost:watch)";
+/// The second `additionalContext` sentence of the `claude` injection at session start (§9):
+/// a self-contained imperative (OWL-026) that carries the whole Monitor call, so the first
+/// turn arms the watch without looking anything up — even when that turn is a slash command.
+pub const ARM_SENTENCE: &str = concat!(
+    "owlpost: before handling this prompt, arm the inbox watch once in this session: call Monitor with persistent: true, description \"owlpost inbox\" and this command (one line, verbatim): `",
+    watch_poll_script!(),
+    "`. Then handle the prompt."
+);
 
 /// Closes the session-start preview: the skill runs `/owlpost:inbox` on the first turn.
 pub const OPEN_SENTENCE: &str = "owlpost: run /owlpost:inbox now.";
@@ -414,24 +429,66 @@ mod tests {
         }
     }
 
+    const WATCH_POLL_SCRIPT: &str = watch_poll_script!();
+
+    /// The exact session-start line for `context`: serde's own string escaping, §9 key order.
+    fn session_start_line(context: &str) -> String {
+        format!(
+            r#"{{"hookSpecificOutput":{{"hookEventName":"SessionStart","additionalContext":{}}}}}"#,
+            serde_json::to_string(context).unwrap()
+        )
+    }
+
+    #[test]
+    fn arm_sentence_is_self_contained_and_embeds_the_poll_script() {
+        // OWL-026 AC1: the required fragments, in one imperative sentence.
+        assert!(ARM_SENTENCE.starts_with("owlpost: before handling this prompt"));
+        for needle in [
+            "persistent: true",
+            "description \"owlpost inbox\"",
+            WATCH_POLL_SCRIPT,
+        ] {
+            assert!(
+                ARM_SENTENCE.contains(needle),
+                "ARM_SENTENCE lacks {needle:?}"
+            );
+        }
+        assert!(!ARM_SENTENCE.contains('\n'), "one line");
+        // OWL-026 AC4: the script is stated once here and once in commands/watch.md; the two
+        // are byte-identical (the fenced block holds exactly one line starting `prev="";`).
+        let md = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/plugins/claude-code/commands/watch.md"
+        ))
+        .unwrap();
+        let in_md: Vec<&str> = md
+            .lines()
+            .filter(|l| l.starts_with(r#"prev="";"#))
+            .collect();
+        assert_eq!(in_md, vec![WATCH_POLL_SCRIPT]);
+    }
+
     #[test]
     fn arm_sentence_is_claude_only_and_stands_alone_at_zero() {
-        const ARMED_TWO: &str = r#"{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"🦉 owlpost: 2 new questions (Maciek 2). Say \"show owlpost inbox\" or run `owl inbox`. owlpost: arm the inbox watch (see /owlpost:watch)"}}"#;
-        const ARMED_ZERO: &str = r#"{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"owlpost: arm the inbox watch (see /owlpost:watch)"}}"#;
-        assert_eq!(
-            ARM_SENTENCE,
-            "owlpost: arm the inbox watch (see /owlpost:watch)"
-        );
         let p = peers(&[("Maciek", 2)]);
         // Counter + arm, one space between the two sentences, counter text unchanged.
+        let two = injection(Format::Claude, &p, 0, true, &[], "SessionStart").unwrap();
         assert_eq!(
-            injection(Format::Claude, &p, 0, true, &[], "SessionStart").unwrap(),
-            ARMED_TWO
+            two,
+            session_start_line(&format!("{} {ARM_SENTENCE}", sentence(&p, 0)))
+        );
+        // Valid JSON despite the `"` and `$` in the script, with the sentence intact.
+        let v: serde_json::Value = serde_json::from_str(&two).unwrap();
+        assert_eq!(
+            v,
+            json!({"hookSpecificOutput": {"hookEventName": "SessionStart",
+                "additionalContext": format!("{} {ARM_SENTENCE}", sentence(&p, 0))}})
         );
         // Zero unseen + arm: the arm sentence alone, in the same JSON shape.
+        let zero = session_start_line(ARM_SENTENCE);
         assert_eq!(
             injection(Format::Claude, &[], 0, true, &[], "SessionStart").unwrap(),
-            ARMED_ZERO
+            zero
         );
         assert_eq!(
             injection(
@@ -443,7 +500,7 @@ mod tests {
                 "SessionStart"
             )
             .unwrap(),
-            ARMED_ZERO
+            zero
         );
         // Every other format ignores `arm`: same as without, nothing at zero.
         for f in [Format::Plain, Format::Codex, Format::Kimi] {

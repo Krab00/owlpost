@@ -111,10 +111,13 @@ sentence is the instruction. Then handle the user's prompt.
 
 ## Live watch
 
-The `SessionStart` hook may inject `owlpost: arm the inbox watch (see /owlpost:watch)`
-next to the counter. When it does, arm the watch once per session, on the first turn,
+The `SessionStart` hook may inject a sentence starting `owlpost: before handling this prompt`
+next to the counter. It is self-contained and imperative: it carries the whole Monitor call.
+When it is there, arm the watch once per session, on the first turn,
 silently: one `Monitor` call with `persistent: true`, description "owlpost inbox", running
-the poll script from `commands/watch.md`. Do not mention the arming to the user, and
+the poll script from `commands/watch.md` (the same script is in the sentence).
+Arm it on the first turn even when that turn is a slash command such as `/owlpost:watch status`; the sentence is an instruction, not background context.
+Do not mention the arming to the user, and
 never arm a second watch in the same session. No sentence means the user switched it off
 with `/owlpost:watch off`; do not arm it then.
 
@@ -124,6 +127,7 @@ with `/owlpost:watch off`; do not arm it then.
   of a watch event. Nothing is opened, drafted or sent without the human's pick.
 - `/owlpost:watch off` stops it for this session and later ones, `/owlpost:watch on`
   restores it, `/owlpost:watch status` reports both.
+- `/owlpost:watch status` arms the watch when the default is on and none runs in this session.
 
 ## The answer loop
 
