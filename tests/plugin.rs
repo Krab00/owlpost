@@ -414,6 +414,28 @@ fn skill_has_frontmatter_and_required_strings() {
             "SKILL.md Live watch lacks {needle:?}"
         );
     }
+    // User rule (2026-09-06): received messages are one table, time + peer left, text right,
+    // last 24 hours, at most the 10 newest; inbox.md and history.md point at it.
+    let showing = section(&body, "## Showing messages");
+    for needle in [
+        "the left column is the local time (`HH:MM`) and the peer's name",
+        "the right column the",
+        "message text verbatim",
+        "last 24 hours, at most the 10 newest",
+        "how many older ones were left",
+    ] {
+        assert!(
+            showing.contains(needle),
+            "SKILL.md Showing messages lacks {needle:?}"
+        );
+    }
+    for file in ["commands/inbox.md", "commands/history.md"] {
+        let (_, b) = frontmatter(file);
+        assert!(
+            b.contains("\"Showing messages\"") && b.contains("at most the 10 newest"),
+            "{file} does not point at the message table rule"
+        );
+    }
     assert!(body.contains("owlpost:<peer>"));
     assert!(
         body.contains("Sending anything to a peer requires explicit human approval."),
