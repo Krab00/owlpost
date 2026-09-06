@@ -122,7 +122,7 @@ never arm a second watch in the same session. No sentence means the user switche
 with `/owlpost:watch off`; do not arm it then.
 
 - On a watch event, report it in one line, built from the counter, for example
-  `owlpost: 1 new answer from Maciek`, and offer `/owlpost:inbox`.
+  `🦉 owlpost: 1 new answer from Maciek`, and offer `/owlpost:inbox`.
 - The watch is a counter only: never list the inbox, show, draft or send anything because
   of a watch event. Nothing is opened, drafted or sent without the human's pick.
 - `/owlpost:watch off` stops it for this session and later ones, `/owlpost:watch on`
