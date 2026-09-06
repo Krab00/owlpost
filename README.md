@@ -6,9 +6,10 @@ with a human approving every answer that leaves their machine.
 `owl ask maciek src/auth/session.rs "why is the refresh token rotated on every read?"`
 
 The question travels over mutual-TLS to Maciek's laptop, lands in his inbox, and (after he
-approves, or automatically for trusted peers) a **read-only** headless session of his own
-coding agent answers from his repo checkout and project notes. The answer comes back to your
-inbox and into your agent's memory. No central server, no shared memory, no bug tracker.
+approves — one `Draft & send` pick in `/owlpost:inbox` — or automatically for trusted peers)
+a **read-only** headless session of his own coding agent answers from his repo checkout and
+project notes. The answer comes back to your inbox and into your agent's memory. No central
+server, no shared memory, no bug tracker.
 
 Works across harnesses: Claude Code first, Codex / Kimi Code / opencode next.
 
