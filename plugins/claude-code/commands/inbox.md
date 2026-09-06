@@ -82,7 +82,9 @@ Never chain `owl draft` and `owl send` in one step.
 
 ## 5. `answer` records (a peer answered a question asked from here)
 
-Run `owl show <id>` and print the answer verbatim in a code block, with the peer name and
-the question it replies to. Then apply the memory rule from the owlpost skill: only when the
-human accepts the answer, save it as a `reference` fact with provenance
-`owlpost:<peer>:<question id>` and today's date.
+Run `owl show <id>` for each answer and show them all in one table (see the owlpost skill,
+"Showing messages"): left column the local time and the peer name, right column the answer
+verbatim, newest last, only the last 24 hours and at most the 10 newest; name the question
+each one replies to above the table or in the left cell. Then apply the memory rule from the
+owlpost skill: only when the human accepts an answer, save it as a `reference` fact with
+provenance `owlpost:<peer>:<question id>` and today's date.

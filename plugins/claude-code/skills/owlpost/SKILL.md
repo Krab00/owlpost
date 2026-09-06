@@ -156,6 +156,18 @@ Every step needs the human's go-ahead before moving to the next one.
 Never chain `owl draft` and `owl send` in one step. Never send a draft the human has not
 seen in full.
 
+## Showing messages
+
+Received messages (answers from peers, history rows) are shown as one table, newest last:
+the left column is the local time (`HH:MM`) and the peer's name, the right column the
+message text verbatim (no paraphrase; escape `|` inside a cell). Show only messages from
+the last 24 hours, at most the 10 newest; say in one line how many older ones were left
+out, and show them only when the human asks for them. Questions and drafts that wait for a
+decision are still printed in full, in a code block (see the answer loop).
+
+| 00:21 · Krzysztof Abramczyk | Pewnie koło 22. |
+|---|---|
+
 ## Memory rule
 
 When the human accepts an answer that came back from a peer (via `owl ask --wait`, or a
