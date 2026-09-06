@@ -29,13 +29,11 @@ const CLAUDE_TWO: &str = r#"{"hookSpecificOutput":{"hookEventName":"UserPromptSu
 const SENTENCE_TWO: &str =
     "🦉 owlpost: 2 new questions (Maciek 2). Say \"show owlpost inbox\" or run `owl inbox`.";
 const FORMATS: [&str; 4] = ["plain", "claude", "codex", "kimi"];
-/// OWL-023 AC1 / OWL-026 AC1: the arm sentence alone (0 unseen) and after the counter
-/// (2 unseen). The sentence is self-contained: it embeds the poll script verbatim.
-const ARM: &str = concat!(
-    "owlpost: before handling this prompt, arm the inbox watch once in this session: call Monitor with persistent: true, description \"owlpost inbox\" and this command (one line, verbatim): `",
-    r#"prev=""; while true; do cur=$(owl inbox --count --format plain 2>/dev/null || true); [ "$cur" != "$prev" ] && [ -n "$cur" ] && echo "$cur"; prev="$cur"; sleep 5; done"#,
-    "`. Then handle the prompt."
-);
+/// OWL-023 AC1 / OWL-026 AC1 / OWL-029: the arm sentence alone (0 unseen) and after the
+/// counter (2 unseen). The sentence is self-contained: it embeds the follow command. Without
+/// hook input on stdin (every call here) there is no session id, so the command is bare and
+/// the old rule holds: `SessionStart` only. `tests/follow.rs` covers the stdin path.
+const ARM: &str = "owlpost: before handling this prompt, arm the inbox watch for this session: call Monitor with persistent: true, description \"owlpost inbox\" and this command (verbatim): `owl inbox --count --follow`. Then handle the prompt.";
 const PREVIEW_TWO: &str = "- Maciek question [pending] on src/auth/session.rs: Why is the refresh token rotated?\n- Maciek question [consent] on src/auth/session.rs: Where is the retry policy?\nowlpost: run /owlpost:inbox now.";
 
 /// The exact SessionStart line for `context`: serde's own escaping, §9 key order.
@@ -317,8 +315,9 @@ fn count_and_formats() {
 
 // ---------------------------------------------------------------- OWL-023 AC1
 
-/// `--session-start` adds the arm sentence to `--format claude` unless `plugin.json` says
-/// `{"watch": false}`; every other invocation is byte-identical to the plain one.
+/// `--hook-event SessionStart` adds the arm sentence to `--format claude` unless
+/// `plugin.json` says `{"watch": false}`; every other invocation is byte-identical to the
+/// plain one.
 #[test]
 fn session_start_arms_the_watch_unless_plugin_json_says_off() {
     let h = Home::new();
@@ -331,7 +330,6 @@ fn session_start_arms_the_watch_unless_plugin_json_says_off() {
         "claude",
         "--hook-event",
         "SessionStart",
-        "--session-start",
     ];
 
     // Absent plugin.json, 0 unseen: nothing without the flag, the arm line alone with it.
@@ -383,14 +381,28 @@ fn session_start_arms_the_watch_unless_plugin_json_says_off() {
     assert_eq!(h.ok(&claude_ss), format!("{}\n", claude_arm_zero()));
     std::fs::remove_file(&plugin_json).unwrap();
 
-    // Every other format ignores the flag, at 2 unseen and at 0.
+    // Every other format ignores the event, at 2 unseen and at 0.
     h.put(&h.ana, "one more?", "pending");
     h.put(&h.ana, "and another?", "pending");
     for f in ["plain", "codex", "kimi"] {
         let without = h.ok(&["inbox", "--count", "--format", f]);
         assert!(!without.contains(ARM), "{f}: {without}");
+        assert!(!without.contains("--follow"), "{f}: {without}");
+        let ss = [
+            "inbox",
+            "--count",
+            "--format",
+            f,
+            "--hook-event",
+            "SessionStart",
+        ];
+        let at_start = h.ok(&ss);
+        assert!(at_start.contains("2 new questions (Ana 2)"), "{f}: {at_start}");
+        assert!(!at_start.contains(ARM), "{f}: {at_start}");
+        assert!(!at_start.contains("--follow"), "{f}: {at_start}");
+        // Only the echoed hookEventName may differ (codex shares the JSON shape).
         assert_eq!(
-            h.ok(&["inbox", "--count", "--format", f, "--session-start"]),
+            at_start.replace("SessionStart", "UserPromptSubmit"),
             without,
             "{f}"
         );
@@ -398,20 +410,28 @@ fn session_start_arms_the_watch_unless_plugin_json_says_off() {
     h.ok(&["inbox"]);
     for f in ["plain", "codex", "kimi"] {
         assert_eq!(
-            h.run(&["inbox", "--count", "--format", f, "--session-start"]),
+            h.run(&[
+                "inbox",
+                "--count",
+                "--format",
+                f,
+                "--hook-event",
+                "SessionStart"
+            ]),
             (0, String::new(), String::new()),
             "{f}"
         );
     }
-    // Without `--format` (plain count, `--json`) and without `--count` (a listing) the flag
-    // is accepted and changes nothing.
-    assert_eq!(h.ok(&["inbox", "--count", "--session-start"]), "0\n");
+    // Without `--format` (plain count, `--json`) and without `--count` (a listing) the
+    // event is accepted and changes nothing.
+    let ss = ["--hook-event", "SessionStart"];
+    assert_eq!(h.ok(&["inbox", "--count", ss[0], ss[1]]), "0\n");
     assert_eq!(
-        h.ok(&["--json", "inbox", "--count", "--session-start"]),
+        h.ok(&["--json", "inbox", "--count", ss[0], ss[1]]),
         h.ok(&["--json", "inbox", "--count"])
     );
-    assert_eq!(h.ok(&["inbox", "--session-start"]), h.ok(&["inbox"]));
-    assert!(!h.ok(&["inbox", "--session-start"]).contains(ARM));
+    assert_eq!(h.ok(&["inbox", ss[0], ss[1]]), h.ok(&["inbox"]));
+    assert!(!h.ok(&["inbox", ss[0], ss[1]]).contains(ARM));
 }
 
 #[test]

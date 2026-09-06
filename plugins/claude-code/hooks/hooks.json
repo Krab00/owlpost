@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/owl-count.sh --hook-event SessionStart --session-start",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/owl-count.sh --hook-event SessionStart",
             "timeout": 5
           }
         ]

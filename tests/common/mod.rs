@@ -264,7 +264,8 @@ pub async fn assert_error(
 
 /// A fake `claude` (and `cargo`) on a temp `PATH` for the `owl setup` / `owl update` /
 /// `owl doctor` MCP registration tests: every call appends `<name> <argv>` to `calls.log`
-/// and exits 0, except `claude mcp get owl`, which exits `get_exit` (0 = registered).
+/// and exits 0, except `claude mcp get owl`, which exits `get_exit` (0 = registered). A call
+/// carrying `--root <dir>` (`cargo install`) leaves `fake owl` at `<dir>/bin/owl` (OWL-029).
 /// Returns the bin directory (to be the whole `PATH`) and the log path.
 pub fn fake_claude(dir: &Path, get_exit: i32) -> (std::path::PathBuf, std::path::PathBuf) {
     let bin = dir.join("bin");
@@ -276,7 +277,10 @@ pub fn fake_claude(dir: &Path, get_exit: i32) -> (std::path::PathBuf, std::path:
             &script,
             format!(
                 "#!/bin/sh\necho \"{name} $*\" >> '{}'\n\
-                 [ \"$1 $2 $3\" = \"mcp get owl\" ] && exit {get_exit}\nexit 0\n",
+                 [ \"$1 $2 $3\" = \"mcp get owl\" ] && exit {get_exit}\n\
+                 root=''; while [ $# -gt 0 ]; do [ \"$1\" = --root ] && root=\"$2\"; shift; done\n\
+                 [ -z \"$root\" ] || {{ /bin/mkdir -p \"$root/bin\" && printf 'fake owl\\n' > \"$root/bin/owl\"; }}\n\
+                 exit 0\n",
                 log.display()
             ),
         )

@@ -19,6 +19,8 @@ fn owl(home: &Path, user_home: &Path, bin: &Path) -> Command {
     c.env_remove("OWLPOST_HOME")
         .env("HOME", user_home)
         .env("OWLPOST_INSTALL_NO_LOAD", "1")
+        // OWL-029: `owl update` replaces this file instead of the test binary.
+        .env("OWLPOST_UPDATE_ACTIVE", user_home.join("active-owl"))
         .env("PATH", bin)
         .arg("--home")
         .arg(home);
@@ -40,6 +42,8 @@ fn run(args: &[&str], get_exit: i32) -> (String, Vec<String>) {
     let user_home = dir.path().join("user");
     std::fs::create_dir_all(&user_home).unwrap();
     let (bin, log) = fake_claude(dir.path(), get_exit);
+    let active = user_home.join("active-owl");
+    std::fs::write(&active, "old owl\n").unwrap();
     let out = owl(&home, &user_home, &bin).args(args).output().unwrap();
     let (stdout, stderr) = text(&out);
     assert!(
@@ -47,7 +51,22 @@ fn run(args: &[&str], get_exit: i32) -> (String, Vec<String>) {
         "{args:?}: exit {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
         out.status
     );
-    (stdout, fake_calls(&log))
+    if args[0] == "update" && !args.contains(&"--dry-run") {
+        // OWL-029 AC1: the active file now holds the fake build, and the line says so.
+        assert_eq!(std::fs::read_to_string(&active).unwrap(), "fake owl\n");
+        assert!(
+            stdout.contains(&format!("installed {}\n", active.display())),
+            "{stdout}"
+        );
+    } else {
+        assert_eq!(std::fs::read_to_string(&active).unwrap(), "old owl\n");
+    }
+    // The build root is a fresh temp dir per run: strip it so the calls compare exactly.
+    let calls = fake_calls(&log)
+        .into_iter()
+        .map(|c| c.split(" --root ").next().unwrap().to_string())
+        .collect();
+    (stdout, calls)
 }
 
 const SETUP_PLUGIN: [&str; 2] = [
@@ -72,6 +91,16 @@ fn expected(binary: &[&str], plugin: &[&str], tail: &[&str]) -> Vec<String> {
 }
 
 const UPDATE_BINARY: [&str; 1] = ["cargo install --path /repo --locked"];
+
+/// The path a `would replace <path>` line names (the `OWLPOST_UPDATE_ACTIVE` file).
+fn stdout_active(stdout: &str) -> String {
+    let line = stdout
+        .lines()
+        .find(|l| l.starts_with("would replace "))
+        .unwrap_or_else(|| panic!("no would replace line in {stdout}"));
+    assert!(line.ends_with("/user/active-owl"), "{line}");
+    line["would replace ".len()..].to_string()
+}
 
 const SETUP: [&str; 3] = ["setup", "--plugin-source", "/repo/plugins/claude-code"];
 const UPDATE: [&str; 3] = ["update", "--source", "/repo"];
@@ -161,7 +190,8 @@ fn update_dry_run_prints_the_registration_and_runs_nothing() {
     assert_eq!(
         lines,
         [
-            "would run: cargo install --path /repo --locked",
+            "would run: cargo install --path /repo --locked --root <tmpdir>",
+            &format!("would replace {}", stdout_active(&stdout)),
             "would run: owl uninstall && owl install",
             "would run: claude plugin marketplace update owlpost-local",
             "would run: claude plugin uninstall owlpost@owlpost-local",
