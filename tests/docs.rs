@@ -188,17 +188,25 @@ fn watch_status_arms_and_docs_quote_the_arm_prefix() {
         .and_then(|s| s.split("\n## ").next())
         .expect("watch.md status section");
     assert!(
-        status.lines().any(|l| l == "4. When no \"owlpost inbox\" watch runs in this session and the stored default is on, arm it exactly as `on` does (same `Monitor` call, same script) and say `owlpost watch: running; default on` instead."),
+        status.lines().any(|l| l == "4. When no \"owlpost inbox\" watch runs in this session and the stored default is on, arm it exactly as `on` does (same `Monitor` call, the command from this turn's sentence) and say `owlpost watch: running; default on` instead."),
         "watch.md status lacks the arming line"
     );
     for (rel, needle) in [
         (
             "plugins/claude-code/README.md",
-            "`status` reports both and arms the watch when the default is on and none runs; the `SessionStart` hook injects a self-contained arm instruction starting `owlpost: before handling this prompt`",
+            "`status` reports both and arms the watch when the default is on and none runs; the `SessionStart` and `UserPromptSubmit` hooks inject a self-contained arm instruction starting `owlpost: before handling this prompt` whenever no watch is live for the session (a running watch leaves its pid in `$OWLPOST_HOME/watch/<session id>`)",
         ),
         (
             "plugins/claude-code/skills/owlpost/SKILL.md",
             "`/owlpost:watch status` arms the watch when the default is on and none runs in this session.",
+        ),
+        (
+            "plugins/claude-code/skills/owlpost/SKILL.md",
+            "whenever it is present, arm",
+        ),
+        (
+            "plugins/claude-code/commands/watch.md",
+            "it arms on your next prompt",
         ),
         (
             "docs/technical-design.md",
@@ -206,13 +214,86 @@ fn watch_status_arms_and_docs_quote_the_arm_prefix() {
         ),
         (
             "docs/technical-design.md",
-            "quotes the poll script one-liner byte-identical to `commands/watch.md`",
+            "the template byte-identical to `commands/watch.md`",
         ),
+        // OWL-029 AC5: §9 describes the marker and the per-turn re-arm, §11 the update.
+        (
+            "docs/technical-design.md",
+            "the sentence goes out when no live marker `$OWLPOST_HOME/watch/<session id>` exists",
+        ),
+        (
+            "docs/technical-design.md",
+            "so a watch that was never armed or died is asked for again on the next prompt",
+        ),
+        ("docs/technical-design.md", "never on `PostToolUse`."),
+        (
+            "docs/technical-design.md",
+            "`--count --follow` (plain only) is the live watch: with `--session <id>` (`[A-Za-z0-9._-]{1,128}`",
+        ),
+        (
+            "docs/technical-design.md",
+            "`ok binary: <path>` when the first `owl` on `PATH`, canonicalised, is the running file",
+        ),
+        (
+            "docs/technical-design.md",
+            "`rename`s it over the active file — a plain copy fails with",
+        ),
+        (
+            "docs/technical-design.md",
+            "`installed <active>`; a mismatch is a hard error naming both paths",
+        ),
+        ("docs/technical-design.md", "`would replace <active>`"),
     ] {
         assert!(repo_file(rel).contains(needle), "{rel} lacks {needle:?}");
+    }
+    for (rel, gone) in [
+        (
+            "docs/technical-design.md",
+            "--session-start` (the `SessionStart` hook)",
+        ),
+        ("docs/technical-design.md", "poll script one-liner"),
+        ("plugins/claude-code/hooks/hooks.json", "--session-start"),
+    ] {
+        assert!(!repo_file(rel).contains(gone), "{rel} still says {gone:?}");
     }
     assert!(
         !repo_file("docs/technical-design.md").contains("arm the inbox watch (see /owlpost:watch)"),
         "design doc still quotes the OWL-023 pointer sentence"
     );
+}
+
+/// OWL-029 AC7 (data guard): the real-harness proof script exists, is executable, is plain
+/// `sh`, and names the three first prompts, the evidence knobs and the bounds.
+#[test]
+fn e2e_watch_arm_script_is_executable_and_names_the_three_prompts() {
+    use std::os::unix::fs::PermissionsExt;
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/e2e-watch-arm.sh");
+    let mode = fs::metadata(&path)
+        .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+        .permissions()
+        .mode();
+    assert_ne!(mode & 0o111, 0, "e2e-watch-arm.sh must be executable");
+    let s = fs::read_to_string(&path).unwrap();
+    assert!(s.starts_with("#!/bin/sh\n"));
+    for needle in [
+        "/owlpost:watch status",
+        "/owlpost:whoami",
+        "what is 2+2? answer with the number only",
+        "--output-format stream-json",
+        "--verbose",
+        "--max-turns 6",
+        "timeout 180",
+        "E2E_PLUGIN_DIR",
+        "E2E_OUT",
+        "--plugin-dir",
+        "owl init",
+        "\"description\":\"owlpost inbox\"",
+        "\"name\":\"Monitor\"",
+        "PASS ",
+        "FAIL ",
+    ] {
+        assert!(s.contains(needle), "e2e-watch-arm.sh lacks {needle:?}");
+    }
+    let design = repo_file("docs/technical-design.md");
+    assert!(design.contains("`scripts/e2e-watch-arm.sh` (OWL-029)"));
 }

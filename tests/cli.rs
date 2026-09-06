@@ -735,9 +735,45 @@ fn update_dry_run_lists_steps() {
         .unwrap();
     assert!(out.status.success());
     let s = String::from_utf8_lossy(&out.stdout);
-    assert!(s.contains("cargo install --path /repo --locked"), "{s}");
+    assert!(
+        s.contains("cargo install --path /repo --locked --root <tmpdir>"),
+        "{s}"
+    );
+    // OWL-029 AC1: the file to be replaced is the running binary, named before the unit step.
+    let me = std::fs::canonicalize(env!("CARGO_BIN_EXE_owl")).unwrap();
+    assert!(
+        s.contains(&format!("would replace {}\n", me.display())),
+        "{s}"
+    );
+    assert!(
+        s.find("would replace").unwrap() < s.find("owl uninstall && owl install").unwrap(),
+        "{s}"
+    );
     assert!(s.contains("owl uninstall && owl install"), "{s}");
+    // `OWLPOST_UPDATE_ACTIVE`: empty means unset (the running binary), a path is used as is.
+    let out = owl()
+        .env("OWLPOST_UPDATE_ACTIVE", "")
+        .args(["update", "--dry-run", "--source", "/repo"])
+        .output()
+        .unwrap();
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        s.contains(&format!("would replace {}\n", me.display())),
+        "{s}"
+    );
+    let out = owl()
+        .env("OWLPOST_UPDATE_ACTIVE", "/elsewhere/owl")
+        .args(["update", "--dry-run", "--source", "/repo"])
+        .output()
+        .unwrap();
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("would replace /elsewhere/owl\n"), "{s}");
     let out = owl().args(["update", "--dry-run"]).output().unwrap();
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(s.contains("install.sh -o"), "{s}");
+    assert!(s.contains("--prefix \"<tmpdir>\""), "{s}");
+    assert!(
+        s.contains(&format!("would replace {}\n", me.display())),
+        "{s}"
+    );
 }

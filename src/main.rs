@@ -81,8 +81,16 @@ enum Cmd {
         all: bool,
         #[arg(long)]
         format: Option<String>,
-        /// Add the owlpost watch arm sentence to `--count --format claude` (plugin SessionStart hook)
-        #[arg(long)]
+        /// Poll the count every 5 s (OWLPOST_FOLLOW_SECS) and print the counter sentence when it changes
+        #[arg(long, requires = "count", conflicts_with = "format")]
+        follow: bool,
+        /// Session id of the `--follow` marker $OWLPOST_HOME/watch/<ID>
+        #[arg(long, requires = "follow", value_name = "ID", value_parser = cli::inbox::parse_session_id)]
+        session: Option<String>,
+        // ponytail: accepted and ignored so a not-yet-reinstalled OWL-023 plugin (hooks.json
+        // still passing `--session-start`) keeps working with this binary; drop it once every
+        // machine has run `owl update`.
+        #[arg(long, hide = true)]
         session_start: bool,
         /// Claude Code hook event name echoed in the `--format claude` line (hookEventName)
         #[arg(long, default_value = "UserPromptSubmit")]
@@ -314,7 +322,9 @@ fn main() -> ExitCode {
             new,
             all,
             format,
-            session_start,
+            follow,
+            session,
+            session_start: _,
             hook_event,
         } => cli::inbox::run(
             &home,
@@ -324,7 +334,8 @@ fn main() -> ExitCode {
                 all,
                 format,
                 json: cli.json,
-                session_start,
+                follow,
+                session,
                 hook_event,
             },
         ),

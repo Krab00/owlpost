@@ -57,6 +57,7 @@ plugins/
   claude-code/       hooks.json, skills/owlpost/SKILL.md, commands/*.md, .claude-plugin/plugin.json
 scripts/
   e2e-real.sh        two daemons + a real harness (claude|codex|opencode) selected by $OWL_HARNESS
+  e2e-watch-arm.sh   three `claude -p` first prompts; proves the plugin arms the inbox watch (marker + Monitor)
   install.sh         curl | sh installer (release task)
 ```
 
@@ -287,7 +288,7 @@ unavailable, `3` rate limited, `4` nothing to do (e.g. `watch` timeout).
 | `owl deny <peer>` | policy `never` |
 | `owl ask <peer> [path] "<question>" [--project <id>] [--wait <secs>] [--no-cache]` | send a question; the path is optional (a repo-level question sends no `body.path`); prints answer (cache/`200`/`--wait`) or `accepted <id>` |
 | `owl ask --file <path> "<question>"` | propose peers from `git blame` (top 3 by line share matched to contact emails); interactive pick, or `--json` list |
-| `owl inbox [--count] [--new] [--all] [--format plain\|claude\|codex\|kimi] [--session-start]` | list / count; `--format` emits the harness injection shape, empty output when count is 0; `--hook-event <NAME>` (default `UserPromptSubmit`) is echoed as `hookEventName`, which Claude Code requires to match the firing event; `--session-start` (the plugin's `SessionStart` hook only) adds the arm sentence to `--format claude` unless `$OWLPOST_HOME/plugin.json` has `{"watch": false}`, ignored by every other format and without `--count --format` |
+| `owl inbox [--count] [--new] [--all] [--format plain\|claude\|codex\|kimi] [--follow [--session <id>]]` | list / count; `--format` emits the harness injection shape, empty output when count is 0; `--hook-event <NAME>` (default `UserPromptSubmit`) is echoed as `hookEventName`, which Claude Code requires to match the firing event; `--count --format claude` reads the hook input JSON on stdin (when stdin is not a terminal) and takes `session_id` from it; `--count --follow` (plain only) is the live watch: with `--session <id>` (`[A-Za-z0-9._-]{1,128}`, anything else is a clap usage error, exit 2) it writes its pid to `$OWLPOST_HOME/watch/<id>`, polls the count every 5 s (`OWLPOST_FOLLOW_SECS`, fractions allowed), prints the counter sentence only when it changed and nothing at zero, never marks anything seen, and ends — removing the marker — when the marker is removed from outside or its stdout is closed; `--session-start` is accepted and ignored (OWL-023 plugins not yet reinstalled) |
 | `owl show <id\|all>` | full content, marks seen |
 | `owl draft <id> [--harness <name>]` | run the responder, store and print the draft |
 | `owl edit <id>` | open the draft in `$EDITOR` |
@@ -298,7 +299,7 @@ unavailable, `3` rate limited, `4` nothing to do (e.g. `watch` timeout).
 | `owl daemon [--foreground]` | run the listener + loops |
 | `owl install \| uninstall` | launchd plist (`~/Library/LaunchAgents/dev.owlpost.owl.plist`) or systemd user unit; start/stop |
 | `owl mcp` | MCP server over stdio (JSON-RPC 2.0, one object per line): the merged contact book as resources only (no tools, no prompts), one per contact, URI `to://<name-slug>.<first e-mail>` (`to://<name-slug>` without e-mail, `.<fingerprint without owl:>` appended on a collision), `resources/read` → `{"name","fingerprint","emails"}`; the book is re-read per request; registered in Claude Code at user scope by `owl setup` / `owl update` (`claude mcp add --scope user owl -- owl mcp`, skipped with `mcp server owl already registered` when `claude mcp get owl` succeeds) for `@owl:to://…` mentions, checked by `owl doctor` |
-| `owl doctor` | check key, config, endpoints resolve (`ok endpoints: none configured (peers reach this daemon over iroh)` when empty), harness binaries present, daemon reachable, iroh (`ok iroh: <id short>, relay <url>` when the card reports a connected relay, `warn iroh: bound, no relay` when it does not, `warn iroh: unknown (daemon unreachable)` without a card), mcp (`ok mcp: owl registered in Claude Code (user scope)` when `claude mcp get owl` exits 0, `warn mcp: claude not on PATH`, else `warn` ending with the fix `claude mcp add --scope user owl -- owl mcp`; never `fail`) |
+| `owl doctor` | check key, config, endpoints resolve (`ok endpoints: none configured (peers reach this daemon over iroh)` when empty), harness binaries present, daemon reachable, iroh (`ok iroh: <id short>, relay <url>` when the card reports a connected relay, `warn iroh: bound, no relay` when it does not, `warn iroh: unknown (daemon unreachable)` without a card), mcp (`ok mcp: owl registered in Claude Code (user scope)` when `claude mcp get owl` exits 0, `warn mcp: claude not on PATH`, else `warn` ending with the fix `claude mcp add --scope user owl -- owl mcp`; never `fail`); binary (OWL-029: `ok binary: <path>` when the first `owl` on `PATH`, canonicalised, is the running file and the daemon unit — when installed — names it; otherwise one `warn` per mismatch, `warn binary: PATH resolves <p>, this owl is <q>` / `warn binary: no owl on PATH, this owl is <q>` and `warn binary: daemon unit runs <r>`; never `fail`) |
 
 Hook injection formats for `owl inbox --count --format …` (exact):
 
@@ -306,16 +307,24 @@ Hook injection formats for `owl inbox --count --format …` (exact):
   (unseen answers count as `N new answer(s)`; a mix reads `2 new questions, 1 new answer`)
 - `codex`: same JSON shape.
 - `kimi` / `plain`: the sentence alone.
-- `claude` with `--session-start` (the `SessionStart` hook): the `additionalContext` gains a second
-  sentence starting `owlpost: before handling this prompt` (OWL-026: a self-contained
+- `claude` on `--hook-event SessionStart` and `UserPromptSubmit` (OWL-029 per-turn re-arm):
+  the `additionalContext` gains a second sentence starting `owlpost: before handling this prompt` (OWL-026: a self-contained
   imperative that names the Monitor call — `persistent: true`, description `"owlpost inbox"` —
-  and quotes the poll script one-liner byte-identical to `commands/watch.md`), after the
-  counter sentence and one space; at count 0 the line is emitted with the arm sentence alone
+  and quotes the follow command `owl inbox --count --follow --session <session id>` with the
+  id filled in, the template byte-identical to `commands/watch.md`), after the counter
+  sentence and one space; at count 0 the line is emitted with the arm sentence alone
   (`{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"owlpost: before handling this prompt, …"}}`).
+  The session id comes from the hook input JSON on stdin (`session_id`; a terminal, empty or
+  unparseable stdin, or an id outside `[A-Za-z0-9._-]{1,128}` means none). With a session id
+  the sentence goes out when no live marker `$OWLPOST_HOME/watch/<session id>` exists — the
+  running `--follow` writes its pid there, a marker whose pid is dead is removed and counts as
+  absent — so a watch that was never armed or died is asked for again on the next prompt;
+  never on `PostToolUse`. Without a session id it goes out on `SessionStart` only (old rule)
+  and quotes the command without `--session`.
   The sentence is skipped when `$OWLPOST_HOME/plugin.json` reads `{"watch": false}`; an
   absent file, unparseable JSON or a missing `watch` key mean on. `/owlpost:watch on|off`
   writes that file; nothing else in `owl` reads or writes it.
-- `claude` with `--session-start` and unseen records: after the counter (and arm sentence) the
+- `claude` on `--hook-event SessionStart` with unseen records: after the counter (and arm sentence) the
   `additionalContext` continues with one line per unseen record,
   `- <peer> <kind> [<state>] on <path>: <first line, 200 chars>` (` on <path>` omitted for
   whole-repo questions and answers), then `owlpost: run /owlpost:inbox now.` — the skill
@@ -358,6 +367,18 @@ Answer in at most 300 words.
 - Text never includes the question body — only "<name> asks about <path>" or "answer from <name>".
 - `owl install` writes the launchd plist / systemd unit running `owl daemon` with the current
   home, loads it, and prints the status. `--dry-run` prints the unit instead.
+- `owl update [--source <dir>] [--dry-run]` (OWL-029) first resolves the running binary
+  (`install::owl_path()`, the canonicalised `current_exe`; test hook `OWLPOST_UPDATE_ACTIVE`
+  names another file), builds or downloads the new one into a private temp dir
+  (`cargo install --path <dir> --locked --root <tmp>` → `<tmp>/bin/owl`; the release
+  installer with `--prefix <tmp>` → `<tmp>/owl`), copies it to `<active>.new` in the same
+  directory (mode 0755) and `rename`s it over the active file — a plain copy fails with
+  `ETXTBSY` while the daemon runs it — then compares the two byte for byte and prints
+  `installed <active>`; a mismatch is a hard error naming both paths. Then
+  `owl uninstall && owl install` (the unit keeps naming that path) and the plugin steps.
+  `--dry-run` prints `would run: …` for the build step, `would replace <active>` and the
+  remaining `would run:` lines. `owl doctor`'s `binary` check (§9) reports when `PATH` or the
+  unit name another copy.
 - `owl setup` (init if needed, `owl install`, the Claude Code plugin) and `owl update`
   (binary, daemon, plugin reinstall) end, when `claude` is on PATH, with the user-scope
   registration of the MCP server: `claude mcp add --scope user owl -- owl mcp` when
@@ -390,6 +411,7 @@ serves the test binary offline), `OWL_INSTALL_FAKE_SUM=1` (forces the checksum m
 | E2E (automated) | `tests/e2e.rs`: A asks B, B holds for consent, `allow`, `draft` with the fake harness, `send`, A's pull ingests, hook output asserted; plus unknown-key handshake refused, replay refused, rate limit trips | no |
 | iroh (automated) | `tests/iroh.rs`: the same loop over iroh with empty `endpoints` and an `iroh-relay` server on `127.0.0.1:0`; unknown key closed before any request; signature / replay / rate-limit statuses equal to the HTTPS suite; transport order (a decoy listener counts dials) | no |
 | E2E (manual) | `scripts/e2e-real.sh` with `OWL_HARNESS=claude\|codex\|opencode` runs the same script against a real harness on this machine; output saved under `target/e2e-real/` | yes, on demand |
+| E2E (manual) | `scripts/e2e-watch-arm.sh` (OWL-029): for each of the three first prompts `/owlpost:watch status`, `/owlpost:whoami`, `what is 2+2? answer with the number only` it runs `claude -p` with `--output-format stream-json` in a temp `OWLPOST_HOME`, waits for `$OWLPOST_HOME/watch/<session id>` with a live pid and for a `Monitor` tool_use with description `owlpost inbox` and `--session <id>` in the stream, prints `PASS`/`FAIL` per prompt; `E2E_PLUGIN_DIR` adds `--plugin-dir`, `E2E_OUT` keeps the streams | yes, on demand |
 
 Rules: automated tests never call a real harness; every network test binds port 0; every test
 uses its own home; `cargo test` must pass offline.

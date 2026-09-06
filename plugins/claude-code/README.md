@@ -39,12 +39,12 @@ patterns of the next steps a file runs itself); `tests/plugin.rs` pins the rule.
 | `/owlpost:send <id>` | `commands/send.md` | `owl send` — sign and move to outbox (confirms first) |
 | `/owlpost:reject <id>` | `commands/reject.md` | `owl reject` — discard a record (confirms first) |
 | `/owlpost:history [--peer] [--path] [--since]` | `commands/history.md` | `owl history` — finished exchanges |
-| `/owlpost:watch [on\|off\|status]` | `commands/watch.md` | Monitor over `owl inbox --count --format plain` — live one-line notifications when the inbox changes; `off` stops it and stores `{"watch": false}` in `$OWLPOST_HOME/plugin.json`, `on` restores it, `status` reports both and arms the watch when the default is on and none runs; the `SessionStart` hook injects a self-contained arm instruction starting `owlpost: before handling this prompt` |
+| `/owlpost:watch [on\|off\|status]` | `commands/watch.md` | Monitor over `owl inbox --count --follow --session <id>` — live one-line notifications when the inbox changes; `off` stops it and stores `{"watch": false}` in `$OWLPOST_HOME/plugin.json`, `on` restores it, `status` reports both and arms the watch when the default is on and none runs; the `SessionStart` and `UserPromptSubmit` hooks inject a self-contained arm instruction starting `owlpost: before handling this prompt` whenever no watch is live for the session (a running watch leaves its pid in `$OWLPOST_HOME/watch/<session id>`) |
 | `/owlpost:setup [--name] [--email] [--plugin-source] [--dry-run]` | `commands/setup.md` | `owl setup` — init, daemon, plugin in one go |
 | `/owlpost:install [--dry-run]` | `commands/install.md` | `owl install` — register the daemon service |
 | `/owlpost:uninstall` | `commands/uninstall.md` | `owl uninstall` — remove the service (confirms first) |
 | `/owlpost:doctor` | `commands/doctor.md` | `owl doctor` — check the setup, offer the fix per failure |
-| `/owlpost:update [--source <dir>]` | `commands/update.md` | `owl update` — binary, daemon, plugin |
+| `/owlpost:update [--source <dir>]` | `commands/update.md` | `owl update` — replaces the running binary in place, daemon, plugin |
 
 ## Mention a contact
 

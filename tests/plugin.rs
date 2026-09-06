@@ -6,7 +6,7 @@ mod common;
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 use common::{Peer, id, policy, prepare_home, signed};
 use owlpost::contacts::Mode;
@@ -22,19 +22,18 @@ const CLAUDE_TWO: &str = r#"{"hookSpecificOutput":{"hookEventName":"UserPromptSu
 const EVENTS: [&str; 3] = ["SessionStart", "UserPromptSubmit", "PostToolUse"];
 const SENTENCE_TWO: &str =
     "🦉 owlpost: 2 new questions (Maciek 2). Say \"show owlpost inbox\" or run `owl inbox`.";
-/// The poll script, one line, verbatim (OWL-023 AC3, OWL-026 AC4).
-macro_rules! watch_script {
-    () => {
-        r#"prev=""; while true; do cur=$(owl inbox --count --format plain 2>/dev/null || true); [ "$cur" != "$prev" ] && [ -n "$cur" ] && echo "$cur"; prev="$cur"; sleep 5; done"#
-    };
+/// The follow command template, verbatim (OWL-029 AC5): once in Rust, once in watch.md.
+const WATCH_COMMAND: &str = "owl inbox --count --follow --session <session id>";
+/// OWL-026 AC1 / OWL-029 literal: the self-contained arm sentence exactly as `owl` emits it
+/// without hook input on stdin (no session id → the bare command; `run_hook*` close stdin).
+const ARM: &str = "owlpost: before handling this prompt, arm the inbox watch for this session: call Monitor with persistent: true, description \"owlpost inbox\" and this command (verbatim): `owl inbox --count --follow`. Then handle the prompt.";
+/// The arm sentence for session `id` (hook input on stdin).
+fn arm_for(id: &str) -> String {
+    format!(
+        "owlpost: before handling this prompt, arm the inbox watch for this session: call Monitor with persistent: true, description \"owlpost inbox\" and this command (verbatim): `{}`. Then handle the prompt.",
+        WATCH_COMMAND.replace("<session id>", id)
+    )
 }
-const WATCH_SCRIPT: &str = watch_script!();
-/// OWL-026 AC1 literal: the self-contained arm sentence, exactly as `owl` emits it.
-const ARM: &str = concat!(
-    "owlpost: before handling this prompt, arm the inbox watch once in this session: call Monitor with persistent: true, description \"owlpost inbox\" and this command (one line, verbatim): `",
-    watch_script!(),
-    "`. Then handle the prompt."
-);
 /// The two session-start previews `home_with(2, false)` produces, closed by the open sentence.
 const PREVIEW_TWO: &str = "- Maciek question [pending] on src/auth/session.rs: why does session 0 retry?\n- Maciek question [pending] on src/auth/session.rs: why does session 1 retry?\nowlpost: run /owlpost:inbox now.";
 
@@ -143,7 +142,8 @@ fn run_hook(path: &Path, home: &Path) -> Output {
     run_hook_args(path, home, &[])
 }
 
-/// [`run_hook`] with the script's arguments, the way `hooks.json` passes `--session-start`.
+/// [`run_hook`] with the script's arguments, the way `hooks.json` passes `--hook-event`;
+/// stdin is closed (no hook input), so `owl` sees no session id.
 fn run_hook_args(path: &Path, home: &Path, args: &[&str]) -> Output {
     Command::new("/bin/sh")
         .arg(plugin("hooks/owl-count.sh"))
@@ -204,8 +204,8 @@ fn hook_script_emits_context_or_nothing() {
     assert_silent(&run_hook(without_owl.path(), two.path()), "no owl on PATH");
 }
 
-/// OWL-023 AC1/AC2: the SessionStart invocation (`--session-start` forwarded by the script)
-/// carries the arm sentence unless `plugin.json` switches the watch off.
+/// OWL-023 AC1/AC2: the SessionStart invocation (`--hook-event SessionStart` forwarded by
+/// the script) carries the arm sentence unless `plugin.json` switches the watch off.
 #[test]
 fn hook_script_forwards_session_start_and_reads_plugin_json() {
     let with_owl = path_dir(true);
@@ -223,7 +223,7 @@ fn hook_script_forwards_session_start_and_reads_plugin_json() {
         stdout(run_hook_args(
             owl,
             empty.path(),
-            &["--hook-event", "SessionStart", "--session-start"]
+            &["--hook-event", "SessionStart"]
         )),
         format!("{}\n", claude_arm_zero())
     );
@@ -234,7 +234,7 @@ fn hook_script_forwards_session_start_and_reads_plugin_json() {
         stdout(run_hook_args(
             owl,
             two.path(),
-            &["--hook-event", "SessionStart", "--session-start"]
+            &["--hook-event", "SessionStart"]
         )),
         format!("{}\n", claude_arm_two())
     );
@@ -249,7 +249,7 @@ fn hook_script_forwards_session_start_and_reads_plugin_json() {
         stdout(run_hook_args(
             owl,
             two.path(),
-            &["--hook-event", "SessionStart", "--session-start"]
+            &["--hook-event", "SessionStart"]
         )),
         format!(
             "{}\n",
@@ -257,11 +257,7 @@ fn hook_script_forwards_session_start_and_reads_plugin_json() {
         )
     );
     assert_silent(
-        &run_hook_args(
-            owl,
-            empty.path(),
-            &["--hook-event", "SessionStart", "--session-start"],
-        ),
+        &run_hook_args(owl, empty.path(), &["--hook-event", "SessionStart"]),
         "watch off, 0 records",
     );
     // `{"watch": true}` restores the arm sentence.
@@ -270,7 +266,7 @@ fn hook_script_forwards_session_start_and_reads_plugin_json() {
         stdout(run_hook_args(
             owl,
             empty.path(),
-            &["--hook-event", "SessionStart", "--session-start"]
+            &["--hook-event", "SessionStart"]
         )),
         format!("{}\n", claude_arm_zero())
     );
@@ -280,7 +276,7 @@ fn hook_script_forwards_session_start_and_reads_plugin_json() {
         &run_hook_args(
             without_owl.path(),
             empty.path(),
-            &["--hook-event", "SessionStart", "--session-start"],
+            &["--hook-event", "SessionStart"],
         ),
         "no owl on PATH",
     );
@@ -288,11 +284,7 @@ fn hook_script_forwards_session_start_and_reads_plugin_json() {
     let file = file.path().join("home");
     std::fs::write(&file, b"").unwrap();
     assert_silent(
-        &run_hook_args(
-            owl,
-            &file,
-            &["--hook-event", "SessionStart", "--session-start"],
-        ),
+        &run_hook_args(owl, &file, &["--hook-event", "SessionStart"]),
         "owl failing",
     );
     // An uninitialised home (no key, no config) counts 0 without failing, so the arm line
@@ -302,7 +294,7 @@ fn hook_script_forwards_session_start_and_reads_plugin_json() {
         stdout(run_hook_args(
             owl,
             dir.path(),
-            &["--hook-event", "SessionStart", "--session-start"]
+            &["--hook-event", "SessionStart"]
         )),
         format!("{}\n", claude_arm_zero())
     );
@@ -315,7 +307,7 @@ fn hook_script_forwards_session_start_and_reads_plugin_json() {
 fn session_start_arm_sentence_is_self_contained() {
     let with_owl = path_dir(true);
     let owl = with_owl.path();
-    let ss = ["--hook-event", "SessionStart", "--session-start"];
+    let ss = ["--hook-event", "SessionStart"];
     let context = |out: Output| -> String {
         assert_eq!(out.status.code(), Some(0), "{:?}", out.status);
         let line = String::from_utf8(out.stdout).unwrap();
@@ -327,12 +319,12 @@ fn session_start_arm_sentence_is_self_contained() {
             .unwrap()
             .to_string()
     };
-    let script_in_md = read("commands/watch.md")
+    let template_in_md = read("commands/watch.md")
         .lines()
-        .find(|l| l.starts_with(r#"prev="";"#))
-        .expect("watch.md fenced poll script")
+        .find(|l| l.starts_with("owl inbox --count --follow"))
+        .expect("watch.md fenced follow command")
         .to_string();
-    assert_eq!(script_in_md, WATCH_SCRIPT);
+    assert_eq!(template_in_md, WATCH_COMMAND);
 
     let empty = home_with(0, false);
     let alone = context(run_hook_args(owl, empty.path(), &ss));
@@ -352,29 +344,177 @@ fn session_start_arm_sentence_is_self_contained() {
         for needle in [
             "persistent: true",
             "description \"owlpost inbox\"",
-            script_in_md.as_str(),
+            "`owl inbox --count --follow`",
         ] {
             assert!(text.contains(needle), "context lacks {needle:?}: {text}");
         }
     }
-    // Absent: `{"watch": false}`, and every hook event without `--session-start`.
+    // Absent: `{"watch": false}`, and (without a session id) every other hook event.
     std::fs::write(two.path().join("plugin.json"), r#"{"watch": false}"#).unwrap();
     let off = context(run_hook_args(owl, two.path(), &ss));
     assert!(
         !off.contains("owlpost: before handling this prompt"),
         "{off}"
     );
-    assert!(!off.contains(script_in_md.as_str()), "{off}");
+    assert!(!off.contains("--follow"), "{off}");
     std::fs::remove_file(two.path().join("plugin.json")).unwrap();
-    for event in EVENTS {
+    for event in ["UserPromptSubmit", "PostToolUse"] {
         let out = run_hook_args(owl, two.path(), &["--hook-event", event]);
         let line = String::from_utf8(out.stdout).unwrap();
         assert!(
             !line.contains("before handling this prompt"),
             "{event}: {line}"
         );
-        assert!(!line.contains("prev="), "{event}: {line}");
+        assert!(!line.contains("--follow"), "{event}: {line}");
     }
+}
+
+/// OWL-029 AC6: the real hook script through `env -i /bin/sh` with Claude Code's stdin JSON
+/// on all three events; the `--follow` command from the emitted sentence runs for real
+/// against the same home and leaves the marker with a live pid, after which the hooks stop
+/// asking — until that follow dies, when the next prompt asks again.
+#[test]
+fn hook_script_via_env_i_arms_until_the_follow_runs_for_real() {
+    use std::io::Write;
+    let with_owl = path_dir(true);
+    let owl = with_owl.path();
+    let home = home_with(0, false);
+    let run = |event: &str, session: &str| -> Output {
+        let mut child = Command::new("env")
+            .arg("-i")
+            .arg(format!("PATH={}", owl.display()))
+            .arg(format!("OWLPOST_HOME={}", home.path().display()))
+            .arg("/bin/sh")
+            .arg(plugin("hooks/owl-count.sh"))
+            .args(["--hook-event", event])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let input = format!(
+            r#"{{"session_id":"{session}","transcript_path":"/t","cwd":"/c","hook_event_name":"{event}"}}"#
+        );
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        child.wait_with_output().unwrap()
+    };
+    let context = |out: &Output| -> Option<String> {
+        assert_eq!(out.status.code(), Some(0), "{:?}", out.status);
+        assert_eq!(String::from_utf8_lossy(&out.stderr), "");
+        let line = String::from_utf8(out.stdout.clone()).unwrap();
+        if line.is_empty() {
+            return None;
+        }
+        assert_eq!(line.lines().count(), 1, "one line: {line:?}");
+        let v: Value = serde_json::from_str(line.trim()).unwrap_or_else(|e| panic!("{e}: {line}"));
+        Some(
+            v["hookSpecificOutput"]["additionalContext"]
+                .as_str()
+                .unwrap()
+                .to_string(),
+        )
+    };
+    // No marker: SessionStart and UserPromptSubmit ask, PostToolUse never.
+    let ss = context(&run("SessionStart", "sess-1")).unwrap();
+    assert_eq!(ss, arm_for("sess-1"));
+    assert_eq!(
+        context(&run("UserPromptSubmit", "sess-1")).unwrap(),
+        arm_for("sess-1")
+    );
+    assert_eq!(context(&run("PostToolUse", "sess-1")), None);
+    // The command inside the sentence, run for real through the same PATH and home.
+    let cmd = ss
+        .split("(verbatim): `")
+        .nth(1)
+        .and_then(|t| t.split('`').next())
+        .expect("command in the sentence");
+    assert_eq!(cmd, "owl inbox --count --follow --session sess-1");
+    let argv: Vec<&str> = cmd.split(' ').collect();
+    let follow = |argv: &[&str]| {
+        Command::new(argv[0])
+            .args(&argv[1..])
+            .env_clear()
+            .env("PATH", owl)
+            .env("OWLPOST_HOME", home.path())
+            .env("OWLPOST_FOLLOW_SECS", "0.05")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap()
+    };
+    let mut watch = follow(&argv);
+    let marker = home.path().join("watch").join("sess-1");
+    let start = std::time::Instant::now();
+    while !marker.exists() {
+        if start.elapsed().as_secs() >= 10 {
+            let _ = watch.kill();
+            panic!("marker never appeared");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let pid: u32 = std::fs::read_to_string(&marker)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert_eq!(pid, watch.id());
+    assert!(Path::new("/proc").join(pid.to_string()).exists() || cfg!(not(target_os = "linux")));
+    // Live marker: every event is silent at 0 unseen; another session still gets asked.
+    for event in EVENTS {
+        assert_eq!(context(&run(event, "sess-1")), None, "{event}");
+    }
+    assert_eq!(
+        context(&run("UserPromptSubmit", "sess-2")).unwrap(),
+        arm_for("sess-2")
+    );
+    // Two questions arrive: the follow prints the counter, the hooks carry it without the
+    // sentence (and SessionStart adds its previews).
+    seed(home.path(), &id(2), &id(1), 2, false);
+    // Bounded read of the follow's first line (a reader thread + channel).
+    let (tx, rx) = std::sync::mpsc::channel();
+    let stdout = watch.stdout.take().unwrap();
+    std::thread::spawn(move || {
+        let mut first = String::new();
+        let _ = std::io::BufRead::read_line(&mut std::io::BufReader::new(stdout), &mut first);
+        let _ = tx.send(first);
+    });
+    let first = match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+        Ok(line) => line,
+        Err(e) => {
+            let _ = watch.kill();
+            panic!("the follow printed nothing within 10 s: {e:?}");
+        }
+    };
+    assert_eq!(first.trim_end(), SENTENCE_TWO);
+    assert_eq!(
+        context(&run("UserPromptSubmit", "sess-1")).unwrap(),
+        SENTENCE_TWO
+    );
+    assert_eq!(
+        context(&run("SessionStart", "sess-1")).unwrap(),
+        format!("{SENTENCE_TWO}\n{PREVIEW_TWO}")
+    );
+    // The follow dies (TaskStop, a crash): its marker stays but is stale, so the next
+    // prompt asks again — with the counter first — and the stale marker is removed.
+    watch.kill().unwrap();
+    watch.wait().unwrap();
+    assert!(marker.exists(), "a killed follow leaves its marker");
+    assert_eq!(
+        context(&run("UserPromptSubmit", "sess-1")).unwrap(),
+        format!("{SENTENCE_TWO} {}", arm_for("sess-1"))
+    );
+    assert!(!marker.exists(), "stale marker removed");
+    assert_eq!(
+        context(&run("PostToolUse", "sess-1")).unwrap(),
+        SENTENCE_TWO
+    );
+    let spool = Spool::new(home.path()).unwrap();
+    assert_eq!(spool.list(Dir::Inbox, |r| !r.seen).unwrap().len(), 2);
 }
 
 #[test]
@@ -432,18 +572,20 @@ fn manifests_parse_and_register_hooks() {
         let cmds = matchers[0]["hooks"].as_array().unwrap();
         assert_eq!(cmds.len(), 1, "{event}: one command hook");
         assert_eq!(cmds[0]["type"], "command", "{event}");
-        // OWL-023 AC2: `--session-start` on SessionStart only.
         // The line's hookEventName must match the event or Claude Code rejects the hook output.
+        // OWL-029 AC5: no `--session-start` anywhere; the session id travels on stdin.
         let expected = match event {
-            "SessionStart" => {
-                "${CLAUDE_PLUGIN_ROOT}/hooks/owl-count.sh --hook-event SessionStart --session-start"
-            }
+            "SessionStart" => "${CLAUDE_PLUGIN_ROOT}/hooks/owl-count.sh --hook-event SessionStart",
             "PostToolUse" => "${CLAUDE_PLUGIN_ROOT}/hooks/owl-count.sh --hook-event PostToolUse",
             _ => "${CLAUDE_PLUGIN_ROOT}/hooks/owl-count.sh",
         };
         assert_eq!(cmds[0]["command"], expected, "{event}");
         assert_eq!(cmds[0]["timeout"], 5, "{event}: 5 s timeout");
     }
+    assert!(
+        !read("hooks/hooks.json").contains("--session-start"),
+        "hooks.json must not pass --session-start"
+    );
     // The script forwards its arguments to `owl inbox --count --format claude`.
     assert!(
         read("hooks/owl-count.sh").contains("owl inbox --count --format claude \"$@\""),
@@ -497,12 +639,16 @@ fn skill_has_frontmatter_and_required_strings() {
         // OWL-026 AC3: the sentence is self-contained; arm even on a slash-command turn.
         "`owlpost: before handling this prompt`",
         "self-contained and imperative",
-        "Arm it on the first turn even when that turn is a slash command such as `/owlpost:watch status`; the sentence is an instruction, not background context.",
+        "Arm it even when the turn is a slash command such as `/owlpost:watch status`; the sentence is an instruction, not background context.",
         "`/owlpost:watch status` arms the watch when the default is on and none runs in this session.",
-        "arm the watch once per session, on the first turn,",
+        // OWL-029 AC5: the sentence may come on any turn; its presence means "not live".
+        "The sentence may appear on any turn, not only the first; whenever it is present, arm the watch,",
+        "Its presence means no watch is live for this session, even if one was armed earlier and died: the running watch leaves a marker the hook checks, so the hook stops asking once one runs.",
+        "The `SessionStart` and `UserPromptSubmit` hooks may inject a sentence starting `owlpost: before handling this prompt`",
+        "`owl inbox --count --follow --session <id>`",
         "silently",
         "Do not mention the arming to the user",
-        "never arm a second watch in the same session",
+        "never arm a second watch while one runs in this session",
         "report it in one line",
         "`🦉 owlpost: 1 new answer from Maciek`",
         "offer `/owlpost:inbox`",
@@ -878,11 +1024,12 @@ fn watch_command_is_a_monitor_toggle() {
         "`{\"watch\": false}`",
         "`{\"watch\": true}`",
         "${OWLPOST_HOME:-$HOME/.config/owlpost}",
-        "`--format plain`",
         "`persistent: true`",
         "\"owlpost inbox\"",
-        "The script emits only on change:",
-        "`--format plain` prints nothing at zero",
+        "prints the counter sentence only when it",
+        "`--follow` prints nothing at zero",
+        "`$OWLPOST_HOME/watch/<session id>`",
+        "The `SessionStart` and `UserPromptSubmit` hooks read the same file",
         // OWL-026: the injected sentence is described by its prefix, not quoted whole.
         "`owlpost: before handling this prompt`",
         "never runs `owl inbox` without `--count` (listing marks records",
@@ -893,19 +1040,42 @@ fn watch_command_is_a_monitor_toggle() {
     ] {
         assert!(body.contains(needle), "watch.md body lacks {needle:?}");
     }
-    // OWL-026 AC4: the fenced block holds the script on exactly one line, byte-identical to
-    // the one `owl` embeds in the arm sentence (checked end to end in
-    // `session_start_arm_sentence_is_self_contained`).
+    // OWL-029 AC5: the fenced block holds the command template on exactly one line,
+    // byte-identical to the one `owl` fills in for the arm sentence (checked end to end in
+    // `hook_script_via_env_i_arms_until_the_follow_runs_for_real`).
     let in_md: Vec<&str> = body
         .lines()
-        .filter(|l| l.starts_with(r#"prev="";"#))
+        .filter(|l| l.starts_with("owl inbox --count --follow"))
         .collect();
-    assert_eq!(in_md, vec![WATCH_SCRIPT], "watch.md poll script drifted");
-    // OWL-026 AC2: `status` arms when nothing runs and the default is on, one line.
+    assert_eq!(
+        in_md,
+        vec![WATCH_COMMAND],
+        "watch.md follow command drifted"
+    );
+    assert!(
+        !body.contains("prev=\"\""),
+        "the OWL-023 shell one-liner is gone"
+    );
+    // OWL-026 AC2 / OWL-029: `status` arms from this turn's sentence when nothing runs and
+    // the default is on; no sentence + default on means the watch is already live.
     let status = section(&body, "## `status` (or no argument)");
     assert!(
-        status.contains("4. When no \"owlpost inbox\" watch runs in this session and the stored default is on, arm it exactly as `on` does (same `Monitor` call, same script) and say `owlpost watch: running; default on` instead."),
+        status.contains("4. When no \"owlpost inbox\" watch runs in this session and the stored default is on, arm it exactly as `on` does (same `Monitor` call, the command from this turn's sentence) and say `owlpost watch: running; default on` instead."),
         "watch.md status lacks the arming line"
+    );
+    assert!(
+        status.contains("5. When this turn carries no sentence and the default is on, the watch is already live for this session (the hook saw its marker): say `owlpost watch: running; default on`."),
+        "watch.md status lacks the already-live line"
+    );
+    // OWL-029 AC5: `on` arms from this turn's sentence, or defers to the next prompt.
+    let on = section(&body, "## `on`");
+    assert!(
+        on.contains("say `owlpost watch: on; it arms on your next prompt` (the next `UserPromptSubmit` hook injects the sentence, and you arm it then)."),
+        "watch.md on lacks the next-prompt line"
+    );
+    assert!(
+        on.contains("the command from the sentence"),
+        "watch.md on must take the command from this turn's sentence"
     );
     // The three verbs appear only in that one "never" sentence, never as an instruction.
     for verb in ["owl show", "owl draft", "owl send"] {
@@ -1541,7 +1711,7 @@ fn counter_wears_the_owl_icon_arm_and_records_do_not() {
         run_hook_args(
             with_owl.path(),
             empty.path(),
-            &["--hook-event", "SessionStart", "--session-start"],
+            &["--hook-event", "SessionStart"],
         )
         .stdout,
     )
@@ -1554,7 +1724,7 @@ fn counter_wears_the_owl_icon_arm_and_records_do_not() {
         run_hook_args(
             with_owl.path(),
             two.path(),
-            &["--hook-event", "SessionStart", "--session-start"],
+            &["--hook-event", "SessionStart"],
         )
         .stdout,
     )
@@ -1674,5 +1844,5 @@ fn inbox_steps_print_the_framed_block_and_watch_event_has_the_icon() {
         !watch.contains("(\"owlpost: 1 new answer from"),
         "watch.md still quotes the icon-free event"
     );
-    assert!(watch.contains(WATCH_SCRIPT), "poll script untouched");
+    assert!(watch.contains(WATCH_COMMAND), "follow command untouched");
 }

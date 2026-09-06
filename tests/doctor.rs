@@ -32,10 +32,17 @@ fn wait_for_status(home: &Path) {
 fn owl_on(home: &Path, bin: &Path) -> Command {
     let mut c = Command::new(env!("CARGO_BIN_EXE_owl"));
     c.env_remove("OWLPOST_HOME")
+        // No daemon unit under this HOME: the `binary` check sees PATH only (OWL-029).
+        .env("HOME", "/nonexistent-owlpost-home")
         .env("PATH", bin)
         .arg("--home")
         .arg(home);
     c
+}
+
+/// Puts the built `owl` on `bin` (a `fake_claude` dir), so the `binary` check is `ok`.
+fn with_owl(bin: &Path) {
+    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_owl"), bin.join("owl")).unwrap();
 }
 
 fn text(o: &Output) -> (String, String) {
@@ -87,6 +94,7 @@ async fn doctor_reports_each_check() {
     // A fake `claude` reporting the `owl` MCP server as registered, on a PATH of its own.
     let fake = tempfile::tempdir().unwrap();
     let (bin, _) = fake_claude(fake.path(), 0);
+    with_owl(&bin);
     // A local relay (never n0's) so the iroh line is the connected `ok` form.
     let (relay_url, _relay) = common::relay().await;
     let d = spawn_daemon_with(1, &[], |cfg| {
@@ -112,6 +120,7 @@ async fn doctor_reports_each_check() {
             ("ok", "config"),
             ("ok", "endpoints"),
             ("ok", "harness"),
+            ("ok", "binary"),
             ("ok", "mcp"),
             ("ok", "daemon"),
             ("ok", "iroh"),
@@ -121,6 +130,17 @@ async fn doctor_reports_each_check() {
         "{stdout}"
     );
     assert!(line(&stdout, "key").contains(&d.fp()), "{stdout}");
+    // OWL-029 AC2: PATH's `owl` is this very file (through the symlink) → ok naming it.
+    assert_eq!(
+        line(&stdout, "binary"),
+        format!(
+            "ok   binary: {}",
+            std::fs::canonicalize(env!("CARGO_BIN_EXE_owl"))
+                .unwrap()
+                .display()
+        ),
+        "{stdout}"
+    );
     // OWL-025 AC4: the mcp line, verbatim, with the fake `claude mcp get owl` exiting 0.
     assert_eq!(
         line(&stdout, "mcp"),
@@ -178,6 +198,58 @@ async fn doctor_reports_each_check() {
     assert_eq!(out.status.code(), Some(0), "{stdout}\n{stderr}");
     assert!(line(&stdout, "mcp").starts_with("warn mcp: "), "{stdout}");
     assert!(line(&stdout, "mcp").ends_with(MCP_ADD), "{stdout}");
+    // That PATH holds no `owl`: the binary check warns and names this file, exit stays 0.
+    assert_eq!(
+        line(&stdout, "binary"),
+        format!(
+            "warn binary: no owl on PATH, this owl is {}",
+            std::fs::canonicalize(env!("CARGO_BIN_EXE_owl"))
+                .unwrap()
+                .display()
+        ),
+        "{stdout}"
+    );
+    // Another `owl` first on PATH: warn naming both, in text and in --json.
+    let other = tempfile::tempdir().unwrap();
+    let other_owl = other.path().join("owl");
+    std::fs::write(&other_owl, "#!/bin/sh\n").unwrap();
+    let two = std::env::join_paths([other.path(), &bin]).unwrap();
+    let out = owl_on(d.home(), Path::new(&two))
+        .arg("doctor")
+        .output()
+        .unwrap();
+    let (stdout, _) = text(&out);
+    assert_eq!(out.status.code(), Some(0), "{stdout}");
+    assert_eq!(
+        line(&stdout, "binary"),
+        format!(
+            "warn binary: PATH resolves {}, this owl is {}",
+            std::fs::canonicalize(&other_owl).unwrap().display(),
+            std::fs::canonicalize(env!("CARGO_BIN_EXE_owl"))
+                .unwrap()
+                .display()
+        ),
+        "{stdout}"
+    );
+    let out = owl_on(d.home(), Path::new(&two))
+        .args(["--json", "doctor"])
+        .output()
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_str(&text(&out).0).unwrap();
+    let binary = json
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c.get("check").and_then(|v| v.as_str()) == Some("binary"))
+        .expect("binary row in --json");
+    assert_eq!(binary["status"], "warn");
+    assert!(
+        binary["detail"]
+            .as_str()
+            .unwrap()
+            .starts_with("PATH resolves "),
+        "{json}"
+    );
     assert_eq!(
         common::fake_calls(&log),
         ["claude mcp get owl"],
@@ -214,7 +286,7 @@ async fn doctor_reports_each_check() {
         "warn mcp: claude not on PATH",
         "{stdout}"
     );
-    assert_eq!(heads(&stdout)[4], ("warn".to_string(), "mcp".to_string()));
+    assert_eq!(heads(&stdout)[5], ("warn".to_string(), "mcp".to_string()));
     let out = owl_on(d.home(), empty.path())
         .args(["--json", "doctor"])
         .output()
@@ -298,6 +370,7 @@ async fn doctor_reports_each_check() {
             "config",
             "endpoints",
             "harness",
+            "binary",
             "mcp",
             "daemon",
             "iroh",
@@ -310,7 +383,7 @@ async fn doctor_reports_each_check() {
         "{json}"
     );
     assert!(
-        arr[5]
+        arr[6]
             .get("detail")
             .and_then(|v| v.as_str())
             .is_some_and(|s| s.contains("reachable")),
@@ -337,6 +410,7 @@ async fn doctor_reports_each_check() {
             ("ok", "config"),
             ("ok", "endpoints"),
             ("ok", "harness"),
+            ("ok", "binary"),
             ("ok", "mcp"),
             ("fail", "daemon"),
             ("warn", "iroh"),
@@ -362,7 +436,7 @@ async fn doctor_reports_each_check() {
     assert_eq!(out.status.code(), Some(1));
     let json: serde_json::Value = serde_json::from_str(&text(&out).0).unwrap();
     assert_eq!(
-        json.get(5)
+        json.get(6)
             .and_then(|c| c.get("status"))
             .and_then(|v| v.as_str()),
         Some("fail")
@@ -440,5 +514,121 @@ async fn doctor_fails_on_foreign_daemon_and_missing_pieces() {
     assert!(
         line(&stdout, "endpoints").starts_with("fail endpoints: noport: "),
         "{stdout}"
+    );
+}
+
+/// OWL-029 AC2 through the real binary: a daemon unit under a temp `HOME` naming another
+/// program gives `warn binary: daemon unit runs /opt/other/owl` in text and `--json`; a
+/// PATH without `owl` gives the `no owl on PATH` warn in both modes; a unit naming this
+/// file with this file on PATH gives the single `ok` row.
+#[test]
+fn doctor_binary_check_reads_the_daemon_unit_in_text_and_json() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("owlpost");
+    let user_home = dir.path().join("user");
+    let empty = dir.path().join("empty");
+    std::fs::create_dir_all(&empty).unwrap();
+    let me = std::fs::canonicalize(env!("CARGO_BIN_EXE_owl")).unwrap();
+    let write_unit = |program: &str| {
+        let (path, text) = if cfg!(target_os = "macos") {
+            (
+                user_home.join("Library/LaunchAgents/dev.owlpost.owl.plist"),
+                format!(
+                    "<?xml version=\"1.0\"?><plist><dict><key>ProgramArguments</key><array><string>{program}</string><string>daemon</string></array></dict></plist>"
+                ),
+            )
+        } else {
+            (
+                user_home.join(".config/systemd/user/owlpost.service"),
+                format!("[Service]\nExecStart=\"{program}\" daemon --home \"/h\"\n"),
+            )
+        };
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    };
+    let doctor = |bin: &Path, json: bool| -> String {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_owl"));
+        c.env_remove("OWLPOST_HOME")
+            .env("HOME", &user_home)
+            .env("PATH", bin)
+            .arg("--home")
+            .arg(&home);
+        if json {
+            c.arg("--json");
+        }
+        let out = c.arg("doctor").output().unwrap();
+        text(&out).0
+    };
+    let binary_rows = |stdout: &str| -> Vec<(String, String)> {
+        let json: serde_json::Value = serde_json::from_str(stdout).unwrap();
+        json.as_array()
+            .unwrap()
+            .iter()
+            .filter(|c| c["check"] == "binary")
+            .map(|c| {
+                (
+                    c["status"].as_str().unwrap().to_string(),
+                    c["detail"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect()
+    };
+
+    // Unit names another program, no owl on PATH: two warn rows, PATH first.
+    write_unit("/opt/other/owl");
+    let stdout = doctor(&empty, false);
+    let rows: Vec<&str> = stdout
+        .lines()
+        .filter(|l| l.split_whitespace().nth(1) == Some("binary:"))
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            format!("warn binary: no owl on PATH, this owl is {}", me.display()).as_str(),
+            "warn binary: daemon unit runs /opt/other/owl",
+        ],
+        "{stdout}"
+    );
+    assert_eq!(
+        binary_rows(&doctor(&empty, true)),
+        [
+            (
+                "warn".to_string(),
+                format!("no owl on PATH, this owl is {}", me.display())
+            ),
+            (
+                "warn".to_string(),
+                "daemon unit runs /opt/other/owl".to_string()
+            ),
+        ]
+    );
+    // This file on PATH, unit still wrong: only the unit warn, in both modes.
+    let with_owl = dir.path().join("withowl");
+    std::fs::create_dir_all(&with_owl).unwrap();
+    std::os::unix::fs::symlink(&me, with_owl.join("owl")).unwrap();
+    let stdout = doctor(&with_owl, false);
+    assert_eq!(
+        line(&stdout, "binary"),
+        "warn binary: daemon unit runs /opt/other/owl",
+        "{stdout}"
+    );
+    assert_eq!(
+        binary_rows(&doctor(&with_owl, true)),
+        [(
+            "warn".to_string(),
+            "daemon unit runs /opt/other/owl".to_string()
+        )]
+    );
+    // Unit names this file: the single ok row.
+    write_unit(&me.display().to_string());
+    let stdout = doctor(&with_owl, false);
+    assert_eq!(
+        line(&stdout, "binary"),
+        format!("ok   binary: {}", me.display()),
+        "{stdout}"
+    );
+    assert_eq!(
+        binary_rows(&doctor(&with_owl, true)),
+        [("ok".to_string(), me.display().to_string())]
     );
 }
