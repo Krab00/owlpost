@@ -452,6 +452,13 @@ fn e2e_watch_wake_script_is_executable_and_pins_the_flow() {
         "both claude invocations use --input-format stream-json"
     );
     assert!(!code.contains("--input-format text"), "{code}");
+    // The second assistant event is counted after the hook_response, on the code line.
+    assert!(
+        code.contains(
+            "assistant_after=$(printf '%s\\n' \"$after\" | tail -n \"+$((hook_line + 1))\" | grep -c -F '\"type\":\"assistant\"')"
+        ),
+        "the assistant check counts \"type\":\"assistant\" after the hook_response line"
+    );
     // The wake check greps the hook_response for exit code 2 and the FileChanged event.
     assert!(
         code.contains(
