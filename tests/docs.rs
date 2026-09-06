@@ -262,6 +262,36 @@ fn watch_status_arms_and_docs_quote_the_arm_prefix() {
     );
 }
 
+/// OWL-030 AC4: the design doc says the unit is rewritten from the path captured before the
+/// replacement (and why), the README quickstart names the one-time bootstrap for installs
+/// whose `owl update` still targets `~/.cargo/bin`.
+#[test]
+fn update_docs_name_the_captured_path_and_the_bootstrap() {
+    for (rel, needle) in [
+        (
+            "docs/technical-design.md",
+            "The unit is rewritten from the path captured before the replacement (OWL-030): on Linux a",
+        ),
+        (
+            "docs/technical-design.md",
+            "running process's own path (`/proc/self/exe`) reads `<path> (deleted)` after a rename over",
+        ),
+        (
+            "README.md",
+            "`cp ~/.cargo/bin/owl ~/.local/bin/owl.new && mv ~/.local/bin/owl.new ~/.local/bin/owl`",
+        ),
+        (
+            "README.md",
+            "(installed by `cargo install`) still updates into `~/.cargo/bin`: bootstrap once with",
+        ),
+    ] {
+        assert!(
+            repo_file(rel).lines().any(|l| l.contains(needle)),
+            "{rel} lacks {needle:?} on one line"
+        );
+    }
+}
+
 /// OWL-029 AC7 (data guard): the real-harness proof script exists, is executable, is plain
 /// `sh`, and names the three first prompts, the evidence knobs and the bounds.
 #[test]
