@@ -213,7 +213,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let active = dir.path().join("owl");
         sleep_binary(&active);
-        let mut child = Command::new(&active).arg("30").spawn().unwrap();
+        // Under parallel test threads a concurrent fork can still hold the copy's write fd
+        // for an instant, so the very first exec may see ETXTBSY: retry briefly.
+        let mut child = loop {
+            match Command::new(&active).arg("30").spawn() {
+                Ok(c) => break c,
+                Err(e) if e.raw_os_error() == Some(libc_etxtbsy()) => {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(e) => panic!("spawning the sleep copy: {e}"),
+            }
+        };
         // A plain copy over an executing file is exactly the failure this step avoids.
         let built = dir.path().join("built");
         std::fs::write(&built, b"#!/bin/sh\necho new\n").unwrap();
@@ -239,7 +249,7 @@ mod tests {
         child.wait().unwrap();
     }
 
-    #[cfg(target_os = "linux")]
+    /// `ETXTBSY` ("text file busy"): 26 on Linux and macOS.
     fn libc_etxtbsy() -> i32 {
         26
     }

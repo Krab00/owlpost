@@ -750,6 +750,24 @@ fn update_dry_run_lists_steps() {
         "{s}"
     );
     assert!(s.contains("owl uninstall && owl install"), "{s}");
+    // `OWLPOST_UPDATE_ACTIVE`: empty means unset (the running binary), a path is used as is.
+    let out = owl()
+        .env("OWLPOST_UPDATE_ACTIVE", "")
+        .args(["update", "--dry-run", "--source", "/repo"])
+        .output()
+        .unwrap();
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        s.contains(&format!("would replace {}\n", me.display())),
+        "{s}"
+    );
+    let out = owl()
+        .env("OWLPOST_UPDATE_ACTIVE", "/elsewhere/owl")
+        .args(["update", "--dry-run", "--source", "/repo"])
+        .output()
+        .unwrap();
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("would replace /elsewhere/owl\n"), "{s}");
     let out = owl().args(["update", "--dry-run"]).output().unwrap();
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(s.contains("install.sh -o"), "{s}");

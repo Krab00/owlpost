@@ -356,6 +356,17 @@ fn follow_interval_is_read_from_the_env() {
     );
 }
 
+/// `cmd`'s output, with the run bounded by [`BOUND`]: a guard that has gone missing would
+/// start a real follow loop, so the child is killed and the test fails instead of hanging.
+fn output_within(cmd: &mut Command) -> Output {
+    let child = cmd
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    wait_exit(child, "a rejected invocation")
+}
+
 /// Ids outside `[A-Za-z0-9._-]{1,128}` are a clap usage error (exit 2) before anything is
 /// written; so are `--session` without `--follow`, `--follow` without `--count`, and
 /// `--follow` with `--format`.
@@ -364,11 +375,10 @@ fn follow_rejects_bad_session_ids_and_flag_combinations_with_exit_2() {
     let h = Home::new();
     let long = "x".repeat(129);
     for bad in ["", "a b", "../x", "a/b", "ü", "$(x)", long.as_str()] {
-        let out = h
-            .owl()
-            .args(["inbox", "--count", "--follow", "--session", bad])
-            .output()
-            .unwrap();
+        let out = output_within(
+            h.owl()
+                .args(["inbox", "--count", "--follow", "--session", bad]),
+        );
         assert_eq!(out.status.code(), Some(2), "{bad:?}: {:?}", out.status);
         let err = String::from_utf8_lossy(&out.stderr);
         assert!(
@@ -391,7 +401,7 @@ fn follow_rejects_bad_session_ids_and_flag_combinations_with_exit_2() {
             "S",
         ],
     ] {
-        let out = h.owl().args(&args).output().unwrap();
+        let out = output_within(h.owl().args(&args));
         assert_eq!(out.status.code(), Some(2), "{args:?}: {:?}", out.status);
         assert!(!h.path().join("watch").exists(), "{args:?}");
     }
