@@ -11,8 +11,10 @@ every 5 seconds and prints the counter sentence only when it changes, so the ses
 one notification per new batch of questions or answers and nothing while the inbox is
 quiet. The stored default lives in `$OWLPOST_HOME/plugin.json` as `{"watch": true|false}`;
 resolve the home as `${OWLPOST_HOME:-$HOME/.config/owlpost}`. When the file is absent the
-default is on. The `SessionStart` hook reads the same file and injects the sentence
-"owlpost: arm the inbox watch (see /owlpost:watch)" only when the watch is not `false`.
+default is on. The `SessionStart` hook reads the same file and, only when the watch is not
+`false`, injects a self-contained sentence starting `owlpost: before handling this prompt`
+that carries the whole Monitor call below (`persistent: true`, description "owlpost inbox",
+the poll script verbatim), so the first turn arms the watch without opening this file.
 
 ## `status` (or no argument)
 
@@ -21,6 +23,7 @@ default is on. The `SessionStart` hook reads the same file and injects the sente
 2. `Read` `plugin.json` in the home; report the stored default as `on` (file absent, no
    `watch` key, or `true`) or `off` (`false`).
 3. One line, for example: `owlpost watch: running in this session; default on`.
+4. When no "owlpost inbox" watch runs in this session and the stored default is on, arm it exactly as `on` does (same `Monitor` call, same script) and say `owlpost watch: running; default on` instead.
 
 ## `off`
 
@@ -52,6 +55,7 @@ prev=""; while true; do cur=$(owl inbox --count --format plain 2>/dev/null || tr
 - When an event lands, say one line built from the counter, for example
   `🦉 owlpost: 1 new answer from Maciek`, and offer `/owlpost:inbox`; then wait for the human.
 - Arm at most one watch per session. The `SessionStart` hook asks for it once through the
-  injected sentence; `/owlpost:watch on` is the manual way to do the same.
+  injected sentence; `/owlpost:watch on` is the manual way to do the same, and `status`
+  does it only when the default is on and nothing runs yet.
 - Blocking on a single record (`owl watch [--id <id>] [--timeout <secs>]`, exit 4 on
   timeout) belongs in a terminal, not in this command.

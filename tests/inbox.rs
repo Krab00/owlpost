@@ -29,11 +29,28 @@ const CLAUDE_TWO: &str = r#"{"hookSpecificOutput":{"hookEventName":"UserPromptSu
 const SENTENCE_TWO: &str =
     "🦉 owlpost: 2 new questions (Maciek 2). Say \"show owlpost inbox\" or run `owl inbox`.";
 const FORMATS: [&str; 4] = ["plain", "claude", "codex", "kimi"];
-/// OWL-023 AC1 literals: the arm sentence alone (0 unseen) and after the counter (2 unseen).
-const ARM: &str = "owlpost: arm the inbox watch (see /owlpost:watch)";
-const CLAUDE_ARM_ZERO: &str = r#"{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"owlpost: arm the inbox watch (see /owlpost:watch)"}}"#;
+/// OWL-023 AC1 / OWL-026 AC1: the arm sentence alone (0 unseen) and after the counter
+/// (2 unseen). The sentence is self-contained: it embeds the poll script verbatim.
+const ARM: &str = concat!(
+    "owlpost: before handling this prompt, arm the inbox watch once in this session: call Monitor with persistent: true, description \"owlpost inbox\" and this command (one line, verbatim): `",
+    r#"prev=""; while true; do cur=$(owl inbox --count --format plain 2>/dev/null || true); [ "$cur" != "$prev" ] && [ -n "$cur" ] && echo "$cur"; prev="$cur"; sleep 5; done"#,
+    "`. Then handle the prompt."
+);
 const PREVIEW_TWO: &str = "- Maciek question [pending] on src/auth/session.rs: Why is the refresh token rotated?\n- Maciek question [consent] on src/auth/session.rs: Where is the retry policy?\nowlpost: run /owlpost:inbox now.";
-const CLAUDE_ARM_TWO: &str = r#"{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"🦉 owlpost: 2 new questions (Maciek 2). Say \"show owlpost inbox\" or run `owl inbox`. owlpost: arm the inbox watch (see /owlpost:watch)\n- Maciek question [pending] on src/auth/session.rs: Why is the refresh token rotated?\n- Maciek question [consent] on src/auth/session.rs: Where is the retry policy?\nowlpost: run /owlpost:inbox now."}}"#;
+
+/// The exact SessionStart line for `context`: serde's own escaping, §9 key order.
+fn session_start_line(context: &str) -> String {
+    format!(
+        r#"{{"hookSpecificOutput":{{"hookEventName":"SessionStart","additionalContext":{}}}}}"#,
+        serde_json::to_string(context).unwrap()
+    )
+}
+fn claude_arm_zero() -> String {
+    session_start_line(ARM)
+}
+fn claude_arm_two() -> String {
+    session_start_line(&format!("{SENTENCE_TWO} {ARM}\n{PREVIEW_TWO}"))
+}
 
 struct Home {
     dir: TempDir,
@@ -320,20 +337,18 @@ fn session_start_arms_the_watch_unless_plugin_json_says_off() {
     // Absent plugin.json, 0 unseen: nothing without the flag, the arm line alone with it.
     assert!(!plugin_json.exists());
     assert_eq!(h.ok(&claude), "");
-    assert_eq!(h.ok(&claude_ss), format!("{CLAUDE_ARM_ZERO}\n"));
-    assert_eq!(
-        CLAUDE_ARM_ZERO,
-        format!(
-            r#"{{"hookSpecificOutput":{{"hookEventName":"SessionStart","additionalContext":"{ARM}"}}}}"#
-        )
-    );
+    assert_eq!(h.ok(&claude_ss), format!("{}\n", claude_arm_zero()));
+    // OWL-026 AC1: valid JSON despite the `"` and `$` in the embedded script.
+    let v: Value = serde_json::from_str(claude_arm_zero().trim()).unwrap();
+    assert_eq!(v["hookSpecificOutput"]["additionalContext"], ARM);
+    assert!(ARM.starts_with("owlpost: before handling this prompt"));
 
     // 2 unseen: counter only without the flag, counter + arm (one space) with it.
     h.put(&h.maciek, "Why is the refresh token rotated?", "pending");
     h.put(&h.maciek, "Where is the retry policy?", "consent");
     assert_eq!(h.ok(&claude), format!("{CLAUDE_TWO}\n"));
     let armed = h.ok(&claude_ss);
-    assert_eq!(armed, format!("{CLAUDE_ARM_TWO}\n"));
+    assert_eq!(armed, format!("{}\n", claude_arm_two()));
     assert_eq!(armed.lines().count(), 1, "one line: {armed:?}");
     let v: Value = serde_json::from_str(armed.trim()).unwrap();
     assert_eq!(
@@ -345,13 +360,16 @@ fn session_start_arms_the_watch_unless_plugin_json_says_off() {
 
     // `{"watch": true}` is the same as absent.
     std::fs::write(&plugin_json, r#"{"watch": true}"#).unwrap();
-    assert_eq!(h.ok(&claude_ss), format!("{CLAUDE_ARM_TWO}\n"));
+    assert_eq!(h.ok(&claude_ss), format!("{}\n", claude_arm_two()));
 
     // `{"watch": false}`: counter + previews, no arm sentence; plain hook unchanged ...
     std::fs::write(&plugin_json, r#"{"watch": false}"#).unwrap();
     assert_eq!(
         h.ok(&claude_ss),
-        format!("{}\n", CLAUDE_ARM_TWO.replace(&format!(" {ARM}"), ""))
+        format!(
+            "{}\n",
+            session_start_line(&format!("{SENTENCE_TWO}\n{PREVIEW_TWO}"))
+        )
     );
     assert_eq!(h.ok(&claude), format!("{CLAUDE_TWO}\n"));
     // ... and nothing at all once everything is seen.
@@ -360,9 +378,9 @@ fn session_start_arms_the_watch_unless_plugin_json_says_off() {
     assert_eq!(h.ok(&claude), "");
     // A file that says nothing usable means on: back to the arm line alone.
     std::fs::write(&plugin_json, "{not json").unwrap();
-    assert_eq!(h.ok(&claude_ss), format!("{CLAUDE_ARM_ZERO}\n"));
+    assert_eq!(h.ok(&claude_ss), format!("{}\n", claude_arm_zero()));
     std::fs::write(&plugin_json, r#"{"watch": "false"}"#).unwrap();
-    assert_eq!(h.ok(&claude_ss), format!("{CLAUDE_ARM_ZERO}\n"));
+    assert_eq!(h.ok(&claude_ss), format!("{}\n", claude_arm_zero()));
     std::fs::remove_file(&plugin_json).unwrap();
 
     // Every other format ignores the flag, at 2 unseen and at 0.
