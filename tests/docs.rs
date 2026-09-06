@@ -2,9 +2,15 @@
 //! tests pin the markers the acceptance criteria name so drift is caught by `cargo test`.
 
 use std::fs;
+use std::path::Path;
 
 fn readme() -> String {
     fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/README.md")).unwrap()
+}
+
+fn repo_file(rel: &str) -> String {
+    fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(rel))
+        .unwrap_or_else(|e| panic!("{rel}: {e}"))
 }
 
 fn pilot() -> String {
@@ -169,4 +175,44 @@ fn readme_describes_the_owl_icon_and_orange_frame() {
             "README frame line lacks {needle:?}: {line}"
         );
     }
+}
+/// OWL-026 AC2 and the doc quotes of the new injection prefix: `/owlpost:watch status` arms
+/// the watch when the default is on and none runs (one line in `commands/watch.md`, pinned
+/// whole); the plugin README, the skill and the design doc name the sentence by its prefix.
+#[test]
+fn watch_status_arms_and_docs_quote_the_arm_prefix() {
+    let watch = repo_file("plugins/claude-code/commands/watch.md");
+    let status = watch
+        .split("## `status` (or no argument)")
+        .nth(1)
+        .and_then(|s| s.split("\n## ").next())
+        .expect("watch.md status section");
+    assert!(
+        status.lines().any(|l| l == "4. When no \"owlpost inbox\" watch runs in this session and the stored default is on, arm it exactly as `on` does (same `Monitor` call, same script) and say `owlpost watch: running; default on` instead."),
+        "watch.md status lacks the arming line"
+    );
+    for (rel, needle) in [
+        (
+            "plugins/claude-code/README.md",
+            "`status` reports both and arms the watch when the default is on and none runs; the `SessionStart` hook injects a self-contained arm instruction starting `owlpost: before handling this prompt`",
+        ),
+        (
+            "plugins/claude-code/skills/owlpost/SKILL.md",
+            "`/owlpost:watch status` arms the watch when the default is on and none runs in this session.",
+        ),
+        (
+            "docs/technical-design.md",
+            "sentence starting `owlpost: before handling this prompt` (OWL-026: a self-contained",
+        ),
+        (
+            "docs/technical-design.md",
+            "quotes the poll script one-liner byte-identical to `commands/watch.md`",
+        ),
+    ] {
+        assert!(repo_file(rel).contains(needle), "{rel} lacks {needle:?}");
+    }
+    assert!(
+        !repo_file("docs/technical-design.md").contains("arm the inbox watch (see /owlpost:watch)"),
+        "design doc still quotes the OWL-023 pointer sentence"
+    );
 }
