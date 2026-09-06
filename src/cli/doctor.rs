@@ -942,6 +942,12 @@ mod tests {
         std::os::unix::fs::symlink(&current, link.join("owl")).unwrap();
         let via_link = binary_checks(Some(&path(&[&link, &b])), &current, None);
         assert_eq!(via_link[0].status, Status::Ok, "{via_link:?}");
+        // A directory named `owl` earlier on PATH is skipped: the real one later wins.
+        let dir_owl = dir.path().join("dirowl");
+        std::fs::create_dir_all(dir_owl.join("owl")).unwrap();
+        let skipped = binary_checks(Some(&path(&[&dir_owl, &a])), &current, None);
+        assert_eq!(skipped[0].status, Status::Ok, "{skipped:?}");
+        assert_eq!(owl_on_path(Some(&path(&[&dir_owl]))), None);
         // Another owl first on PATH: warn naming both.
         let warn = binary_checks(Some(&path(&[&b, &a])), &current, None);
         assert_eq!(warn.len(), 1);

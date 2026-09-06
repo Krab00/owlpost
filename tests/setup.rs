@@ -4,6 +4,7 @@
 
 mod common;
 
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Output};
 
@@ -228,4 +229,150 @@ fn no_claude_on_path_skips_the_registration() {
         assert!(stdout.contains("claude not on PATH"), "{stdout}");
         assert!(!stdout.contains("mcp"), "{stdout}");
     }
+}
+
+/// A temp layout for one `owl update` run: `(dir, home, user_home, bin, log)` with the fake
+/// `claude`/`cargo` on `bin`; the caller sets `OWLPOST_UPDATE_ACTIVE`.
+fn update_layout(
+    get_exit: i32,
+) -> (
+    tempfile::TempDir,
+    std::path::PathBuf,
+    std::path::PathBuf,
+    std::path::PathBuf,
+    std::path::PathBuf,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("owlpost");
+    let user_home = dir.path().join("user");
+    std::fs::create_dir_all(&user_home).unwrap();
+    let (bin, log) = fake_claude(dir.path(), get_exit);
+    (dir, home, user_home, bin, log)
+}
+
+/// No daemon unit was written under `user_home` (neither the systemd nor the launchd path).
+fn assert_no_unit(user_home: &Path) {
+    assert!(!user_home.join(".config").exists(), "systemd unit written");
+    assert!(!user_home.join("Library").exists(), "launchd plist written");
+}
+
+/// OWL-029 AC1, end to end: the active file is a copied `/bin/sleep` that a child is
+/// executing while `owl update --source` runs; the child survives, the path holds the
+/// built bytes with mode 0755, no `.new` is left, and `installed <active>` is printed
+/// before the unit and plugin steps.
+#[test]
+fn update_replaces_a_running_active_binary_end_to_end() {
+    let (_dir, home, user_home, bin, log) = update_layout(0);
+    let active = user_home.join("active-owl");
+    std::fs::copy("/bin/sleep", &active).unwrap();
+    std::fs::set_permissions(&active, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut child = loop {
+        match Command::new(&active).arg("30").spawn() {
+            Ok(c) => break c,
+            Err(e) if e.raw_os_error() == Some(26) => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(e) => panic!("spawning the sleep copy: {e}"),
+        }
+    };
+    let out = owl(&home, &user_home, &bin)
+        .env("OWLPOST_UPDATE_ACTIVE", &active)
+        .args(UPDATE)
+        .output()
+        .unwrap();
+    let (stdout, stderr) = text(&out);
+    assert!(out.status.success(), "stdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "the running child is unaffected"
+    );
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert_eq!(std::fs::read_to_string(&active).unwrap(), "fake owl\n");
+    let mode = std::fs::metadata(&active).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o755, "mode {mode:o}");
+    assert!(!active.with_extension("new").exists(), ".new left behind");
+    let installed = format!("installed {}\n", active.display());
+    assert!(stdout.contains(&installed), "{stdout}");
+    // The replacement is printed before the unit reinstall and the plugin steps.
+    let at = stdout.find(&installed).unwrap();
+    assert!(stdout[at..].contains("+ claude plugin install"), "{stdout}");
+    assert!(!stdout[..at].contains("claude plugin"), "{stdout}");
+    let calls = fake_calls(&log);
+    assert!(
+        calls[1].starts_with("cargo install --path /repo --locked --root "),
+        "{calls:?}"
+    );
+    assert!(
+        calls.iter().any(|c| c.starts_with("claude plugin install")),
+        "{calls:?}"
+    );
+}
+
+/// The build step produced no file: a hard error naming the missing built path, the active
+/// file untouched, and neither the unit steps nor the plugin steps run.
+#[test]
+fn update_without_a_built_file_stops_before_the_unit_and_plugin_steps() {
+    let (_dir, home, user_home, bin, log) = update_layout(0);
+    // A `cargo` that logs and exits 0 without writing `<root>/bin/owl`.
+    std::fs::write(
+        bin.join("cargo"),
+        format!(
+            "#!/bin/sh\necho \"cargo $*\" >> '{}'\nexit 0\n",
+            log.display()
+        ),
+    )
+    .unwrap();
+    let active = user_home.join("active-owl");
+    std::fs::write(&active, "old owl\n").unwrap();
+    let out = owl(&home, &user_home, &bin)
+        .env("OWLPOST_UPDATE_ACTIVE", &active)
+        .args(UPDATE)
+        .output()
+        .unwrap();
+    let (stdout, stderr) = text(&out);
+    assert_eq!(out.status.code(), Some(1), "{stdout}\n{stderr}");
+    assert!(stderr.contains("did not produce "), "{stderr}");
+    assert!(stderr.contains("/bin/owl"), "{stderr}");
+    assert_eq!(std::fs::read_to_string(&active).unwrap(), "old owl\n");
+    assert!(!stdout.contains("installed "), "{stdout}");
+    assert_no_unit(&user_home);
+    let calls = fake_calls(&log);
+    assert_eq!(
+        calls.len(),
+        2,
+        "only the probe and the build ran: {calls:?}"
+    );
+    assert_eq!(calls[0], "claude --version");
+    assert!(calls[1].starts_with("cargo install "), "{calls:?}");
+}
+
+/// The replacement itself fails (the active path's directory does not exist): the error
+/// names the copy, and the unit reinstall and plugin steps never run.
+#[test]
+fn update_with_a_failed_replacement_runs_no_unit_or_plugin_step() {
+    let (_dir, home, user_home, bin, log) = update_layout(0);
+    let active = user_home.join("no-such-dir").join("owl");
+    let out = owl(&home, &user_home, &bin)
+        .env("OWLPOST_UPDATE_ACTIVE", &active)
+        .args(UPDATE)
+        .output()
+        .unwrap();
+    let (stdout, stderr) = text(&out);
+    assert_eq!(out.status.code(), Some(1), "{stdout}\n{stderr}");
+    assert!(stderr.contains("copying "), "{stderr}");
+    assert!(
+        stderr.contains(&active.with_extension("new").display().to_string()),
+        "{stderr}"
+    );
+    assert!(!stdout.contains("installed "), "{stdout}");
+    assert_no_unit(&user_home);
+    let calls = fake_calls(&log);
+    assert_eq!(calls.len(), 2, "{calls:?}");
+    assert!(
+        calls
+            .iter()
+            .all(|c| !c.starts_with("claude plugin") && !c.starts_with("claude mcp")),
+        "{calls:?}"
+    );
 }

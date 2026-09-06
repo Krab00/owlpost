@@ -516,3 +516,119 @@ async fn doctor_fails_on_foreign_daemon_and_missing_pieces() {
         "{stdout}"
     );
 }
+
+/// OWL-029 AC2 through the real binary: a daemon unit under a temp `HOME` naming another
+/// program gives `warn binary: daemon unit runs /opt/other/owl` in text and `--json`; a
+/// PATH without `owl` gives the `no owl on PATH` warn in both modes; a unit naming this
+/// file with this file on PATH gives the single `ok` row.
+#[test]
+fn doctor_binary_check_reads_the_daemon_unit_in_text_and_json() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("owlpost");
+    let user_home = dir.path().join("user");
+    let empty = dir.path().join("empty");
+    std::fs::create_dir_all(&empty).unwrap();
+    let me = std::fs::canonicalize(env!("CARGO_BIN_EXE_owl")).unwrap();
+    let write_unit = |program: &str| {
+        let (path, text) = if cfg!(target_os = "macos") {
+            (
+                user_home.join("Library/LaunchAgents/dev.owlpost.owl.plist"),
+                format!(
+                    "<?xml version=\"1.0\"?><plist><dict><key>ProgramArguments</key><array><string>{program}</string><string>daemon</string></array></dict></plist>"
+                ),
+            )
+        } else {
+            (
+                user_home.join(".config/systemd/user/owlpost.service"),
+                format!("[Service]\nExecStart=\"{program}\" daemon --home \"/h\"\n"),
+            )
+        };
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    };
+    let doctor = |bin: &Path, json: bool| -> String {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_owl"));
+        c.env_remove("OWLPOST_HOME")
+            .env("HOME", &user_home)
+            .env("PATH", bin)
+            .arg("--home")
+            .arg(&home);
+        if json {
+            c.arg("--json");
+        }
+        let out = c.arg("doctor").output().unwrap();
+        text(&out).0
+    };
+    let binary_rows = |stdout: &str| -> Vec<(String, String)> {
+        let json: serde_json::Value = serde_json::from_str(stdout).unwrap();
+        json.as_array()
+            .unwrap()
+            .iter()
+            .filter(|c| c["check"] == "binary")
+            .map(|c| {
+                (
+                    c["status"].as_str().unwrap().to_string(),
+                    c["detail"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect()
+    };
+
+    // Unit names another program, no owl on PATH: two warn rows, PATH first.
+    write_unit("/opt/other/owl");
+    let stdout = doctor(&empty, false);
+    let rows: Vec<&str> = stdout
+        .lines()
+        .filter(|l| l.split_whitespace().nth(1) == Some("binary:"))
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            format!("warn binary: no owl on PATH, this owl is {}", me.display()).as_str(),
+            "warn binary: daemon unit runs /opt/other/owl",
+        ],
+        "{stdout}"
+    );
+    assert_eq!(
+        binary_rows(&doctor(&empty, true)),
+        [
+            (
+                "warn".to_string(),
+                format!("no owl on PATH, this owl is {}", me.display())
+            ),
+            (
+                "warn".to_string(),
+                "daemon unit runs /opt/other/owl".to_string()
+            ),
+        ]
+    );
+    // This file on PATH, unit still wrong: only the unit warn, in both modes.
+    let with_owl = dir.path().join("withowl");
+    std::fs::create_dir_all(&with_owl).unwrap();
+    std::os::unix::fs::symlink(&me, with_owl.join("owl")).unwrap();
+    let stdout = doctor(&with_owl, false);
+    assert_eq!(
+        line(&stdout, "binary"),
+        "warn binary: daemon unit runs /opt/other/owl",
+        "{stdout}"
+    );
+    assert_eq!(
+        binary_rows(&doctor(&with_owl, true)),
+        [(
+            "warn".to_string(),
+            "daemon unit runs /opt/other/owl".to_string()
+        )]
+    );
+    // Unit names this file: the single ok row.
+    write_unit(&me.display().to_string());
+    let stdout = doctor(&with_owl, false);
+    assert_eq!(
+        line(&stdout, "binary"),
+        format!("ok   binary: {}", me.display()),
+        "{stdout}"
+    );
+    assert_eq!(
+        binary_rows(&doctor(&with_owl, true)),
+        [("ok".to_string(), me.display().to_string())]
+    );
+}

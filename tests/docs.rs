@@ -225,6 +225,7 @@ fn watch_status_arms_and_docs_quote_the_arm_prefix() {
             "docs/technical-design.md",
             "so a watch that was never armed or died is asked for again on the next prompt",
         ),
+        ("docs/technical-design.md", "never on `PostToolUse`."),
         (
             "docs/technical-design.md",
             "`--count --follow` (plain only) is the live watch: with `--session <id>` (`[A-Za-z0-9._-]{1,128}`",
