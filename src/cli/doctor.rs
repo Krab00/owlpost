@@ -1,11 +1,12 @@
 //! `owl doctor` (§9): one line per check — `ok|warn|fail  <name>: <detail>` — for the key,
-//! the config, every endpoint's host, the configured harness binaries, the `owl` MCP server
-//! in Claude Code, the daemon at `daemon.addr` (card fetch, pinned to our own key), the
-//! daemon's iroh endpoint (from the card) and the age of the last pull recorded in
-//! `daemon.status`. Exit 1 when any check fails; `--json` prints `[{check, status, detail}]`.
+//! the config, every endpoint's host, the configured harness binaries, the `owl` binary
+//! (PATH and the daemon unit name this very file, OWL-029), the `owl` MCP server in Claude
+//! Code, the daemon at `daemon.addr` (card fetch, pinned to our own key), the daemon's iroh
+//! endpoint (from the card) and the age of the last pull recorded in `daemon.status`. Exit 1
+//! when any check fails; `--json` prints `[{check, status, detail}]`.
 
 use std::net::{SocketAddr, ToSocketAddrs};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
@@ -178,6 +179,94 @@ pub fn harness_checks(
                 format!("{name}: {e:#}"),
             )),
         }
+    }
+    out
+}
+
+/// The first `owl` in `path_var`, canonicalised; `None` when no directory holds one.
+pub fn owl_on_path(path_var: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
+    let found = std::env::split_paths(path_var?)
+        .map(|d| d.join("owl"))
+        .find(|p| p.is_file())?;
+    Some(std::fs::canonicalize(&found).unwrap_or(found))
+}
+
+/// Strips one layer of systemd quoting (`"…"` with `\"` and `\\` escapes) from a token.
+fn systemd_unquote(token: &str) -> String {
+    match token.strip_prefix('"').and_then(|t| t.strip_suffix('"')) {
+        Some(inner) => inner.replace("\\\"", "\"").replace("\\\\", "\\"),
+        None => token.to_string(),
+    }
+}
+
+/// The program a daemon unit runs: the first `ExecStart=` token of a systemd unit, or the
+/// first `<string>` under `ProgramArguments` of a launchd plist. `None` when neither is found.
+pub fn unit_program(text: &str) -> Option<PathBuf> {
+    if let Some(args) = text.split("<key>ProgramArguments</key>").nth(1) {
+        let s = args.split("<string>").nth(1)?.split("</string>").next()?;
+        let unescaped = s
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&quot;", "\"")
+            .replace("&amp;", "&");
+        return Some(PathBuf::from(unescaped));
+    }
+    let exec = text
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("ExecStart="))?;
+    let exec = exec.trim_start();
+    let token = if exec.starts_with('"') {
+        // Quoted token: up to the next unescaped quote.
+        let mut end = 1;
+        let b = exec.as_bytes();
+        while end < b.len() && !(b[end] == b'"' && b[end - 1] != b'\\') {
+            end += 1;
+        }
+        &exec[..(end + 1).min(exec.len())]
+    } else {
+        exec.split_whitespace().next()?
+    };
+    Some(PathBuf::from(systemd_unquote(token)))
+}
+
+/// `binary`: the `owl` that `PATH` resolves and the daemon unit (when `unit` exists) both
+/// name `current`, the running binary → one `ok binary: <current>`; otherwise one `warn` per
+/// mismatch: `PATH resolves <p>, this owl is <q>` (or `no owl on PATH, this owl is <q>`)
+/// and `daemon unit runs <r>`. Never `fail`: a stale copy is what `owl update` fixes.
+pub fn binary_checks(
+    path_var: Option<&std::ffi::OsStr>,
+    current: &Path,
+    unit: Option<&Path>,
+) -> Vec<Check> {
+    let mut out = Vec::new();
+    match owl_on_path(path_var) {
+        Some(p) if p == current => {}
+        Some(p) => out.push(Check::warn(
+            "binary",
+            format!(
+                "PATH resolves {}, this owl is {}",
+                p.display(),
+                current.display()
+            ),
+        )),
+        None => out.push(Check::warn(
+            "binary",
+            format!("no owl on PATH, this owl is {}", current.display()),
+        )),
+    }
+    if let Some(text) = unit.and_then(|u| std::fs::read_to_string(u).ok())
+        && let Some(program) = unit_program(&text)
+    {
+        let program = std::fs::canonicalize(&program).unwrap_or(program);
+        if program != current {
+            out.push(Check::warn(
+                "binary",
+                format!("daemon unit runs {}", program.display()),
+            ));
+        }
+    }
+    if out.is_empty() {
+        out.push(Check::ok("binary", current.display().to_string()));
     }
     out
 }
@@ -391,6 +480,16 @@ pub fn run_checks(home: &Path) -> Vec<Check> {
         &config,
         std::env::var_os("PATH").as_deref(),
         &user_home,
+    ));
+    let current = super::install::owl_path().unwrap_or_default();
+    let unit = super::install::Os::current()
+        .ok()
+        .map(|os| super::install::unit_path(os, &user_home))
+        .filter(|p| p.exists());
+    out.extend(binary_checks(
+        std::env::var_os("PATH").as_deref(),
+        &current,
+        unit.as_deref(),
     ));
     out.push(mcp_check());
     let (daemon_line, card) = daemon_check(home, id.as_ref());
@@ -816,5 +915,152 @@ mod tests {
         assert_eq!(pull_check(home.path(), &short, now).status, Status::Ok);
         set_age(121);
         assert_eq!(pull_check(home.path(), &long, now).status, Status::Warn);
+    }
+
+    /// OWL-029 AC2: `binary` compares PATH's first `owl` and the unit's program with the
+    /// running file; one `ok` row, or one `warn` per mismatch, never `fail`.
+    #[test]
+    fn binary_checks_compare_path_and_unit_with_the_running_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a");
+        let b = dir.path().join("b");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(a.join("owl"), "#!/bin/sh\n").unwrap();
+        std::fs::write(b.join("owl"), "#!/bin/sh\n").unwrap();
+        let current = std::fs::canonicalize(a.join("owl")).unwrap();
+        let other = std::fs::canonicalize(b.join("owl")).unwrap();
+        let path = |dirs: &[&Path]| std::env::join_paths(dirs).unwrap();
+
+        // PATH's first owl is this file, no unit: ok.
+        let ok = binary_checks(Some(&path(&[&a, &b])), &current, None);
+        assert_eq!(ok.len(), 1);
+        assert_eq!(ok[0].line(), format!("ok   binary: {}", current.display()));
+        // A symlink earlier on PATH pointing at this file still counts as the same file.
+        let link = dir.path().join("link");
+        std::fs::create_dir_all(&link).unwrap();
+        std::os::unix::fs::symlink(&current, link.join("owl")).unwrap();
+        let via_link = binary_checks(Some(&path(&[&link, &b])), &current, None);
+        assert_eq!(via_link[0].status, Status::Ok, "{via_link:?}");
+        // A directory named `owl` earlier on PATH is skipped: the real one later wins.
+        let dir_owl = dir.path().join("dirowl");
+        std::fs::create_dir_all(dir_owl.join("owl")).unwrap();
+        let skipped = binary_checks(Some(&path(&[&dir_owl, &a])), &current, None);
+        assert_eq!(skipped[0].status, Status::Ok, "{skipped:?}");
+        assert_eq!(owl_on_path(Some(&path(&[&dir_owl]))), None);
+        // Another owl first on PATH: warn naming both.
+        let warn = binary_checks(Some(&path(&[&b, &a])), &current, None);
+        assert_eq!(warn.len(), 1);
+        assert_eq!(
+            warn[0].line(),
+            format!(
+                "warn binary: PATH resolves {}, this owl is {}",
+                other.display(),
+                current.display()
+            )
+        );
+        // No owl on PATH at all (empty dir, or no PATH): warn.
+        let empty = dir.path().join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        for pv in [Some(path(&[&empty])), None] {
+            let none = binary_checks(pv.as_deref(), &current, None);
+            assert_eq!(
+                none[0].line(),
+                format!(
+                    "warn binary: no owl on PATH, this owl is {}",
+                    current.display()
+                )
+            );
+        }
+        // Unit naming this file: still one ok row; naming another: a unit warn.
+        let unit = dir.path().join("owlpost.service");
+        std::fs::write(
+            &unit,
+            crate::cli::install::unit_text(
+                crate::cli::install::Os::Linux,
+                &current,
+                Path::new("/h"),
+            ),
+        )
+        .unwrap();
+        let ok = binary_checks(Some(&path(&[&a])), &current, Some(&unit));
+        assert_eq!(ok.len(), 1, "{ok:?}");
+        assert_eq!(ok[0].status, Status::Ok);
+        std::fs::write(
+            &unit,
+            crate::cli::install::unit_text(crate::cli::install::Os::Linux, &other, Path::new("/h")),
+        )
+        .unwrap();
+        let unit_warn = binary_checks(Some(&path(&[&a])), &current, Some(&unit));
+        assert_eq!(unit_warn.len(), 1, "{unit_warn:?}");
+        assert_eq!(
+            unit_warn[0].line(),
+            format!("warn binary: daemon unit runs {}", other.display())
+        );
+        // Both wrong: two warn rows, PATH first; the same rows in `--json`.
+        let both = binary_checks(Some(&path(&[&b])), &current, Some(&unit));
+        assert_eq!(
+            statuses(&both),
+            [
+                ("binary".to_string(), Status::Warn),
+                ("binary".to_string(), Status::Warn)
+            ]
+        );
+        assert!(both[0].detail.starts_with("PATH resolves "), "{both:?}");
+        assert!(both[1].detail.starts_with("daemon unit runs "), "{both:?}");
+        let json: Value = serde_json::from_str(&render(&both, true)).unwrap();
+        assert_eq!(json.as_array().unwrap().len(), 2);
+        assert_eq!(json[1]["status"], "warn");
+        assert_eq!(
+            json[1]["detail"],
+            format!("daemon unit runs {}", other.display())
+        );
+        // A launchd plist is read the same way.
+        let plist = dir.path().join("dev.owlpost.owl.plist");
+        std::fs::write(
+            &plist,
+            crate::cli::install::unit_text(crate::cli::install::Os::MacOs, &other, Path::new("/h")),
+        )
+        .unwrap();
+        let mac = binary_checks(Some(&path(&[&a])), &current, Some(&plist));
+        assert_eq!(
+            mac[0].line(),
+            format!("warn binary: daemon unit runs {}", other.display())
+        );
+        // A unit file that is absent or unparseable adds nothing.
+        let missing = binary_checks(Some(&path(&[&a])), &current, Some(&dir.path().join("nope")));
+        assert_eq!(missing[0].status, Status::Ok);
+        std::fs::write(&unit, "[Service]\nRestart=always\n").unwrap();
+        let junk = binary_checks(Some(&path(&[&a])), &current, Some(&unit));
+        assert_eq!(junk[0].status, Status::Ok, "{junk:?}");
+        assert!(
+            binary_checks(None, &current, Some(&unit))
+                .iter()
+                .all(|c| c.status != Status::Fail)
+        );
+    }
+
+    #[test]
+    fn unit_program_reads_systemd_quoting_and_plist_strings() {
+        assert_eq!(
+            unit_program("[Service]\nExecStart=\"/my bin/owl\" daemon --home \"/h\"\n"),
+            Some(PathBuf::from("/my bin/owl"))
+        );
+        assert_eq!(
+            unit_program("ExecStart=/opt/owl daemon\n"),
+            Some(PathBuf::from("/opt/owl"))
+        );
+        assert_eq!(
+            unit_program("ExecStart=\"/q\\\"x/owl\" daemon\n"),
+            Some(PathBuf::from("/q\"x/owl"))
+        );
+        assert_eq!(unit_program("[Service]\n"), None);
+        let plist = crate::cli::install::unit_text(
+            crate::cli::install::Os::MacOs,
+            Path::new("/a&b/owl"),
+            Path::new("/h"),
+        );
+        assert_eq!(unit_program(&plist), Some(PathBuf::from("/a&b/owl")));
+        assert_eq!(unit_program("<plist><key>Label</key></plist>"), None);
     }
 }

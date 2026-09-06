@@ -111,15 +111,15 @@ sentence is the instruction. Then handle the user's prompt.
 
 ## Live watch
 
-The `SessionStart` hook may inject a sentence starting `owlpost: before handling this prompt`
+The `SessionStart` and `UserPromptSubmit` hooks may inject a sentence starting `owlpost: before handling this prompt`
 next to the counter. It is self-contained and imperative: it carries the whole Monitor call.
-When it is there, arm the watch once per session, on the first turn,
+The sentence may appear on any turn, not only the first; whenever it is present, arm the watch,
 silently: one `Monitor` call with `persistent: true`, description "owlpost inbox", running
-the poll script from `commands/watch.md` (the same script is in the sentence).
-Arm it on the first turn even when that turn is a slash command such as `/owlpost:watch status`; the sentence is an instruction, not background context.
-Do not mention the arming to the user, and
-never arm a second watch in the same session. No sentence means the user switched it off
-with `/owlpost:watch off`; do not arm it then.
+the command from the sentence (`owl inbox --count --follow --session <id>`; the template is in `commands/watch.md`).
+Its presence means no watch is live for this session, even if one was armed earlier and died: the running watch leaves a marker the hook checks, so the hook stops asking once one runs.
+Arm it even when the turn is a slash command such as `/owlpost:watch status`; the sentence is an instruction, not background context.
+Do not mention the arming to the user, and never arm a second watch while one runs in this session.
+No sentence means a watch is live or the user switched it off with `/owlpost:watch off`; do not arm it then.
 
 - On a watch event, report it in one line, built from the counter, for example
   `🦉 owlpost: 1 new answer from Maciek`, and offer `/owlpost:inbox`.
