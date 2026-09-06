@@ -143,7 +143,7 @@ pub fn run_setup(home: &Path, opts: Opts) -> anyhow::Result<()> {
     } else {
         init(home, opts.name, opts.emails)?;
     }
-    install::install(home, false)?;
+    install::install(home, false, &install::owl_path()?)?;
     if has_claude {
         for c in plugin_cmds(&source) {
             run(&c)?;

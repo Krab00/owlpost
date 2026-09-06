@@ -131,8 +131,19 @@ fn no_load() -> bool {
 
 /// Absolute path of the running `owl` binary.
 pub fn owl_path() -> anyhow::Result<PathBuf> {
-    let exe = std::env::current_exe().context("locating the owl binary")?;
+    let exe = strip_deleted(std::env::current_exe().context("locating the owl binary")?);
     Ok(std::fs::canonicalize(&exe).unwrap_or(exe))
+}
+
+/// `<path> (deleted)` → `<path>`; anything else unchanged.
+// ponytail: on Linux `current_exe` reads `/proc/self/exe`, which names the running file
+// as `<path> (deleted)` once it was unlinked or renamed over (`owl update` does exactly
+// that), so the raw string would neither canonicalise nor point at the new file.
+pub fn strip_deleted(exe: PathBuf) -> PathBuf {
+    match exe.to_str().and_then(|s| s.strip_suffix(" (deleted)")) {
+        Some(s) => PathBuf::from(s),
+        None => exe,
+    }
 }
 
 /// Atomic write (temp + rename) creating parent directories.
@@ -225,13 +236,13 @@ fn unload(os: Os, path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `owl install [--dry-run]`.
-pub fn install(home: &Path, dry_run: bool) -> anyhow::Result<()> {
+/// `owl install [--dry-run]`: the unit runs `owl` (the CLI passes [`owl_path`]; `owl update`
+/// passes the path it captured before replacing the file, see OWL-030).
+pub fn install(home: &Path, dry_run: bool, owl: &Path) -> anyhow::Result<()> {
     let os = Os::current()?;
-    let owl = owl_path()?;
     let home_abs =
         std::path::absolute(home).with_context(|| format!("resolving {}", home.display()))?;
-    let text = unit_text(os, &owl, &home_abs);
+    let text = unit_text(os, owl, &home_abs);
     if dry_run {
         print!("{text}");
         return Ok(());
@@ -351,6 +362,21 @@ mod tests {
         let p = owl_path().unwrap();
         assert!(p.is_absolute());
         assert!(p.is_file());
+    }
+
+    /// OWL-030 AC2: only the exact ` (deleted)` suffix of `/proc/self/exe` is dropped.
+    #[test]
+    fn strip_deleted_drops_only_the_proc_suffix() {
+        let strip = |s: &str| strip_deleted(PathBuf::from(s));
+        assert_eq!(strip("/x/owl (deleted)"), PathBuf::from("/x/owl"));
+        assert_eq!(strip("/x/owl"), PathBuf::from("/x/owl"));
+        assert_eq!(strip("/x/owldeleted"), PathBuf::from("/x/owldeleted"));
+        assert_eq!(strip("/x/owl deleted"), PathBuf::from("/x/owl deleted"));
+        assert_eq!(strip("/x/owl(deleted)"), PathBuf::from("/x/owl(deleted)"));
+        assert_eq!(
+            strip("/x/owl (deleted)/owl"),
+            PathBuf::from("/x/owl (deleted)/owl")
+        );
     }
 
     #[test]
