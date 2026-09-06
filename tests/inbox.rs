@@ -397,7 +397,10 @@ fn session_start_arms_the_watch_unless_plugin_json_says_off() {
             "SessionStart",
         ];
         let at_start = h.ok(&ss);
-        assert!(at_start.contains("2 new questions (Ana 2)"), "{f}: {at_start}");
+        assert!(
+            at_start.contains("2 new questions (Ana 2)"),
+            "{f}: {at_start}"
+        );
         assert!(!at_start.contains(ARM), "{f}: {at_start}");
         assert!(!at_start.contains("--follow"), "{f}: {at_start}");
         // Only the echoed hookEventName may differ (codex shares the JSON shape).
