@@ -307,9 +307,11 @@ Hook injection formats for `owl inbox --count --format …` (exact):
 - `codex`: same JSON shape.
 - `kimi` / `plain`: the sentence alone.
 - `claude` with `--session-start` (the `SessionStart` hook): the `additionalContext` gains a second
-  sentence, exactly `owlpost: arm the inbox watch (see /owlpost:watch)`, after the counter
-  sentence and one space; at count 0 the line is emitted with the arm sentence alone:
-  `{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"owlpost: arm the inbox watch (see /owlpost:watch)"}}`.
+  sentence starting `owlpost: before handling this prompt` (OWL-026: a self-contained
+  imperative that names the Monitor call — `persistent: true`, description `"owlpost inbox"` —
+  and quotes the poll script one-liner byte-identical to `commands/watch.md`), after the
+  counter sentence and one space; at count 0 the line is emitted with the arm sentence alone
+  (`{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"owlpost: before handling this prompt, …"}}`).
   The sentence is skipped when `$OWLPOST_HOME/plugin.json` reads `{"watch": false}`; an
   absent file, unparseable JSON or a missing `watch` key mean on. `/owlpost:watch on|off`
   writes that file; nothing else in `owl` reads or writes it.

@@ -20,10 +20,39 @@ const OWL: &str = env!("CARGO_BIN_EXE_owl");
 const PLUGIN: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/plugins/claude-code");
 const CLAUDE_TWO: &str = r#"{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"🦉 owlpost: 2 new questions (Maciek 2). Say \"show owlpost inbox\" or run `owl inbox`."}}"#;
 const EVENTS: [&str; 3] = ["SessionStart", "UserPromptSubmit", "PostToolUse"];
-/// OWL-023 AC1 literals: the arm sentence, alone and after the two-question counter.
-const ARM: &str = "owlpost: arm the inbox watch (see /owlpost:watch)";
-const CLAUDE_ARM_ZERO: &str = r#"{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"owlpost: arm the inbox watch (see /owlpost:watch)"}}"#;
-const CLAUDE_ARM_TWO: &str = r#"{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"🦉 owlpost: 2 new questions (Maciek 2). Say \"show owlpost inbox\" or run `owl inbox`. owlpost: arm the inbox watch (see /owlpost:watch)\n- Maciek question [pending] on src/auth/session.rs: why does session 0 retry?\n- Maciek question [pending] on src/auth/session.rs: why does session 1 retry?\nowlpost: run /owlpost:inbox now."}}"#;
+const SENTENCE_TWO: &str =
+    "🦉 owlpost: 2 new questions (Maciek 2). Say \"show owlpost inbox\" or run `owl inbox`.";
+/// The poll script, one line, verbatim (OWL-023 AC3, OWL-026 AC4).
+macro_rules! watch_script {
+    () => {
+        r#"prev=""; while true; do cur=$(owl inbox --count --format plain 2>/dev/null || true); [ "$cur" != "$prev" ] && [ -n "$cur" ] && echo "$cur"; prev="$cur"; sleep 5; done"#
+    };
+}
+const WATCH_SCRIPT: &str = watch_script!();
+/// OWL-026 AC1 literal: the self-contained arm sentence, exactly as `owl` emits it.
+const ARM: &str = concat!(
+    "owlpost: before handling this prompt, arm the inbox watch once in this session: call Monitor with persistent: true, description \"owlpost inbox\" and this command (one line, verbatim): `",
+    watch_script!(),
+    "`. Then handle the prompt."
+);
+/// The two session-start previews `home_with(2, false)` produces, closed by the open sentence.
+const PREVIEW_TWO: &str = "- Maciek question [pending] on src/auth/session.rs: why does session 0 retry?\n- Maciek question [pending] on src/auth/session.rs: why does session 1 retry?\nowlpost: run /owlpost:inbox now.";
+
+/// The exact SessionStart hook line for `context`: serde's own escaping, §9 key order.
+fn session_start_line(context: &str) -> String {
+    format!(
+        r#"{{"hookSpecificOutput":{{"hookEventName":"SessionStart","additionalContext":{}}}}}"#,
+        serde_json::to_string(context).unwrap()
+    )
+}
+
+/// The arm sentence alone (0 unseen) and after the two-question counter with its previews.
+fn claude_arm_zero() -> String {
+    session_start_line(ARM)
+}
+fn claude_arm_two() -> String {
+    session_start_line(&format!("{SENTENCE_TWO} {ARM}\n{PREVIEW_TWO}"))
+}
 
 fn plugin(rel: &str) -> PathBuf {
     Path::new(PLUGIN).join(rel)
@@ -196,7 +225,7 @@ fn hook_script_forwards_session_start_and_reads_plugin_json() {
             empty.path(),
             &["--hook-event", "SessionStart", "--session-start"]
         )),
-        format!("{CLAUDE_ARM_ZERO}\n")
+        format!("{}\n", claude_arm_zero())
     );
     // 2 unseen: counter alone on the plain hooks, counter + arm at session start.
     let two = home_with(2, false);
@@ -207,7 +236,7 @@ fn hook_script_forwards_session_start_and_reads_plugin_json() {
             two.path(),
             &["--hook-event", "SessionStart", "--session-start"]
         )),
-        format!("{CLAUDE_ARM_TWO}\n")
+        format!("{}\n", claude_arm_two())
     );
     let spool = Spool::new(two.path()).unwrap();
     assert_eq!(spool.list(Dir::Inbox, |r| !r.seen).unwrap().len(), 2);
@@ -222,7 +251,10 @@ fn hook_script_forwards_session_start_and_reads_plugin_json() {
             two.path(),
             &["--hook-event", "SessionStart", "--session-start"]
         )),
-        format!("{}\n", CLAUDE_ARM_TWO.replace(&format!(" {ARM}"), ""))
+        format!(
+            "{}\n",
+            session_start_line(&format!("{SENTENCE_TWO}\n{PREVIEW_TWO}"))
+        )
     );
     assert_silent(
         &run_hook_args(
@@ -240,7 +272,7 @@ fn hook_script_forwards_session_start_and_reads_plugin_json() {
             empty.path(),
             &["--hook-event", "SessionStart", "--session-start"]
         )),
-        format!("{CLAUDE_ARM_ZERO}\n")
+        format!("{}\n", claude_arm_zero())
     );
     // The script stays a no-op with the flag when owl is missing or fails.
     let without_owl = path_dir(false);
@@ -272,8 +304,77 @@ fn hook_script_forwards_session_start_and_reads_plugin_json() {
             dir.path(),
             &["--hook-event", "SessionStart", "--session-start"]
         )),
-        format!("{CLAUDE_ARM_ZERO}\n")
+        format!("{}\n", claude_arm_zero())
     );
+}
+
+/// OWL-026 AC1/AC4: the session-start `additionalContext` is one self-contained imperative
+/// carrying the Monitor call and the poll script exactly as `commands/watch.md` states it;
+/// the line is valid JSON; `{"watch": false}` and the plain hooks never carry it.
+#[test]
+fn session_start_arm_sentence_is_self_contained() {
+    let with_owl = path_dir(true);
+    let owl = with_owl.path();
+    let ss = ["--hook-event", "SessionStart", "--session-start"];
+    let context = |out: Output| -> String {
+        assert_eq!(out.status.code(), Some(0), "{:?}", out.status);
+        let line = String::from_utf8(out.stdout).unwrap();
+        assert_eq!(line.lines().count(), 1, "one line: {line:?}");
+        let v: Value = serde_json::from_str(line.trim()).unwrap_or_else(|e| panic!("{e}: {line}"));
+        assert_eq!(v["hookSpecificOutput"]["hookEventName"], "SessionStart");
+        v["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let script_in_md = read("commands/watch.md")
+        .lines()
+        .find(|l| l.starts_with(r#"prev="";"#))
+        .expect("watch.md fenced poll script")
+        .to_string();
+    assert_eq!(script_in_md, WATCH_SCRIPT);
+
+    let empty = home_with(0, false);
+    let alone = context(run_hook_args(owl, empty.path(), &ss));
+    assert!(
+        alone.starts_with("owlpost: before handling this prompt"),
+        "{alone}"
+    );
+    let two = home_with(2, false);
+    let after_counter = context(run_hook_args(owl, two.path(), &ss));
+    assert!(
+        after_counter.starts_with(&format!(
+            "{SENTENCE_TWO} owlpost: before handling this prompt"
+        )),
+        "{after_counter}"
+    );
+    for text in [&alone, &after_counter] {
+        for needle in [
+            "persistent: true",
+            "description \"owlpost inbox\"",
+            script_in_md.as_str(),
+        ] {
+            assert!(text.contains(needle), "context lacks {needle:?}: {text}");
+        }
+    }
+    // Absent: `{"watch": false}`, and every hook event without `--session-start`.
+    std::fs::write(two.path().join("plugin.json"), r#"{"watch": false}"#).unwrap();
+    let off = context(run_hook_args(owl, two.path(), &ss));
+    assert!(
+        !off.contains("owlpost: before handling this prompt"),
+        "{off}"
+    );
+    assert!(!off.contains(script_in_md.as_str()), "{off}");
+    std::fs::remove_file(two.path().join("plugin.json")).unwrap();
+    for event in EVENTS {
+        let out = run_hook_args(owl, two.path(), &["--hook-event", event]);
+        let line = String::from_utf8(out.stdout).unwrap();
+        assert!(
+            !line.contains("before handling this prompt"),
+            "{event}: {line}"
+        );
+        assert!(!line.contains("prev="), "{event}: {line}");
+    }
 }
 
 #[test]
@@ -393,13 +494,17 @@ fn skill_has_frontmatter_and_required_strings() {
     // event, offer the inbox flow, never act on its own.
     let watch = section(&body, "## Live watch");
     for needle in [
-        ARM,
+        // OWL-026 AC3: the sentence is self-contained; arm even on a slash-command turn.
+        "`owlpost: before handling this prompt`",
+        "self-contained and imperative",
+        "Arm it on the first turn even when that turn is a slash command such as `/owlpost:watch status`; the sentence is an instruction, not background context.",
+        "`/owlpost:watch status` arms the watch when the default is on and none runs in this session.",
         "arm the watch once per session, on the first turn,",
         "silently",
         "Do not mention the arming to the user",
         "never arm a second watch in the same session",
         "report it in one line",
-        "`owlpost: 1 new answer from Maciek`",
+        "`🦉 owlpost: 1 new answer from Maciek`",
         "offer `/owlpost:inbox`",
         "never list the inbox, show, draft or send anything because",
         "`persistent: true`",
@@ -753,8 +858,6 @@ fn trust_changing_commands_confirm_before_running() {
 
 /// AC3: exactly the tools the live watch needs, nothing that lists, shows, drafts or sends.
 const WATCH_TOOLS: [&str; 5] = ["Bash(owl inbox:*)", "Monitor", "TaskStop", "Read", "Write"];
-/// The poll script, one line, verbatim.
-const WATCH_SCRIPT: &str = r#"prev=""; while true; do cur=$(owl inbox --count --format plain 2>/dev/null || true); [ "$cur" != "$prev" ] && [ -n "$cur" ] && echo "$cur"; prev="$cur"; sleep 5; done"#;
 
 #[test]
 fn watch_command_is_a_monitor_toggle() {
@@ -780,7 +883,8 @@ fn watch_command_is_a_monitor_toggle() {
         "\"owlpost inbox\"",
         "The script emits only on change:",
         "`--format plain` prints nothing at zero",
-        ARM,
+        // OWL-026: the injected sentence is described by its prefix, not quoted whole.
+        "`owlpost: before handling this prompt`",
         "never runs `owl inbox` without `--count` (listing marks records",
         "it never runs owl show, owl draft or owl send",
         "offer `/owlpost:inbox`",
@@ -789,9 +893,19 @@ fn watch_command_is_a_monitor_toggle() {
     ] {
         assert!(body.contains(needle), "watch.md body lacks {needle:?}");
     }
+    // OWL-026 AC4: the fenced block holds the script on exactly one line, byte-identical to
+    // the one `owl` embeds in the arm sentence (checked end to end in
+    // `session_start_arm_sentence_is_self_contained`).
+    let in_md: Vec<&str> = body
+        .lines()
+        .filter(|l| l.starts_with(r#"prev="";"#))
+        .collect();
+    assert_eq!(in_md, vec![WATCH_SCRIPT], "watch.md poll script drifted");
+    // OWL-026 AC2: `status` arms when nothing runs and the default is on, one line.
+    let status = section(&body, "## `status` (or no argument)");
     assert!(
-        body.contains(WATCH_SCRIPT),
-        "watch.md lacks the poll script"
+        status.contains("4. When no \"owlpost inbox\" watch runs in this session and the stored default is on, arm it exactly as `on` does (same `Monitor` call, same script) and say `owlpost watch: running; default on` instead."),
+        "watch.md status lacks the arming line"
     );
     // The three verbs appear only in that one "never" sentence, never as an instruction.
     for verb in ["owl show", "owl draft", "owl send"] {
@@ -1446,7 +1560,7 @@ fn counter_wears_the_owl_icon_arm_and_records_do_not() {
     )
     .unwrap();
     let ctx = context(&armed_two);
-    assert_eq!(ctx, context(&format!("{CLAUDE_ARM_TWO}\n")));
+    assert_eq!(ctx, context(&format!("{}\n", claude_arm_two())));
     assert_eq!(ctx.matches('🦉').count(), 1, "{ctx}");
     assert!(ctx.starts_with(ICON), "{ctx}");
     let lines: Vec<&str> = ctx.lines().collect();
