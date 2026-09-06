@@ -18,12 +18,12 @@ use tempfile::TempDir;
 
 const OWL: &str = env!("CARGO_BIN_EXE_owl");
 const PLUGIN: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/plugins/claude-code");
-const CLAUDE_TWO: &str = r#"{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"owlpost: 2 new questions (Maciek 2). Say \"show owlpost inbox\" or run `owl inbox`."}}"#;
+const CLAUDE_TWO: &str = r#"{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"🦉 owlpost: 2 new questions (Maciek 2). Say \"show owlpost inbox\" or run `owl inbox`."}}"#;
 const EVENTS: [&str; 3] = ["SessionStart", "UserPromptSubmit", "PostToolUse"];
 /// OWL-023 AC1 literals: the arm sentence, alone and after the two-question counter.
 const ARM: &str = "owlpost: arm the inbox watch (see /owlpost:watch)";
 const CLAUDE_ARM_ZERO: &str = r#"{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"owlpost: arm the inbox watch (see /owlpost:watch)"}}"#;
-const CLAUDE_ARM_TWO: &str = r#"{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"owlpost: 2 new questions (Maciek 2). Say \"show owlpost inbox\" or run `owl inbox`. owlpost: arm the inbox watch (see /owlpost:watch)\n- Maciek question [pending] on src/auth/session.rs: why does session 0 retry?\n- Maciek question [pending] on src/auth/session.rs: why does session 1 retry?\nowlpost: run /owlpost:inbox now."}}"#;
+const CLAUDE_ARM_TWO: &str = r#"{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"🦉 owlpost: 2 new questions (Maciek 2). Say \"show owlpost inbox\" or run `owl inbox`. owlpost: arm the inbox watch (see /owlpost:watch)\n- Maciek question [pending] on src/auth/session.rs: why does session 0 retry?\n- Maciek question [pending] on src/auth/session.rs: why does session 1 retry?\nowlpost: run /owlpost:inbox now."}}"#;
 
 fn plugin(rel: &str) -> PathBuf {
     Path::new(PLUGIN).join(rel)
@@ -1373,4 +1373,178 @@ fn seed_home_for_smoke() {
         home.display()
     );
     println!("expected hook output:\n{CLAUDE_TWO}");
+}
+
+// ---------- OWL-027: owl icon on the counter, orange frame on peer messages ----------
+
+/// The counter prefix, verbatim (AC1).
+const ICON: &str = "🦉 ";
+/// The 16 × 🟧 frame line, verbatim (AC2).
+const FRAME_LINE: &str = "🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧";
+const FRAME_HEADER: &str = "🦉 **<peer>** · HH:MM · <project> · <path or \"whole repository\">";
+const DRAFTS_NOT_FRAMED: &str = "Drafts (our own text) are not framed: they keep the plain code block, so the orange frame always means \"from a peer\".";
+const FRAMED_REF: &str = "print the framed message block (see the skill, \"Framed message\")";
+const OLD_PHRASE: &str = "in a code block with peer name";
+const WATCH_EVENT: &str = "`🦉 owlpost: 1 new answer from Maciek`";
+
+/// `owl inbox --count --format <f>` against `home`, stdout as a string (exit 0).
+fn count(home: &Path, format: &str) -> String {
+    let out = Command::new(OWL)
+        .args(["inbox", "--count", "--format", format])
+        .env("OWLPOST_HOME", home)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{format}: {:?}", out.status);
+    String::from_utf8(out.stdout).unwrap()
+}
+
+/// AC1: the counter sentence starts with `🦉 ` in plain and claude; zero prints nothing in
+/// plain; the arm sentence and the `- <peer> ...` record lines carry no icon.
+#[test]
+fn counter_wears_the_owl_icon_arm_and_records_do_not() {
+    let two = home_with(2, false);
+    let plain = count(two.path(), "plain");
+    assert_eq!(
+        plain,
+        format!(
+            "{ICON}owlpost: 2 new questions (Maciek 2). Say \"show owlpost inbox\" or run `owl inbox`.\n"
+        )
+    );
+    assert_eq!(count(two.path(), "claude"), format!("{CLAUDE_TWO}\n"));
+    let context = |line: &str| -> String {
+        let v: Value = serde_json::from_str(line.trim()).unwrap();
+        v["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    assert_eq!(context(&count(two.path(), "claude")), plain.trim_end());
+    // Zero: nothing in plain, and the arm sentence alone (no icon) at session start.
+    let empty = home_with(0, false);
+    assert_eq!(count(empty.path(), "plain"), "");
+    let with_owl = path_dir(true);
+    let armed_zero = String::from_utf8(
+        run_hook_args(
+            with_owl.path(),
+            empty.path(),
+            &["--hook-event", "SessionStart", "--session-start"],
+        )
+        .stdout,
+    )
+    .unwrap();
+    assert_eq!(context(&armed_zero), ARM);
+    assert!(!ARM.contains('🦉'));
+    // Two unseen at session start: icon once, on the counter; the arm sentence and every
+    // preview line are icon-free.
+    let armed_two = String::from_utf8(
+        run_hook_args(
+            with_owl.path(),
+            two.path(),
+            &["--hook-event", "SessionStart", "--session-start"],
+        )
+        .stdout,
+    )
+    .unwrap();
+    let ctx = context(&armed_two);
+    assert_eq!(ctx, context(&format!("{CLAUDE_ARM_TWO}\n")));
+    assert_eq!(ctx.matches('🦉').count(), 1, "{ctx}");
+    assert!(ctx.starts_with(ICON), "{ctx}");
+    let lines: Vec<&str> = ctx.lines().collect();
+    assert_eq!(lines.len(), 4, "{ctx}");
+    assert!(lines[0].contains(ARM) && !lines[0][ICON.len()..].contains('🦉'));
+    assert!(lines[1].starts_with("- Maciek question") && !lines[1].contains('🦉'));
+    assert!(lines[2].starts_with("- Maciek question") && !lines[2].contains('🦉'));
+    assert!(!lines[3].contains('🦉'));
+}
+
+/// AC2: SKILL.md "Showing messages" has the "Framed message" subsection: the 16 × 🟧 line,
+/// the header shape, the drafts-not-framed sentence and the fingerprint-on-consent rule.
+#[test]
+fn skill_documents_the_framed_message() {
+    let (_, body) = frontmatter("skills/owlpost/SKILL.md");
+    let showing = section(&body, "## Showing messages");
+    let framed = showing
+        .find("\n### Framed message\n")
+        .map(|i| &showing[i..])
+        .expect("### Framed message under Showing messages");
+    assert_eq!(FRAME_LINE.chars().count(), 16);
+    assert_eq!(
+        framed.lines().filter(|l| *l == FRAME_LINE).count(),
+        2,
+        "top and bottom line, each exactly 16 × 🟧"
+    );
+    assert!(
+        framed
+            .lines()
+            .all(|l| !l.starts_with('🟧') || l == FRAME_LINE),
+        "a 🟧 line is the frame line, nothing shorter or longer"
+    );
+    for needle in [
+        "🦉 **Krzysztof Abramczyk** · 09:08 · github.com/Krab00/owlpost · whole repository",
+        "```text\nJaki masz ostatni commit u Siebie?\n```",
+        "Top and bottom line: 16 × `🟧`.",
+        FRAME_HEADER,
+        "On a `consent` record the header also carries the peer's fingerprint",
+        "Body: the message text verbatim in a code block",
+        "The answers table above keeps the per-peer colour markers and is not framed.",
+    ] {
+        assert!(framed.contains(needle), "Framed message lacks {needle:?}");
+    }
+    assert!(
+        framed.lines().any(|l| l == DRAFTS_NOT_FRAMED),
+        "Framed message lacks the drafts-not-framed line"
+    );
+}
+
+/// AC3: inbox.md steps 2, 3 and 5 print the framed block (the old "in a code block with
+/// peer name" phrase is gone from them), step 4 keeps the plain draft code block; watch.md
+/// carries the event example with the icon.
+#[test]
+fn inbox_steps_print_the_framed_block_and_watch_event_has_the_icon() {
+    let (_, body) = frontmatter("commands/inbox.md");
+    let step = |n: usize| {
+        let start = body
+            .find(&format!("\n## {n}. "))
+            .unwrap_or_else(|| panic!("inbox.md step {n}"));
+        let rest = &body[start + 1..];
+        let end = rest[1..].find("\n## ").map_or(rest.len(), |i| i + 1);
+        &rest[..end]
+    };
+    for n in [2, 3, 5] {
+        let s = step(n);
+        assert!(
+            s.contains(FRAMED_REF),
+            "inbox.md step {n} lacks {FRAMED_REF:?}"
+        );
+        assert!(
+            !s.contains(OLD_PHRASE),
+            "inbox.md step {n} still says {OLD_PHRASE:?}"
+        );
+    }
+    assert!(step(3).contains(FRAMED_REF));
+    assert!(
+        step(2).contains("the fingerprint"),
+        "consent header keeps the fingerprint"
+    );
+    let drafts = step(4);
+    assert!(
+        !drafts.contains("framed"),
+        "step 4 (drafts) must stay unframed: {drafts}"
+    );
+    assert!(drafts.contains("print\n   the draft verbatim in a code block"));
+    assert!(
+        step(5).contains("is not framed"),
+        "answers table stays unframed"
+    );
+
+    let (_, watch) = frontmatter("commands/watch.md");
+    assert!(
+        watch.contains(WATCH_EVENT),
+        "watch.md lacks {WATCH_EVENT:?}"
+    );
+    assert!(
+        !watch.contains("(\"owlpost: 1 new answer from"),
+        "watch.md still quotes the icon-free event"
+    );
+    assert!(watch.contains(WATCH_SCRIPT), "poll script untouched");
 }
