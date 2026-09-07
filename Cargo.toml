@@ -41,6 +41,8 @@ iroh = { version = "1.1.0", default-features = false, features = ["tls-ring"] }
 hyper = { version = "1", features = ["http1", "client", "server"] }
 hyper-util = { version = "0.1", features = ["tokio", "service"] }
 http-body-util = "0.1"
+# chrono (clock, no default features): local HH:MM in `--format claude`; already a transitive dep.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 [dev-dependencies]
 tempfile = "3"
