@@ -120,7 +120,8 @@ pub fn auto_error(rec: &Record) -> Option<&str> {
 ///   `done/` next to the untouched original in `inbox/`; the retry rewrites `done/` in place
 ///   and removes the original.
 ///
-/// Either way the error is returned, never swallowed, so the caller exits non-zero.
+/// Either way the error is returned, never swallowed, so the caller exits non-zero. The
+/// record's wake files and routing (`crate::route`) are released once `done/` holds it.
 pub fn finish(
     spool: &Spool,
     id: &str,
@@ -137,6 +138,8 @@ pub fn finish(
     spool
         .put(Dir::Done, id, &rec)
         .with_context(|| format!("finishing record {id}"))?;
+    // The record left the inbox: no session should wake for it any more (OWL-033).
+    crate::route::release(spool.home(), id);
     let src = spool.path(Dir::Inbox, id);
     std::fs::remove_file(&src).with_context(|| format!("removing {}", src.display()))
 }

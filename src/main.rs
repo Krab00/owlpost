@@ -115,6 +115,8 @@ enum Cmd {
     Send { id: String },
     /// Discard a record
     Reject { id: String },
+    /// Route an inbox record to one live Claude Code session (what the daemon does on arrival)
+    Route { id: String },
     /// Finished exchanges
     History {
         #[arg(long)]
@@ -337,6 +339,24 @@ fn main() -> ExitCode {
         }
         Cmd::Inbox {
             count,
+            format,
+            hook_event,
+            ..
+        } if hook_event == cli::inbox::SESSION_END
+            && (!count || format.as_deref() != Some("claude")) =>
+        {
+            // SessionEnd only tears down the session's wake dir: it is the Claude hook's
+            // `--count --format claude` invocation or a usage error.
+            use clap::{CommandFactory, error::ErrorKind};
+            Cli::command()
+                .error(
+                    ErrorKind::ArgumentConflict,
+                    "--hook-event SessionEnd requires --count --format claude",
+                )
+                .exit()
+        }
+        Cmd::Inbox {
+            count,
             new,
             all,
             format,
@@ -378,6 +398,7 @@ fn main() -> ExitCode {
         Cmd::Edit { id } => cli::edit::run(&home, &id, cli.json),
         Cmd::Send { id } => cli::send::run(&home, &id, cli.json),
         Cmd::Reject { id } => cli::reject::run(&home, &id, cli.json),
+        Cmd::Route { id } => cli::route::run(&home, &id, cli.json),
         Cmd::History { peer, path, since } => {
             cli::history::run(&home, cli::history::Filters { peer, path, since }, cli.json)
         }
