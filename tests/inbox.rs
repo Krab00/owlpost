@@ -2398,6 +2398,32 @@ fn inbox_format_claude_prints_the_answers_table() {
         "{}",
         table2[1]
     );
+
+    // The 24 h window on its own (no row cap in play): one answer 25 h old and one recent —
+    // one row, and the older one counted under the table.
+    let h3 = Home::new();
+    h3.put_answer(
+        &maciek,
+        "old?",
+        "old",
+        &envelope::unix_to_rfc3339(now - 25 * 3_600),
+    );
+    h3.put_answer(&ana, "new?", "new", &envelope::unix_to_rfc3339(now - 60));
+    let out3 = h3.ok_tz("UTC", &["inbox", "--format", "claude"]);
+    let table3: Vec<&str> = out3.lines().filter(|l| l.starts_with("| ")).collect();
+    assert_eq!(table3.len(), 1, "{out3}");
+    assert!(
+        table3[0].starts_with("| 🟦 ") && table3[0].ends_with("· Ana | new |"),
+        "{out3}"
+    );
+    assert!(
+        !out3.contains("| old |") && !out3.contains("\"old?\""),
+        "{out3}"
+    );
+    assert!(
+        out3.ends_with("1 older answers not shown — owl history\n"),
+        "{out3}"
+    );
 }
 
 /// AC3: a consent question, a pending question and one answer: the two framed blocks
