@@ -501,6 +501,7 @@ async fn post_question(
         .map_err(ApiError::storage)?;
     remember(&state, &payload.id, now)?;
     tracing::info!(peer = %caller, id = %payload.id, state = record_state, "question spooled");
+    route_new_record(&state, &payload.id);
     on_question_spooled(
         &state,
         Spooled {
@@ -515,6 +516,16 @@ async fn post_question(
         Json(json!({ "status": "accepted", "id": payload.id })),
     )
         .into_response())
+}
+
+/// A new inbox record: wake exactly one live Claude Code session for it (OWL-033,
+/// `crate::route`). Errors are logged, never propagated — the record is spooled either way.
+pub fn route_new_record(state: &AppState, id: &str) {
+    match crate::route::route(&state.home, &state.config, &state.spool, id) {
+        Ok(Some(sid)) => tracing::info!(id, session = %sid, "routed to session"),
+        Ok(None) => tracing::debug!(id, "no live session to wake"),
+        Err(e) => tracing::warn!(id, error = %format!("{e:#}"), "routing failed"),
+    }
 }
 
 /// Records the id in the replay window (memory + `seen-ids.txt`).

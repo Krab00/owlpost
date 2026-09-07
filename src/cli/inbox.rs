@@ -6,25 +6,32 @@
 //! total) and never marks anything; with `--format` it prints the harness injection line
 //! instead, or nothing at all when the count is 0.
 //!
-//! `--count --format claude` (the plugin hook) is event-driven (OWL-031). On `--hook-event
-//! SessionStart` the line always goes out (also at count 0) and its `hookSpecificOutput`
-//! carries `watchPaths: ["<home>/spool/inbox"]` — Claude Code watches that directory and
-//! runs the `FileChanged` hook on every `add`/`change`/`unlink` there — unless
-//! `$OWLPOST_HOME/plugin.json` says `{"watch": false}` (then the key is absent and count 0
-//! prints nothing). `additionalContext` is present only when there is text: the counter
-//! sentence, on `SessionStart` one preview line per unseen record (`- <name> <kind> [<state>]
-//! on <path>: <first line>`) and the `OPEN_SENTENCE` so the first turn opens the inbox
-//! instead of reporting a counter; the preview never marks anything seen. `SessionStart`
-//! also sweeps `$OWLPOST_HOME/watch/`: every marker whose pid is dead is removed, live ones
-//! stay, and the sweep never fails the hook.
+//! `--count --format claude` (the plugin hook) is event-driven (OWL-031) and per session
+//! (OWL-033, `owlpost::route`). Every Claude event reads the hook input JSON on stdin once;
+//! its `session_id` (`[A-Za-z0-9._-]{1,128}`) names the session. On `--hook-event
+//! SessionStart` the hook creates `sessions/<sid>/{wake,tmp}`, writes `marker.json` (the
+//! canonicalised `cwd`, `source`, both timestamps), sweeps dead session directories, assigns
+//! the unseen backlog to this session (routing only, no wake file) and prints the line — also
+//! at count 0 — whose `hookSpecificOutput` carries `watchPaths:
+//! ["<home>/sessions/<sid>/wake"]`, unless `$OWLPOST_HOME/plugin.json` says `{"watch":
+//! false}` (then the key is absent and count 0 prints nothing; the marker is still written).
+//! Without a usable `session_id` no marker is written and no `watchPaths` goes out.
+//! `additionalContext` is present only when there is text: the counter sentence, on
+//! `SessionStart` one preview line per unseen record (`- <name> <kind> [<state>] on <path>:
+//! <first line>`) and the `OPEN_SENTENCE` so the first turn opens the inbox instead of
+//! reporting a counter; the preview never marks anything seen. `SessionStart` also sweeps
+//! `$OWLPOST_HOME/watch/` (the `--follow` markers below); no sweep ever fails the hook.
+//! `UserPromptSubmit` and `PostToolUse` print what they always did and touch the session's
+//! heartbeat. `SessionEnd` removes `sessions/<sid>/`, clears `current` in every routing
+//! naming the session, prints nothing and exits 0.
 //!
-//! `--count --format claude --hook-event FileChanged` is the wake: it reads the hook's stdin
-//! JSON and, when `event` is `add`, the unseen count is above 0 and the watch is enabled,
-//! prints the counter sentence to stderr and exits 2 — the one exit code Claude Code's
-//! `asyncRewake` hook turns into a new model turn; every other case (`change`, `unlink`, count
-//! 0, watch off, a terminal, empty or unparseable stdin, no `event`) exits 0 silently. Keying
-//! on `add` is the de-duplication: marking seen and moving to `done/` are `change`/`unlink`.
-//! Nothing is ever marked seen.
+//! `--count --format claude --hook-event FileChanged` is the wake: when `event` is `add`,
+//! `file_path` is a file directly under `<home>/sessions/<sid>/wake/` and the watch is
+//! enabled, it prints that file's content byte for byte on stderr and exits 2 — the one exit
+//! code Claude Code's `asyncRewake` hook turns into a new model turn; every other case
+//! (`change`, `unlink`, another path, a missing file, watch off, a terminal, empty or
+//! unparseable stdin) exits 0 silently. The hook never composes text: the daemon (or `owl
+//! route`) wrote the file for exactly this session. Nothing is ever marked seen.
 //!
 //! `--count --follow [--session <id>]` is a poll loop any harness can run (plain format
 //! only): with `--session` it writes its pid to the marker, then polls the count every 5 s
@@ -37,7 +44,8 @@
 //! then the answers table (`owlpost::render::answers_table`: last 24 h, the 10 newest,
 //! newest last, per-peer markers persisted in `$OWLPOST_HOME/markers.json`), one blank line
 //! between sections and nothing else; the consent prompts and `auto_error` notes of the plain
-//! listing are not printed. The listed records are marked seen the same way.
+//! listing are not printed. The listed records are marked seen the same way, and every
+//! listed record is released from the session wake routing (OWL-033).
 //!
 //! Consent records get a prompt line under the table (`<name> wants to ask your agent about
 //! <project> — owl allow <fp> [--once|--always] / owl deny <fp>`); records the auto-accept
@@ -55,6 +63,7 @@ use owlpost::answer::auto_error;
 use owlpost::contacts::ContactBook;
 use owlpost::envelope::{self, Body, Kind, Payload};
 use owlpost::render::{self, AnswerRow, Markers};
+use owlpost::route;
 use owlpost::spool::{Dir, Record, Spool};
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -73,26 +82,20 @@ pub struct Opts {
 }
 
 /// Session ids: `[A-Za-z0-9._-]{1,128}`, so `watch/<id>` can never leave `watch/`.
-pub const SESSION_ID_RULE: &str = "[A-Za-z0-9._-]{1,128}";
+pub use owlpost::route::{SESSION_ID_RULE, pid_alive, valid_session_id};
 /// Poll interval of `--follow` in seconds (fractions allowed); default 5.
 pub const FOLLOW_SECS_ENV: &str = "OWLPOST_FOLLOW_SECS";
 /// Where a running follow leaves its pid: `$OWLPOST_HOME/watch/<session id>`.
 pub const MARKER_DIR: &str = "watch";
 /// The hook event that wakes the session (Claude Code's `FileChanged`, OWL-031).
 pub const FILE_CHANGED: &str = "FileChanged";
+/// The hook event that ends a session's wake dir (Claude Code's `SessionEnd`, OWL-033).
+pub const SESSION_END: &str = "SessionEnd";
 /// The exit code Claude Code's `asyncRewake` hook turns into a new model turn.
 pub const WAKE_EXIT: i32 = 2;
 
 /// Prefix of every counter sentence: incoming messages wear the owl (OWL-027).
 pub const ICON: &str = "🦉 ";
-
-/// `[A-Za-z0-9._-]{1,128}`.
-pub fn valid_session_id(id: &str) -> bool {
-    (1..=128).contains(&id.len())
-        && id
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
-}
 
 /// clap value parser for `--session`: a usage error (exit 2) for anything outside the rule.
 pub fn parse_session_id(s: &str) -> Result<String, String> {
@@ -106,21 +109,6 @@ pub fn parse_session_id(s: &str) -> Result<String, String> {
 /// `$OWLPOST_HOME/watch/<id>`.
 pub fn marker_path(home: &Path, id: &str) -> PathBuf {
     home.join(MARKER_DIR).join(id)
-}
-
-#[cfg(target_os = "linux")]
-fn pid_alive(pid: u32) -> bool {
-    Path::new("/proc").join(pid.to_string()).exists()
-}
-
-#[cfg(not(target_os = "linux"))]
-fn pid_alive(pid: u32) -> bool {
-    std::process::Command::new("kill")
-        .args(["-0", &pid.to_string()])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
 }
 
 /// A marker is live when it holds the pid of a running process.
@@ -165,18 +153,36 @@ pub fn file_changed_event(input: &Value) -> Option<&str> {
     input.get("event")?.as_str()
 }
 
-/// The directory Claude Code watches for the wake: `<home>/spool/inbox`, absolute —
-/// canonicalised when it exists, otherwise resolved against the current directory.
-pub fn inbox_watch_path(home: &Path) -> PathBuf {
-    let inbox = home.join("spool").join("inbox");
-    if let Ok(real) = inbox.canonicalize() {
-        return real;
+/// The `session_id` of a hook input when it follows the rule; `None` otherwise.
+pub fn session_id_of(input: Option<&Value>) -> Option<String> {
+    input?
+        .get("session_id")?
+        .as_str()
+        .filter(|s| valid_session_id(s))
+        .map(str::to_string)
+}
+
+/// A string field of a hook input, `""` when absent.
+fn input_str<'a>(input: Option<&'a Value>, key: &str) -> &'a str {
+    input.and_then(|v| v.get(key)?.as_str()).unwrap_or_default()
+}
+
+/// The `FileChanged` wake (OWL-033): `Some(bytes)` when `event` is `add` and `file_path` is a
+/// readable file directly under `<home>/sessions/<sid>/wake/` (both sides canonicalised, so
+/// `sessions/S1/wake-evil/x.md` or `sessions/S10/wake/x.md` never match `S1`); `None` for
+/// everything else.
+pub fn wake_bytes(home: &Path, sid: &str, input: &Value) -> Option<Vec<u8>> {
+    if file_changed_event(input) != Some("add") {
+        return None;
     }
-    if inbox.is_absolute() {
-        inbox
-    } else {
-        std::env::current_dir().map_or(inbox.clone(), |cwd| cwd.join(inbox))
+    let file = Path::new(input.get("file_path")?.as_str()?)
+        .canonicalize()
+        .ok()?;
+    let wake = route::wake_dir(home, sid).canonicalize().ok()?;
+    if file.parent() != Some(wake.as_path()) || !file.is_file() {
+        return None;
     }
+    std::fs::read(&file).ok()
 }
 
 /// `OWLPOST_FOLLOW_SECS` as a duration; unset, empty, unparseable or negative → 5 s.
@@ -434,6 +440,8 @@ pub fn run(home: &Path, opts: Opts) -> anyhow::Result<()> {
         if !rec.seen {
             spool.mark_seen(Dir::Inbox, id)?;
         }
+        // Listed: no session needs to wake for it (OWL-033).
+        route::release(home, id);
     }
     Ok(())
 }
@@ -455,7 +463,7 @@ fn print_rendered(
         match &payload.body {
             Body::Question { .. } => {
                 let draft = StoredDraft::from_record(id, rec)?;
-                let block = super::show::render_record(spool, book, rec, &payload, draft.as_ref());
+                let block = render::record_block(spool, book, rec, &payload, draft.as_ref());
                 if rec.state == "consent" {
                     consent.push(block);
                 } else {
@@ -529,26 +537,64 @@ fn count(
     let Opts { all, json, .. } = *opts;
     let event = opts.hook_event.as_str();
     let session_start = event == "SessionStart";
+    // The Claude hook input (OWL-033): read once, for every event; unusable stdin means no
+    // session and every event behaves as before.
+    let input = (format == Some(Format::Claude))
+        .then(hook_input_from_stdin)
+        .flatten();
+    let sid = session_id_of(input.as_ref());
     if session_start {
         sweep_markers(home);
     }
+    if format == Some(Format::Claude) {
+        match event {
+            FILE_CHANGED => {
+                // The wake: print the session's wake file byte for byte and exit 2; anything
+                // else, including unusable stdin, is a silent exit 0.
+                if let (Some(sid), Some(input)) = (&sid, &input)
+                    && watch
+                    && let Some(bytes) = wake_bytes(home, sid, input)
+                {
+                    let mut err = std::io::stderr().lock();
+                    let _ = err.write_all(&bytes);
+                    let _ = err.flush();
+                    std::process::exit(WAKE_EXIT);
+                }
+                return Ok(());
+            }
+            SESSION_END => {
+                if let Some(sid) = &sid {
+                    route::end_session(home, sid);
+                }
+                return Ok(());
+            }
+            "UserPromptSubmit" | "PostToolUse" => {
+                if let Some(sid) = &sid {
+                    let _ = route::touch_heartbeat(home, sid);
+                }
+            }
+            _ => {}
+        }
+    }
+    // SessionStart with a session: the private wake dir, the marker, the sweep, the backlog.
+    let registered = session_start
+        && sid.as_ref().is_some_and(|sid| {
+            let marker = route::Marker::new(
+                sid,
+                input_str(input.as_ref(), "cwd"),
+                input_str(input.as_ref(), "source"),
+            );
+            let ok = route::write_marker(home, &marker).is_ok();
+            route::sweep_sessions(home);
+            route::assign_backlog(home, spool, sid);
+            ok
+        });
     let Counts {
         records,
         per_peer,
         questions,
     } = counts(spool, book, all)?;
     let total = records.len();
-    if format == Some(Format::Claude) && event == FILE_CHANGED {
-        // The wake (OWL-031): only a new record (`add`) with something unseen, and only while
-        // the watch is on. Anything else, including unusable stdin, is a silent exit 0.
-        let input = hook_input_from_stdin();
-        let added = input.as_ref().and_then(file_changed_event) == Some("add");
-        if added && watch && total > 0 {
-            eprintln!("{}", sentence(&per_peer, total - questions));
-            std::process::exit(WAKE_EXIT);
-        }
-        return Ok(());
-    }
     let previews = if session_start {
         records
             .iter()
@@ -559,7 +605,9 @@ fn count(
     };
     match format {
         Some(f) => {
-            let watch_path = (session_start && watch).then(|| inbox_watch_path(home));
+            let watch_path = (registered && watch)
+                .then(|| sid.as_deref().map(|sid| route::wake_watch_path(home, sid)))
+                .flatten();
             if let Some(line) = injection(
                 f,
                 &per_peer,
@@ -823,24 +871,122 @@ mod tests {
     }
 
     #[test]
-    fn inbox_watch_path_is_absolute_and_canonical_when_it_exists() {
+    fn wake_watch_path_is_absolute_and_canonical_when_it_exists() {
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path();
+        let wake = home.join("sessions").join("S1").join("wake");
         // Absent: the absolute join, untouched.
-        assert_eq!(inbox_watch_path(home), home.join("spool").join("inbox"));
+        assert_eq!(route::wake_watch_path(home, "S1"), wake);
         // Present: canonicalised (a symlinked home resolves to the real directory).
-        std::fs::create_dir_all(home.join("spool").join("inbox")).unwrap();
+        std::fs::create_dir_all(&wake).unwrap();
         let link = dir.path().join("link");
         std::os::unix::fs::symlink(home, &link).unwrap();
         assert_eq!(
-            inbox_watch_path(&link),
-            home.canonicalize().unwrap().join("spool").join("inbox")
+            route::wake_watch_path(&link, "S1"),
+            home.canonicalize()
+                .unwrap()
+                .join("sessions")
+                .join("S1")
+                .join("wake")
         );
-        assert!(inbox_watch_path(&link).is_absolute());
+        assert!(route::wake_watch_path(&link, "S1").is_absolute());
         // A relative home is resolved against the current directory.
-        let rel = inbox_watch_path(Path::new("rel-home"));
+        let rel = route::wake_watch_path(Path::new("rel-home"), "S1");
         assert!(rel.is_absolute(), "{}", rel.display());
-        assert!(rel.ends_with("rel-home/spool/inbox"), "{}", rel.display());
+        assert!(
+            rel.ends_with("rel-home/sessions/S1/wake"),
+            "{}",
+            rel.display()
+        );
+    }
+
+    #[test]
+    fn session_id_of_reads_only_a_valid_string() {
+        let v = |s: &str| serde_json::from_str::<Value>(s).unwrap();
+        assert_eq!(
+            session_id_of(Some(&v(r#"{"session_id":"S-1.x"}"#))),
+            Some("S-1.x".into())
+        );
+        for bad in [
+            "{}",
+            r#"{"session_id": 5}"#,
+            r#"{"session_id": ""}"#,
+            r#"{"session_id": "a/b"}"#,
+            r#"{"sessionId": "S"}"#,
+            "[]",
+        ] {
+            assert_eq!(session_id_of(Some(&v(bad))), None, "{bad}");
+        }
+        assert_eq!(session_id_of(None), None);
+    }
+
+    #[test]
+    fn wake_bytes_only_for_an_add_directly_under_the_session_wake_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let wake = route::wake_dir(home, "S1");
+        std::fs::create_dir_all(&wake).unwrap();
+        std::fs::create_dir_all(route::wake_dir(home, "S10")).unwrap();
+        std::fs::create_dir_all(home.join("sessions").join("S1").join("wake-evil")).unwrap();
+        std::fs::create_dir_all(wake.join("nested")).unwrap();
+        let body = "🟧 line one\nline two\n\n";
+        std::fs::write(wake.join("r.md"), body).unwrap();
+        std::fs::write(route::wake_dir(home, "S10").join("r.md"), "other").unwrap();
+        std::fs::write(
+            home.join("sessions")
+                .join("S1")
+                .join("wake-evil")
+                .join("r.md"),
+            "evil",
+        )
+        .unwrap();
+        std::fs::write(wake.join("nested").join("r.md"), "nested").unwrap();
+        let input = |event: &str, path: &Path| json!({"session_id": "S1", "event": event, "file_path": path.to_string_lossy()});
+        assert_eq!(
+            wake_bytes(home, "S1", &input("add", &wake.join("r.md"))),
+            Some(body.as_bytes().to_vec())
+        );
+        // Through a symlinked home the canonical file still matches.
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(home, &link).unwrap();
+        assert_eq!(
+            wake_bytes(
+                &link,
+                "S1",
+                &input("add", &link.join("sessions/S1/wake/r.md"))
+            ),
+            Some(body.as_bytes().to_vec())
+        );
+        for event in ["change", "unlink", "", "Add"] {
+            assert_eq!(
+                wake_bytes(home, "S1", &input(event, &wake.join("r.md"))),
+                None
+            );
+        }
+        for other in [
+            route::wake_dir(home, "S10").join("r.md"),
+            home.join("sessions/S1/wake-evil/r.md"),
+            wake.join("nested/r.md"),
+            wake.join("nested"),
+            wake.join("missing.md"),
+            home.join("spool/inbox/r.json"),
+        ] {
+            assert_eq!(
+                wake_bytes(home, "S1", &input("add", &other)),
+                None,
+                "{}",
+                other.display()
+            );
+        }
+        assert_eq!(
+            wake_bytes(home, "S10", &input("add", &wake.join("r.md"))),
+            None
+        );
+        assert_eq!(wake_bytes(home, "S1", &json!({"event": "add"})), None);
+        assert_eq!(
+            wake_bytes(home, "S1", &json!({"event": "add", "file_path": 5})),
+            None
+        );
     }
 
     #[test]
