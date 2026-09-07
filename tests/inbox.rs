@@ -2061,3 +2061,316 @@ fn edit_after_failed_send_is_refused_because_the_answer_is_spooled() {
     );
     assert!(log.exists());
 }
+
+// ---------- OWL-032: `--format claude` renders the framed block and the answers table ----------
+
+/// The 16 × 🟧 frame line, verbatim.
+const FRAME: &str = "🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧";
+/// A fixed `received_at`: 23:08 UTC, 08:08 in `Etc/GMT-9` (UTC+9).
+const RECEIVED: &str = "2026-09-06T23:08:11Z";
+const NOTE: &str = "note: the draft is in a different language than the question — pick Edit";
+const OLDER_TWO: &str = "2 older answers not shown — owl history";
+
+impl Home {
+    /// `owl <args>` with `TZ` set for the child, stdout (exit 0).
+    fn ok_tz(&self, tz: &str, args: &[&str]) -> String {
+        let out = self.owl().env("TZ", tz).args(args).output().unwrap();
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "owl {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap()
+    }
+
+    /// Stores a draft on `id` the way `owl draft` does (`StoredDraft::to_value`), state `drafted`.
+    fn set_draft(&self, id: &str, text: &str, harness: &str) {
+        let spool = self.spool();
+        let mut r = spool.get(Dir::Inbox, id).unwrap().unwrap();
+        r.draft = Some(json!({
+            "text": text, "harness": harness, "redactions": 0, "status": "ok",
+            "drafted_at": RECEIVED,
+        }));
+        r.state = "drafted".into();
+        spool.put(Dir::Inbox, id, &r).unwrap();
+    }
+
+    /// An answer from `peer` to a question I asked (the question lands in `done/` as
+    /// `answered`, the answer in `inbox/` as `pending`, `received_at` = `at`); returns
+    /// (answer id, question id).
+    fn put_answer(&self, peer: &Identity, question_text: &str, answer: &str, at: &str) -> (String, String) {
+        let q = question(&self.me, peer, question_text);
+        let qid = self.put_done(&Envelope::sign(&q, &self.me), "answered");
+        let env = Envelope::sign(&Payload::answer(&q, answer, "claude", 0, false), peer);
+        let aid = self.put_env(&env, "pending");
+        self.set_received(&aid, Dir::Inbox, at);
+        (aid, qid)
+    }
+}
+
+/// `HH:MM` of a unix timestamp in UTC (what `TZ=UTC` renders).
+fn utc_hh_mm(t: u64) -> String {
+    format!("{:02}:{:02}", (t / 3_600) % 24, (t / 60) % 60)
+}
+
+fn short(id: &str) -> String {
+    id.chars().skip(id.chars().count() - 8).collect()
+}
+
+/// AC1: the framed block of a pending question — 16 × 🟧, the header with the peer name,
+/// the local `HH:MM` of `received_at`, project and path (or `whole repository`), the
+/// ```text fence with the question byte-identical; a consent record carries the fingerprint;
+/// three backticks inside are fenced with four; `--format plain` and no `--format` are
+/// byte-identical to each other and to today's output.
+#[test]
+fn show_format_claude_prints_the_framed_block() {
+    let h = Home::new();
+    let text = "Why is the refresh token rotated on every read?";
+    let a = h.put(&h.maciek, text, "pending");
+    h.set_received(&a, Dir::Inbox, RECEIVED);
+    let expected = format!(
+        "{FRAME}\n🦉 **Maciek** · 23:08 · {PROJECT} · {PATH}\n```text\n{text}\n```\n{FRAME}\n"
+    );
+    assert_eq!(h.ok_tz("UTC", &["show", &a, "--format", "claude"]), expected);
+    let lines: Vec<&str> = expected.lines().collect();
+    assert_eq!(lines[0], FRAME);
+    assert_eq!(lines[lines.len() - 1], FRAME);
+    assert_eq!(FRAME.chars().count(), 16);
+    // Local time, not UTC: Etc/GMT-9 is UTC+9.
+    let tokyo = h.ok_tz("Etc/GMT-9", &["show", &a, "--format", "claude"]);
+    assert_eq!(
+        tokyo.lines().nth(1).unwrap(),
+        format!("🦉 **Maciek** · 08:08 · {PROJECT} · {PATH}")
+    );
+    // codex and kimi print the same Markdown.
+    assert_eq!(h.ok_tz("UTC", &["show", &a, "--format", "codex"]), expected);
+    assert_eq!(h.ok_tz("UTC", &["show", &a, "--format", "kimi"]), expected);
+    // Plain and no --format: today's output, byte-identical.
+    let plain = format!(
+        "id:       {a}\nfrom:     Maciek ({})\ntype:     question\nstate:    pending\nreceived: {RECEIVED}\nproject:  {PROJECT}\npath:     {PATH}\nquestion:\n{text}\n",
+        fp(&h.maciek)
+    );
+    assert_eq!(h.ok(&["show", &a]), plain);
+    assert_eq!(h.ok(&["show", &a, "--format", "plain"]), plain);
+    // --json wins over --format.
+    let v: Value =
+        serde_json::from_str(&h.ok(&["show", &a, "--format", "claude", "--json"])).unwrap();
+    assert_eq!(v["id"], a);
+    h.fails(&["show", &a, "--format", "nope"], "unknown --format nope");
+
+    // A repo-level question (null path) reads `whole repository`.
+    let whole = Envelope::sign(
+        &Payload::question(&fp(&h.ana), &fp(&h.me), PROJECT, None, "Whole repo?"),
+        &h.ana,
+    );
+    let w = h.put_env(&whole, "pending");
+    h.set_received(&w, Dir::Inbox, RECEIVED);
+    assert_eq!(
+        h.ok_tz("UTC", &["show", &w, "--format", "claude"]),
+        format!(
+            "{FRAME}\n🦉 **Ana** · 23:08 · {PROJECT} · whole repository\n```text\nWhole repo?\n```\n{FRAME}\n"
+        )
+    );
+
+    // A consent record: the fingerprint right after the bold name.
+    let c = h.put(&h.ana, "Held?", "consent");
+    h.set_received(&c, Dir::Inbox, RECEIVED);
+    let out = h.ok_tz("UTC", &["show", &c, "--format", "claude"]);
+    assert_eq!(
+        out.lines().nth(1).unwrap(),
+        format!("🦉 **Ana** ({}) · 23:08 · {PROJECT} · {PATH}", fp(&h.ana))
+    );
+    assert!(fp(&h.ana).starts_with("owl:"));
+    assert!(out.contains(&format!("** (owl:")), "{out}");
+    assert!(h.inbox(&c).unwrap().seen, "show marks seen");
+
+    // Three backticks inside: a four-backtick fence, both ends.
+    let ticks = "Is this ```rust\nfn x() {}\n``` right?";
+    let t = h.put(&h.maciek, ticks, "pending");
+    h.set_received(&t, Dir::Inbox, RECEIVED);
+    assert_eq!(
+        h.ok_tz("UTC", &["show", &t, "--format", "claude"]),
+        format!(
+            "{FRAME}\n🦉 **Maciek** · 23:08 · {PROJECT} · {PATH}\n````text\n{ticks}\n````\n{FRAME}\n"
+        )
+    );
+
+    // `show all`: blocks separated by one blank line.
+    let all = h.ok_tz("UTC", &["show", "all", "--format", "claude"]);
+    assert_eq!(all.matches(&format!("{FRAME}\n\n{FRAME}")).count(), 3, "{all}");
+    assert_eq!(all.lines().filter(|l| *l == FRAME).count(), 8);
+}
+
+/// AC1 + AC4: a drafted record prints the frame, then `draft:`, the draft in a plain
+/// ```text block and `harness: <name>`; a Polish question with an English draft (and the
+/// reverse) adds the `note:` line, same-language pairs do not.
+#[test]
+fn show_format_claude_prints_the_draft_and_the_language_note() {
+    let h = Home::new();
+    let pl_q = "Jaki masz ostatni commit u siebie i czy to jest ok?";
+    let en_q = "What is the last commit on your side and is it fine?";
+    let pl_d = "Ostatni commit to abc123, i tak, jest ok.";
+    let en_d = "The last commit is abc123 and it is fine.";
+    let block = |q: &str, d: &str| {
+        format!(
+            "{FRAME}\n🦉 **Maciek** · 23:08 · {PROJECT} · {PATH}\n```text\n{q}\n```\n{FRAME}\ndraft:\n```text\n{d}\n```\nharness: fake\n"
+        )
+    };
+    for (q, d, note) in [
+        (pl_q, en_d, true),
+        (en_q, pl_d, true),
+        (pl_q, pl_d, false),
+        (en_q, en_d, false),
+    ] {
+        let id = h.put(&h.maciek, q, "pending");
+        h.set_received(&id, Dir::Inbox, RECEIVED);
+        h.set_draft(&id, d, "fake");
+        let out = h.ok_tz("UTC", &["show", &id, "--format", "claude"]);
+        let want = if note {
+            format!("{}{NOTE}\n", block(q, d))
+        } else {
+            block(q, d)
+        };
+        assert_eq!(out, want, "question {q:?} draft {d:?}");
+        // The draft is never framed: exactly two frame lines, both around the question.
+        assert_eq!(out.lines().filter(|l| *l == FRAME).count(), 2);
+    }
+    // The plain output of a drafted record is unchanged.
+    let id = h.put(&h.maciek, pl_q, "pending");
+    h.set_draft(&id, en_d, "fake");
+    let plain = h.ok(&["show", &id]);
+    assert!(plain.contains("draft (ok via fake, redactions: 0, "), "{plain}");
+    assert!(!plain.contains(NOTE) && !plain.contains(FRAME), "{plain}");
+}
+
+/// An answer record is framed the same way, project and path taken from the question it
+/// replies to (in `done/`).
+#[test]
+fn show_format_claude_frames_an_answer() {
+    let h = Home::new();
+    let (aid, _) = h.put_answer(&h.ana, "asked earlier?", "Because of X.", RECEIVED);
+    assert_eq!(
+        h.ok_tz("UTC", &["show", &aid, "--format", "claude"]),
+        format!(
+            "{FRAME}\n🦉 **Ana** · 23:08 · {PROJECT} · {PATH}\n```text\nBecause of X.\n```\n{FRAME}\n"
+        )
+    );
+    // Without the question in the spool: `-` and `whole repository`.
+    let q = question(&h.me, &h.ana, "gone?");
+    let env = Envelope::sign(&Payload::answer(&q, "Orphan.", "claude", 0, false), &h.ana);
+    let orphan = h.put_env(&env, "pending");
+    h.set_received(&orphan, Dir::Inbox, RECEIVED);
+    assert_eq!(
+        h.ok_tz("UTC", &["show", &orphan, "--format", "claude"]),
+        format!("{FRAME}\n🦉 **Ana** · 23:08 · - · whole repository\n```text\nOrphan.\n```\n{FRAME}\n")
+    );
+}
+
+/// AC2: 12 answers from two peers spread over 26 h (11 within 24 h, 1 older): a two-column
+/// table with exactly 10 rows, newest last, the oldest in-window row dropped, the
+/// `2 older answers not shown — owl history` line, one marker per fingerprint (🟦 for the
+/// first-appearing peer, 🟩 for the second), `|` escaped and newlines as `<br>`, one `↳`
+/// line per shown row naming its question; a second process prints the same markers
+/// (`markers.json`); listing marks the records seen.
+#[test]
+fn inbox_format_claude_prints_the_answers_table() {
+    let now = envelope::now_unix();
+    let build = |first: &Identity, second: &Identity| -> (Home, Vec<(String, String, u64)>) {
+        let h = Home::new();
+        let mut rows = Vec::new();
+        for i in 0..12u64 {
+            let t = now - 26 * 3_600 + i * 2 * 3_600 + 5;
+            let peer = if i % 2 == 0 { first } else { second };
+            let text = if i == 7 {
+                "a | b\nsecond line".to_string()
+            } else {
+                format!("answer {i}")
+            };
+            let (aid, qid) = h.put_answer(peer, &format!("question {i}?\nmore"), &text, &envelope::unix_to_rfc3339(t));
+            rows.push((aid, qid, t));
+        }
+        (h, rows)
+    };
+    let (maciek, ana) = (id(1), id(3));
+    let (h, rows) = build(&maciek, &ana);
+    let out = h.ok_tz("UTC", &["inbox", "--format", "claude"]);
+    let lines: Vec<&str> = out.lines().collect();
+    let refs: Vec<&str> = lines.iter().copied().filter(|l| l.contains(" ↳ ")).collect();
+    let table: Vec<&str> = lines.iter().copied().filter(|l| l.starts_with("| ")).collect();
+    assert_eq!(refs.len(), 10, "{out}");
+    assert_eq!(table.len(), 10, "{out}");
+    assert_eq!(lines[10], table[0]);
+    assert_eq!(lines[11], "|---|---|");
+    assert_eq!(lines[lines.len() - 1], OLDER_TWO);
+    assert_eq!(lines.len(), 10 + 10 + 1 + 1, "refs, rows, delimiter, older line: {out}");
+    // Rows 2..12 shown (0 is older than 24 h, 1 the oldest in-window), newest last.
+    for (k, i) in (2..12u64).enumerate() {
+        let (_, qid, t) = &rows[i as usize];
+        let (name, marker) = if i % 2 == 0 { ("Maciek", "🟦") } else { ("Ana", "🟩") };
+        let text = if i == 7 { "a \\| b<br>second line".to_string() } else { format!("answer {i}") };
+        assert_eq!(table[k], format!("| {marker} {} · {name} | {text} |", utc_hh_mm(*t)));
+        assert_eq!(refs[k], format!("{marker} ↳ {} \"question {i}?\"", short(qid)));
+    }
+    assert!(!out.contains("answer 0 |") && !out.contains("answer 1 |"), "{out}");
+    // A second process prints the same markers; markers.json holds the two peers.
+    assert_eq!(h.ok_tz("UTC", &["inbox", "--format", "claude"]), out);
+    let markers: Value =
+        serde_json::from_slice(&std::fs::read(h.path().join("markers.json")).unwrap()).unwrap();
+    assert_eq!(markers[fp(&h.maciek)], 0);
+    assert_eq!(markers[fp(&h.ana)], 1);
+    assert_eq!(markers.as_object().unwrap().len(), 2);
+    // Listing marked every record seen.
+    let listed = h.json(&["inbox", "--json"]);
+    assert_eq!(listed.as_array().unwrap().len(), 12);
+    assert!(listed.as_array().unwrap().iter().all(|r| r["seen"] == true));
+    // codex and kimi: the same Markdown.
+    assert_eq!(h.ok_tz("UTC", &["inbox", "--format", "codex"]), out);
+    assert_eq!(h.ok_tz("UTC", &["inbox", "--format", "kimi"]), out);
+    // Plain stays today's table.
+    let plain = h.ok(&["inbox", "--format", "plain"]);
+    assert!(plain.starts_with("ID "), "{plain}");
+    assert_eq!(plain, h.ok(&["inbox"]));
+
+    // The peers in the other order: markers follow first appearance, not the name.
+    let (h2, _) = build(&ana, &maciek);
+    let out2 = h2.ok_tz("UTC", &["inbox", "--format", "claude"]);
+    let table2: Vec<&str> = out2.lines().filter(|l| l.starts_with("| ")).collect();
+    assert!(table2[0].starts_with("| 🟦 ") && table2[0].contains("· Ana |"), "{}", table2[0]);
+    assert!(table2[1].starts_with("| 🟩 ") && table2[1].contains("· Maciek |"), "{}", table2[1]);
+}
+
+/// AC3: a consent question, a pending question and one answer: the two framed blocks
+/// (consent first), then the `↳` line and the table, one blank line between sections and
+/// nothing else.
+#[test]
+fn inbox_format_claude_prints_blocks_then_table_and_nothing_else() {
+    let h = Home::new();
+    let p = h.put(&h.maciek, "Pending one?", "pending");
+    h.set_received(&p, Dir::Inbox, RECEIVED);
+    let c = h.put(&h.ana, "Held one?", "consent");
+    h.set_received(&c, Dir::Inbox, RECEIVED);
+    let t = envelope::now_unix() - 90;
+    let (_, qid) = h.put_answer(&h.maciek, "asked?", "yes|no", &envelope::unix_to_rfc3339(t));
+    let out = h.ok_tz("UTC", &["inbox", "--format", "claude"]);
+    assert_eq!(
+        out,
+        format!(
+            "{FRAME}\n🦉 **Ana** ({}) · 23:08 · {PROJECT} · {PATH}\n```text\nHeld one?\n```\n{FRAME}\n\n\
+             {FRAME}\n🦉 **Maciek** · 23:08 · {PROJECT} · {PATH}\n```text\nPending one?\n```\n{FRAME}\n\n\
+             🟦 ↳ {} \"asked?\"\n| 🟦 {} · Maciek | yes\\|no |\n|---|---|\n",
+            fp(&h.ana),
+            short(&qid),
+            utc_hh_mm(t)
+        )
+    );
+    assert!(h.inbox(&p).unwrap().seen && h.inbox(&c).unwrap().seen);
+    // Only questions: the blocks, no table; an empty inbox: nothing.
+    let e = Home::new();
+    assert_eq!(e.ok(&["inbox", "--format", "claude"]), "");
+    let q = e.put(&e.maciek, "Only?", "pending");
+    e.set_received(&q, Dir::Inbox, RECEIVED);
+    let only = e.ok_tz("UTC", &["inbox", "--format", "claude"]);
+    assert!(only.starts_with(FRAME) && only.ends_with(&format!("{FRAME}\n")), "{only}");
+    assert!(!only.contains("|---|---|"));
+}
