@@ -19,13 +19,15 @@ use tempfile::TempDir;
 const OWL: &str = env!("CARGO_BIN_EXE_owl");
 const PLUGIN: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/plugins/claude-code");
 const CLAUDE_TWO: &str = r#"{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"🦉 owlpost: 2 new questions (Maciek 2). Say \"show owlpost inbox\" or run `owl inbox`."}}"#;
-/// The three context-injecting events; `FileChanged` (the wake) is the fourth hook entry.
+/// The three context-injecting events; `FileChanged` (the wake) and `SessionEnd` (the
+/// session teardown, OWL-033) are the other two hook entries.
 const EVENTS: [&str; 3] = ["SessionStart", "UserPromptSubmit", "PostToolUse"];
-const ALL_EVENTS: [&str; 4] = [
+const ALL_EVENTS: [&str; 5] = [
     "SessionStart",
     "UserPromptSubmit",
     "PostToolUse",
     "FileChanged",
+    "SessionEnd",
 ];
 const SENTENCE_TWO: &str =
     "🦉 owlpost: 2 new questions (Maciek 2). Say \"show owlpost inbox\" or run `owl inbox`.";
@@ -43,6 +45,25 @@ fn session_start_line(context: &str) -> String {
 }
 
 /// The canonical `<home>/spool/inbox`: the one `watchPaths` entry `owl` emits (OWL-031 AC1).
+/// The `watchPaths` entry (OWL-033): the canonical `<home>/sessions/<sid>/wake`, which
+/// exists once the SessionStart hook ran.
+fn wake_path(home: &Path, sid: &str) -> String {
+    home.join("sessions")
+        .join(sid)
+        .join("wake")
+        .canonicalize()
+        .unwrap_or_else(|e| panic!("sessions/{sid}/wake must exist: {e}"))
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// The SessionStart stdin JSON for `sid` (cwd `/c`, source `startup`).
+fn start_stdin(sid: &str) -> String {
+    format!(
+        r#"{{"session_id":"{sid}","transcript_path":"/t","cwd":"/c","hook_event_name":"SessionStart","source":"startup"}}"#
+    )
+}
+
 fn inbox_path(home: &Path) -> String {
     Spool::new(home).unwrap();
     home.join("spool")
@@ -55,17 +76,17 @@ fn inbox_path(home: &Path) -> String {
 
 /// The SessionStart line with the watch on: `watchPaths` alone (0 unseen) and after the
 /// two-question counter with its previews.
-fn claude_watch_zero(home: &Path) -> String {
+fn claude_watch_zero(home: &Path, sid: &str) -> String {
     format!(
         r#"{{"hookSpecificOutput":{{"hookEventName":"SessionStart","watchPaths":[{}]}}}}"#,
-        serde_json::to_string(&inbox_path(home)).unwrap()
+        serde_json::to_string(&wake_path(home, sid)).unwrap()
     )
 }
-fn claude_watch_two(home: &Path) -> String {
+fn claude_watch_two(home: &Path, sid: &str) -> String {
     format!(
         r#"{{"hookSpecificOutput":{{"hookEventName":"SessionStart","additionalContext":{},"watchPaths":[{}]}}}}"#,
         serde_json::to_string(&format!("{SENTENCE_TWO}\n{PREVIEW_TWO}")).unwrap(),
-        serde_json::to_string(&inbox_path(home)).unwrap()
+        serde_json::to_string(&wake_path(home, sid)).unwrap()
     )
 }
 
@@ -171,6 +192,29 @@ fn run_hook_args(path: &Path, home: &Path, args: &[&str]) -> Output {
         .unwrap()
 }
 
+/// [`run_hook_args`] with Claude Code's hook input JSON on stdin.
+fn run_hook_stdin(path: &Path, home: &Path, args: &[&str], stdin: &str) -> Output {
+    use std::io::Write;
+    let mut child = Command::new("/bin/sh")
+        .arg(plugin("hooks/owl-count.sh"))
+        .args(args)
+        .env_clear()
+        .env("PATH", path)
+        .env("OWLPOST_HOME", home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(stdin.as_bytes())
+        .unwrap();
+    child.wait_with_output().unwrap()
+}
+
 fn assert_silent(out: &Output, what: &str) {
     assert_eq!(out.status.code(), Some(0), "{what}: exit {:?}", out.status);
     assert_eq!(String::from_utf8_lossy(&out.stdout), "", "{what}: stdout");
@@ -220,13 +264,16 @@ fn hook_script_emits_context_or_nothing() {
     assert_silent(&run_hook(without_owl.path(), two.path()), "no owl on PATH");
 }
 
-/// OWL-031 AC1 through the real script: the SessionStart invocation (`--hook-event
-/// SessionStart` forwarded by the script) carries `watchPaths` unless `plugin.json` switches
-/// the watch off; the plain hooks never do; no output carries the retired arm sentence.
+/// OWL-031 AC1 through the real script, per session since OWL-033: the SessionStart
+/// invocation (`--hook-event SessionStart` forwarded by the script, the hook input JSON on
+/// stdin) carries this session's `watchPaths` unless `plugin.json` switches the watch off;
+/// with stdin closed (no session id) it carries none; the plain hooks never do; no output
+/// carries the retired arm sentence.
 #[test]
 fn hook_script_forwards_session_start_and_reads_plugin_json() {
     let with_owl = path_dir(true);
     let owl = with_owl.path();
+    let ss = ["--hook-event", "SessionStart"];
     let stdout = |out: Output| {
         assert_eq!(out.status.code(), Some(0), "{:?}", out.status);
         assert_eq!(String::from_utf8_lossy(&out.stderr), "", "stderr");
@@ -239,12 +286,13 @@ fn hook_script_forwards_session_start_and_reads_plugin_json() {
     let empty = home_with(0, false);
     assert_silent(&run_hook(owl, empty.path()), "0 records, no flag");
     assert_eq!(
-        stdout(run_hook_args(
-            owl,
-            empty.path(),
-            &["--hook-event", "SessionStart"]
-        )),
-        format!("{}\n", claude_watch_zero(empty.path()))
+        stdout(run_hook_stdin(owl, empty.path(), &ss, &start_stdin("sess-1"))),
+        format!("{}\n", claude_watch_zero(empty.path(), "sess-1"))
+    );
+    // Stdin closed: no session, so no watchPaths — and nothing at all at 0 unseen.
+    assert_silent(
+        &run_hook_args(owl, empty.path(), &ss),
+        "SessionStart without hook input at 0",
     );
     // 2 unseen: counter alone on the plain hooks, counter + previews + watchPaths at start.
     let two = home_with(2, false);
@@ -261,12 +309,16 @@ fn hook_script_forwards_session_start_and_reads_plugin_json() {
         )
     );
     assert_eq!(
-        stdout(run_hook_args(
-            owl,
-            two.path(),
-            &["--hook-event", "SessionStart"]
-        )),
-        format!("{}\n", claude_watch_two(two.path()))
+        stdout(run_hook_stdin(owl, two.path(), &ss, &start_stdin("sess-2"))),
+        format!("{}\n", claude_watch_two(two.path(), "sess-2"))
+    );
+    // Stdin closed with unseen records: the context without watchPaths.
+    assert_eq!(
+        stdout(run_hook_args(owl, two.path(), &ss)),
+        format!(
+            "{}\n",
+            session_start_line(&format!("{SENTENCE_TWO}\n{PREVIEW_TWO}"))
+        )
     );
     let spool = Spool::new(two.path()).unwrap();
     assert_eq!(spool.list(Dir::Inbox, |r| !r.seen).unwrap().len(), 2);
@@ -276,60 +328,44 @@ fn hook_script_forwards_session_start_and_reads_plugin_json() {
         std::fs::write(home.path().join("plugin.json"), r#"{"watch": false}"#).unwrap();
     }
     assert_eq!(
-        stdout(run_hook_args(
-            owl,
-            two.path(),
-            &["--hook-event", "SessionStart"]
-        )),
+        stdout(run_hook_stdin(owl, two.path(), &ss, &start_stdin("sess-2"))),
         format!(
             "{}\n",
             session_start_line(&format!("{SENTENCE_TWO}\n{PREVIEW_TWO}"))
         )
     );
     assert_silent(
-        &run_hook_args(owl, empty.path(), &["--hook-event", "SessionStart"]),
+        &run_hook_stdin(owl, empty.path(), &ss, &start_stdin("sess-1")),
         "watch off, 0 records",
     );
     // `{"watch": true}` restores watchPaths.
     std::fs::write(empty.path().join("plugin.json"), r#"{"watch": true}"#).unwrap();
     assert_eq!(
-        stdout(run_hook_args(
-            owl,
-            empty.path(),
-            &["--hook-event", "SessionStart"]
-        )),
-        format!("{}\n", claude_watch_zero(empty.path()))
+        stdout(run_hook_stdin(owl, empty.path(), &ss, &start_stdin("sess-1"))),
+        format!("{}\n", claude_watch_zero(empty.path(), "sess-1"))
     );
     // The script stays a no-op with the flag when owl is missing or fails.
     let without_owl = path_dir(false);
     assert_silent(
-        &run_hook_args(
-            without_owl.path(),
-            empty.path(),
-            &["--hook-event", "SessionStart"],
-        ),
+        &run_hook_stdin(without_owl.path(), empty.path(), &ss, &start_stdin("sess-1")),
         "no owl on PATH",
     );
     let file = tempfile::tempdir().unwrap();
     let file = file.path().join("home");
     std::fs::write(&file, b"").unwrap();
     assert_silent(
-        &run_hook_args(owl, &file, &["--hook-event", "SessionStart"]),
+        &run_hook_stdin(owl, &file, &ss, &start_stdin("sess-1")),
         "owl failing",
     );
     // An uninitialised home (no key, no config) counts 0 without failing, so the watch path
     // still goes out: it is gated on the stored choice only, not on `owl init`.
     let dir = tempfile::tempdir().unwrap();
-    let line = stdout(run_hook_args(
-        owl,
-        dir.path(),
-        &["--hook-event", "SessionStart"],
-    ));
-    assert_eq!(line, format!("{}\n", claude_watch_zero(dir.path())));
+    let line = stdout(run_hook_stdin(owl, dir.path(), &ss, &start_stdin("sess-9")));
+    assert_eq!(line, format!("{}\n", claude_watch_zero(dir.path(), "sess-9")));
     let v: Value = serde_json::from_str(line.trim()).unwrap();
     assert_eq!(
         v["hookSpecificOutput"]["watchPaths"],
-        json!([inbox_path(dir.path())])
+        json!([wake_path(dir.path(), "sess-9")])
     );
     assert!(
         v["hookSpecificOutput"]["watchPaths"][0]
@@ -367,19 +403,23 @@ fn run_hook_env_i(owl: &Path, home: &Path, event: &str, extra: &str) -> Output {
     child.wait_with_output().unwrap()
 }
 
-/// OWL-031 AC4: the real hook script through `env -i /bin/sh` with Claude Code's stdin JSON
-/// on all four events. `SessionStart` carries `watchPaths`; the other two context events
-/// never do; `FileChanged` with an `add` and unseen records exits 2 with the sentence on
-/// stderr (the pinned choice: the script lets owl's stderr through on that event only) and
-/// nothing on stdout, and is exit 0 and silent for `change`, `unlink`, count 0 and the watch
-/// off. Nothing is marked seen.
+/// OWL-031 AC4 / OWL-033 AC9: the real hook script through `env -i /bin/sh` with Claude
+/// Code's stdin JSON on all five events. `SessionStart` carries this session's `watchPaths`
+/// (`<home>/sessions/sess-1/wake`); the other two context events never do; `FileChanged`
+/// with an `add` of a file in that wake dir exits 2 with the file's content on stderr (the
+/// pinned choice: the script lets owl's stderr through on that event only) and nothing on
+/// stdout, and is exit 0 and silent for `change`, `unlink`, a path under `spool/inbox` (the
+/// OWL-031 watch dir, whatever the count) and the watch off; `SessionEnd` exits 0 silently
+/// and removes the session directory. Nothing is marked seen.
 #[test]
 fn hook_script_via_env_i_registers_the_watch_and_wakes_on_add() {
     let with_owl = path_dir(true);
     let owl = with_owl.path();
     let home = home_with(0, false);
     let inbox = inbox_path(home.path());
-    let file_changed = |event: &str| format!(r#","file_path":"{inbox}/x.json","event":"{event}""#);
+    let file_changed = |path: &str, event: &str| {
+        format!(r#","file_path":"{path}","event":"{event}""#)
+    };
     let context = |out: &Output| -> Option<Value> {
         assert_eq!(out.status.code(), Some(0), "{:?}", out.status);
         assert_eq!(String::from_utf8_lossy(&out.stderr), "");
@@ -392,12 +432,27 @@ fn hook_script_via_env_i_registers_the_watch_and_wakes_on_add() {
         let v: Value = serde_json::from_str(line.trim()).unwrap_or_else(|e| panic!("{e}: {line}"));
         Some(v["hookSpecificOutput"].clone())
     };
-    // 0 unseen: SessionStart registers the watch path, the other two are silent.
-    let ss = context(&run_hook_env_i(owl, home.path(), "SessionStart", "")).unwrap();
+    // 0 unseen: SessionStart registers this session's wake dir, the other two are silent.
+    let ss = context(&run_hook_env_i(
+        owl,
+        home.path(),
+        "SessionStart",
+        r#","source":"startup""#,
+    ))
+    .unwrap();
+    let wake = wake_path(home.path(), "sess-1");
+    assert!(wake.ends_with("/sessions/sess-1/wake"), "{wake}");
     assert_eq!(
         ss,
-        json!({"hookEventName": "SessionStart", "watchPaths": [inbox]})
+        json!({"hookEventName": "SessionStart", "watchPaths": [wake]})
     );
+    let marker: Value = serde_json::from_slice(
+        &std::fs::read(home.path().join("sessions/sess-1/marker.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(marker["session_id"], "sess-1");
+    assert_eq!(marker["cwd"], "/c", "a cwd that does not exist stays as given");
+    assert_eq!(marker["source"], "startup");
     for event in ["UserPromptSubmit", "PostToolUse"] {
         assert_eq!(
             context(&run_hook_env_i(owl, home.path(), event, "")),
@@ -405,32 +460,65 @@ fn hook_script_via_env_i_registers_the_watch_and_wakes_on_add() {
             "{event}"
         );
     }
-    // FileChanged at 0 unseen: silent whatever the event.
+    // FileChanged on the OWL-031 inbox path: silent whatever the event and the count.
+    seed(home.path(), &id(2), &id(1), 2, false);
     for event in ["add", "change", "unlink"] {
         assert_silent(
-            &run_hook_env_i(owl, home.path(), "FileChanged", &file_changed(event)),
-            &format!("FileChanged {event} at 0"),
+            &run_hook_env_i(
+                owl,
+                home.path(),
+                "FileChanged",
+                &file_changed(&format!("{inbox}/x.json"), event),
+            ),
+            &format!("FileChanged {event} under spool/inbox"),
         );
     }
-    // Two questions arrive (an `add` each): the wake exits 2 with the sentence on stderr.
-    seed(home.path(), &id(2), &id(1), 2, false);
-    let wake = run_hook_env_i(owl, home.path(), "FileChanged", &file_changed("add"));
-    assert_eq!(wake.status.code(), Some(2), "{:?}", wake.status);
+    // A wake file lands in this session's dir (the daemon's `owl route`): `add` exits 2
+    // with the file's content on stderr (the script re-adds the trailing newline it strips).
+    let file = format!("{wake}/rec-1.md");
+    let body = "🟧🟧\n🦉 **Maciek** · 10:00 · p · src/a.rs\n```text\nwhy?\n```\n🟧🟧\n";
+    std::fs::write(&file, body).unwrap();
+    let woke = run_hook_env_i(owl, home.path(), "FileChanged", &file_changed(&file, "add"));
+    assert_eq!(woke.status.code(), Some(2), "{:?}", woke.status);
     assert_eq!(
-        String::from_utf8_lossy(&wake.stdout),
+        String::from_utf8_lossy(&woke.stdout),
         "",
         "stdout stays empty"
     );
     assert_eq!(
-        String::from_utf8(wake.stderr.clone()).unwrap(),
-        format!("{SENTENCE_TWO}\n"),
-        "the sentence on stderr"
+        String::from_utf8(woke.stderr.clone()).unwrap(),
+        body,
+        "the wake file on stderr"
     );
-    // `change` and `unlink` (marking seen, moving to done/) never wake.
+    // `change` and `unlink` of the same file (the release) never wake.
     for event in ["change", "unlink"] {
         assert_silent(
-            &run_hook_env_i(owl, home.path(), "FileChanged", &file_changed(event)),
+            &run_hook_env_i(owl, home.path(), "FileChanged", &file_changed(&file, event)),
             &format!("FileChanged {event}"),
+        );
+    }
+    // Another live session's wake dir, a look-alike dir and a missing file: silent.
+    let now = envelope::rfc3339_now();
+    std::fs::create_dir_all(home.path().join("sessions/sess-10/wake")).unwrap();
+    std::fs::write(
+        home.path().join("sessions/sess-10/marker.json"),
+        json!({"session_id": "sess-10", "cwd": "/d", "started_at": now, "heartbeat_at": now, "source": "startup"}).to_string(),
+    )
+    .unwrap();
+    std::fs::write(home.path().join("sessions/sess-10/wake/rec-1.md"), "other").unwrap();
+    std::fs::create_dir_all(home.path().join("sessions/sess-1/wake-evil")).unwrap();
+    std::fs::write(home.path().join("sessions/sess-1/wake-evil/rec-1.md"), "evil").unwrap();
+    for other in [
+        wake_path(home.path(), "sess-10") + "/rec-1.md",
+        home.path()
+            .join("sessions/sess-1/wake-evil/rec-1.md")
+            .to_string_lossy()
+            .into_owned(),
+        format!("{wake}/missing.md"),
+    ] {
+        assert_silent(
+            &run_hook_env_i(owl, home.path(), "FileChanged", &file_changed(&other, "add")),
+            &format!("FileChanged add {other}"),
         );
     }
     // The context events carry the counter (SessionStart with previews and watchPaths).
@@ -442,12 +530,12 @@ fn hook_script_via_env_i_registers_the_watch_and_wakes_on_add() {
         context(&run_hook_env_i(owl, home.path(), "SessionStart", "")).unwrap(),
         json!({"hookEventName": "SessionStart",
             "additionalContext": format!("{SENTENCE_TWO}\n{PREVIEW_TWO}"),
-            "watchPaths": [inbox]})
+            "watchPaths": [wake]})
     );
     // Watch off: no wake, no watchPaths, previews kept.
     std::fs::write(home.path().join("plugin.json"), r#"{"watch": false}"#).unwrap();
     assert_silent(
-        &run_hook_env_i(owl, home.path(), "FileChanged", &file_changed("add")),
+        &run_hook_env_i(owl, home.path(), "FileChanged", &file_changed(&file, "add")),
         "FileChanged add, watch off",
     );
     assert_eq!(
@@ -456,17 +544,29 @@ fn hook_script_via_env_i_registers_the_watch_and_wakes_on_add() {
             "additionalContext": format!("{SENTENCE_TWO}\n{PREVIEW_TWO}")})
     );
     std::fs::remove_file(home.path().join("plugin.json")).unwrap();
-    // Nothing was marked seen by any of it; no marker dir appeared.
+    // SessionEnd: exit 0, silent, the session directory is gone; the other stays.
+    assert_silent(
+        &run_hook_env_i(owl, home.path(), "SessionEnd", r#","reason":"exit""#),
+        "SessionEnd",
+    );
+    assert!(!home.path().join("sessions/sess-1").exists());
+    assert!(home.path().join("sessions/sess-10").exists());
+    // Nothing was marked seen by any of it; no `--follow` marker dir appeared.
     let spool = Spool::new(home.path()).unwrap();
     assert_eq!(spool.list(Dir::Inbox, |r| !r.seen).unwrap().len(), 2);
     assert!(!home.path().join("watch").exists());
-    // A failing owl on FileChanged is a silent exit 0 too (its stderr must not leak as a wake).
-    let file = tempfile::tempdir().unwrap();
-    let file = file.path().join("home");
-    std::fs::write(&file, b"").unwrap();
+    // A failing owl on FileChanged / SessionEnd is a silent exit 0 too (its stderr must not
+    // leak as a wake).
+    let broken = tempfile::tempdir().unwrap();
+    let broken = broken.path().join("home");
+    std::fs::write(&broken, b"").unwrap();
     assert_silent(
-        &run_hook_env_i(owl, &file, "FileChanged", &file_changed("add")),
+        &run_hook_env_i(owl, &broken, "FileChanged", &file_changed(&file, "add")),
         "owl failing on FileChanged",
+    );
+    assert_silent(
+        &run_hook_env_i(owl, &broken, "SessionEnd", ""),
+        "owl failing on SessionEnd",
     );
     let without_owl = path_dir(false);
     assert_silent(
@@ -474,9 +574,13 @@ fn hook_script_via_env_i_registers_the_watch_and_wakes_on_add() {
             without_owl.path(),
             home.path(),
             "FileChanged",
-            &file_changed("add"),
+            &file_changed(&file, "add"),
         ),
         "no owl on PATH on FileChanged",
+    );
+    assert_silent(
+        &run_hook_env_i(without_owl.path(), home.path(), "SessionEnd", ""),
+        "no owl on PATH on SessionEnd",
     );
 }
 
@@ -526,9 +630,10 @@ fn manifests_parse_and_register_hooks() {
     let table = hooks["hooks"]
         .as_object()
         .expect("hooks.json has a `hooks` object");
-    assert_eq!(table.len(), ALL_EVENTS.len(), "exactly the four events");
+    assert_eq!(table.len(), ALL_EVENTS.len(), "exactly the five events");
     // OWL-031 AC4: the three context entries are byte-for-byte what OWL-029 left (no
-    // `--session-start`, no asyncRewake), the FileChanged entry is the asyncRewake wake.
+    // `--session-start`, no asyncRewake), the FileChanged entry is the asyncRewake wake;
+    // OWL-033 AC9: the SessionEnd entry tears the session's wake dir down (no asyncRewake).
     let entry = |command: &str, rewake: bool| {
         let mut hook = json!({"type": "command", "command": command, "timeout": 5});
         if rewake {
@@ -561,6 +666,14 @@ fn manifests_parse_and_register_hooks() {
             true
         )
     );
+    assert_eq!(
+        table["SessionEnd"],
+        entry(
+            "${CLAUDE_PLUGIN_ROOT}/hooks/owl-count.sh --hook-event SessionEnd",
+            false
+        )
+    );
+    assert_eq!(table["SessionEnd"][0]["hooks"][0]["timeout"], 5);
     let wake = &table["FileChanged"][0]["hooks"][0];
     assert_eq!(wake["asyncRewake"], true, "FileChanged must asyncRewake");
     assert!(
@@ -570,9 +683,9 @@ fn manifests_parse_and_register_hooks() {
             .ends_with("owl-count.sh --hook-event FileChanged")
     );
     assert_eq!(wake["timeout"], 5);
-    for event in EVENTS {
+    for event in EVENTS.iter().chain(["SessionEnd"].iter()) {
         assert!(
-            table[event][0]["hooks"][0].get("asyncRewake").is_none(),
+            table[*event][0]["hooks"][0].get("asyncRewake").is_none(),
             "{event} must not asyncRewake"
         );
     }
@@ -637,12 +750,12 @@ fn skill_has_frontmatter_and_required_strings() {
     for needle in [
         "nothing to arm",
         "The live watch is event-driven and there is nothing to arm: the `SessionStart` hook",
-        "registers the spool inbox directory as a watch path and the `FileChanged` hook wakes this",
-        "record that is only marked seen or moved away wakes nothing",
-        "one line built from the counter",
-        "`🦉 owlpost: 1 new answer from Maciek`",
+        "registers this session's private wake directory as a watch path and the `FileChanged` hook",
+        "exactly one session wakes per record, the others stay silent",
+        "marked seen or moved away wakes nothing",
+        "paste the framed block it",
         "offer `/owlpost:inbox`",
-        "inbox, show, draft or send anything because of a wake",
+        "never list the inbox, draft or send anything because of a wake",
         "`/owlpost:watch off` stores `{\"watch\": false}`",
         "`/owlpost:watch on` restores it",
         "`/owlpost:watch status` reports the stored default (`commands/watch.md`)",
@@ -802,7 +915,8 @@ fn wrapped_subcommand(name: &str) -> &str {
 }
 
 /// OWL-021 AC1: every `owl --help` subcommand except `daemon` (a service; install/uninstall/
-/// doctor cover it) and `mcp` (OWL-024: a stdio server Claude Code starts itself) has
+/// doctor cover it), `mcp` (OWL-024: a stdio server Claude Code starts itself) and `route`
+/// (OWL-033: the daemon's own routing call, for scripts and the e2e test) has
 /// `commands/<name>.md`; `contact` has both `contacts.md` (the OWL-024 table over
 /// `contact list`) and `contact.md` (`show|export|remove`). The reverse holds too: every
 /// command file wraps a real subcommand, `me` and `contacts` being the two renamed ones.
@@ -811,10 +925,11 @@ fn every_subcommand_has_a_command() {
     let subs = help_subcommands(&[]);
     assert!(subs.contains(&"daemon".to_string()), "{subs:?}");
     assert!(subs.contains(&"mcp".to_string()), "{subs:?}");
+    assert!(subs.contains(&"route".to_string()), "{subs:?}");
     assert!(subs.contains(&"contact".to_string()), "{subs:?}");
     let names = command_names();
     for sub in &subs {
-        if sub == "daemon" || sub == "mcp" {
+        if sub == "daemon" || sub == "mcp" || sub == "route" {
             assert!(!names.contains(sub), "{sub} must not get a command file");
             continue;
         }
@@ -928,6 +1043,7 @@ fn commands_have_descriptions() {
     // clap change that drops the `Arguments:` section is noticed.
     let with_args: Vec<&str> = [
         "card", "contact", "add", "allow", "deny", "ask", "show", "draft", "edit", "send", "reject",
+        "route",
     ]
     .to_vec();
     for sub in &subs {
@@ -1027,7 +1143,8 @@ fn watch_command_is_a_plugin_json_toggle() {
         "`{\"watch\": true}`",
         "${OWLPOST_HOME:-$HOME/.config/owlpost}",
         "The live watch is event-driven and needs nothing from you to run.",
-        "registers `$OWLPOST_HOME/spool/inbox` as a watch path and the `FileChanged` hook wakes the",
+        "registers this session's wake directory (`$OWLPOST_HOME/sessions/<session_id>/wake`) as a",
+        "exactly one session wakes per record",
         "This command only reads and writes that file — it never runs `owl`.",
         "and nothing runs owl show, owl draft or owl send because of a wake",
         "offer `/owlpost:inbox`",
@@ -1714,7 +1831,8 @@ const DRAFTS_NOT_FRAMED: &str = "Drafts (our own text) are not framed: they keep
 const FRAMED_REF: &str = "run `owl show <id> --format claude` and paste its output verbatim";
 const TABLE_REF: &str = "Run `owl inbox --format claude` and paste its output verbatim.";
 const OLD_PHRASE: &str = "in a code block with peer name";
-const WATCH_EVENT: &str = "`🦉 owlpost: 1 new answer from Maciek`";
+/// What a wake delivers since OWL-033: the framed block, pasted verbatim (`commands/watch.md`).
+const WATCH_EVENT: &str = "paste the framed message block it delivered verbatim";
 
 /// `owl inbox --count --format <f>` against `home`, stdout as a string (exit 0).
 fn count(home: &Path, format: &str) -> String {
@@ -1754,29 +1872,31 @@ fn counter_wears_the_owl_icon_records_do_not() {
     assert_eq!(count(empty.path(), "plain"), "");
     let with_owl = path_dir(true);
     let zero = String::from_utf8(
-        run_hook_args(
+        run_hook_stdin(
             with_owl.path(),
             empty.path(),
             &["--hook-event", "SessionStart"],
+            &start_stdin("sess-z"),
         )
         .stdout,
     )
     .unwrap();
-    assert_eq!(zero, format!("{}\n", claude_watch_zero(empty.path())));
+    assert_eq!(zero, format!("{}\n", claude_watch_zero(empty.path(), "sess-z")));
     assert!(!zero.contains('🦉'));
     // Two unseen at session start: icon once, on the counter; every preview line and the
     // open sentence are icon-free.
     let two_ss = String::from_utf8(
-        run_hook_args(
+        run_hook_stdin(
             with_owl.path(),
             two.path(),
             &["--hook-event", "SessionStart"],
+            &start_stdin("sess-t"),
         )
         .stdout,
     )
     .unwrap();
     let ctx = context(&two_ss);
-    assert_eq!(ctx, context(&format!("{}\n", claude_watch_two(two.path()))));
+    assert_eq!(ctx, context(&format!("{}\n", claude_watch_two(two.path(), "sess-t"))));
     assert_eq!(ctx.matches('🦉').count(), 1, "{ctx}");
     assert!(ctx.starts_with(ICON), "{ctx}");
     let lines: Vec<&str> = ctx.lines().collect();
@@ -1842,7 +1962,8 @@ fn skill_documents_the_framed_message() {
 
 /// AC3: inbox.md steps 2 and 3 paste the rendered block, step 5 the rendered listing (the
 /// old "in a code block with peer name" phrase is gone from them), step 4 keeps the plain
-/// draft code block; watch.md carries the event example with the icon.
+/// draft code block; watch.md says a wake delivers the framed block (OWL-033), never the
+/// icon-free counter event.
 #[test]
 fn inbox_steps_print_the_framed_block_and_watch_event_has_the_icon() {
     let (_, body) = frontmatter("commands/inbox.md");
