@@ -97,7 +97,12 @@ enum Cmd {
         hook_event: String,
     },
     /// Full content of a record; marks it seen
-    Show { id: String },
+    Show {
+        id: String,
+        /// claude|codex|kimi: the framed Markdown block (plain = today's output)
+        #[arg(long)]
+        format: Option<String>,
+    },
     /// Run the responder and store a draft
     Draft {
         id: String,
@@ -368,7 +373,7 @@ fn main() -> ExitCode {
             cli.json,
         ),
         Cmd::Deny { peer } => cli::deny::run(&home, &peer, cli.json),
-        Cmd::Show { id } => cli::show::run(&home, &id, cli.json),
+        Cmd::Show { id, format } => cli::show::run(&home, &id, cli.json, format.as_deref()),
         Cmd::Draft { id, harness } => cli::draft::run(&home, &id, harness.as_deref(), cli.json),
         Cmd::Edit { id } => cli::edit::run(&home, &id, cli.json),
         Cmd::Send { id } => cli::send::run(&home, &id, cli.json),
