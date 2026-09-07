@@ -1003,3 +1003,67 @@ async fn daemon_foreground_writes_addr_and_serves_card() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("owl init"));
     assert!(!empty.path().join("daemon.addr").exists());
 }
+
+// OWL-033 AC8
+/// An incoming question over the HTTP API produces a wake file under the live session whose
+/// cwd is the configured checkout of the record's project within 2 s of the spool write —
+/// not under the other live session, even with its newer heartbeat — and the routing names
+/// it; nothing is marked seen.
+#[tokio::test]
+async fn incoming_question_wakes_the_affine_live_session() {
+    use owlpost::route::{self, Marker};
+    let a = id(1);
+    let checkout = tempfile::tempdir().unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let checkout_path = checkout.path().to_string_lossy().into_owned();
+    let b = spawn_daemon_with(
+        2,
+        &[Peer::new(&a, "Ana", Some(policy(Mode::Manual, None)))],
+        |cfg| {
+            cfg.responder.enabled = true;
+            cfg.projects.insert(PROJECT.into(), checkout_path);
+        },
+    )
+    .await;
+    let marker = |sid: &str, cwd: &std::path::Path, age: u64| {
+        let mut m = Marker::new(sid, &cwd.to_string_lossy(), "startup");
+        m.heartbeat_at = unix_to_rfc3339(envelope::now_unix() - age);
+        route::write_marker(b.home(), &m).unwrap();
+    };
+    marker("S1", checkout.path(), 300);
+    marker("S2", elsewhere.path(), 0);
+    let text = "Why is the refresh token rotated on every read?";
+    let env = signed(&a, &b.id, text);
+    let payload: Payload = serde_json::from_str(&env.raw).unwrap();
+    let resp = post_envelope(&client(Some(&a), &b.id), &b, &env).await;
+    assert_eq!(resp.status(), 202);
+    let spooled = Instant::now();
+    assert!(b.spool().get(Dir::Inbox, &payload.id).unwrap().is_some());
+    let wake = route::wake_file(b.home(), "S1", &payload.id);
+    while !wake.is_file() {
+        assert!(
+            spooled.elapsed() < Duration::from_secs(2),
+            "no wake file under S1 within 2 s of the spool write"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let block = std::fs::read_to_string(&wake).unwrap();
+    assert!(block.starts_with("🟧"), "{block}");
+    assert!(block.contains(text), "{block}");
+    assert!(block.contains("Ana"), "{block}");
+    assert!(
+        !route::wake_file(b.home(), "S2", &payload.id).exists(),
+        "S2 stays silent"
+    );
+    let r = route::load_routing(b.home(), &payload.id);
+    assert_eq!(r.current.as_deref(), Some("S1"));
+    assert_eq!(r.tried, vec!["S1".to_string()]);
+    assert!(
+        !b.spool()
+            .get(Dir::Inbox, &payload.id)
+            .unwrap()
+            .unwrap()
+            .seen
+    );
+    b.running.shutdown();
+}
