@@ -14,6 +14,13 @@ Two rules hold for the whole flow:
 - `owl send` runs only on an explicit "Send" or "Draft & send" pick. `owl allow --always`
   and `owl deny` run only on their pick. Never send, allow or deny on your own initiative.
 
+The CLI renders every message; you paste. Never:
+
+- never a Markdown table for a single question
+- never your own icons, markers or columns
+- never paraphrase
+- the orange frame always means "from a peer"
+
 ## 1. List
 
 Run `owl inbox --json`. Each row carries `id`, `from` (fingerprint), `from_name`, `state`,
@@ -28,8 +35,8 @@ stop.
 
 For every record in state `consent`:
 
-1. Run `owl show <id>` and print the framed message block (see the skill, "Framed message"):
-   the question verbatim, headed by the peer name, the fingerprint, the project and the path
+1. Run `owl show <id> --format claude` and paste its output verbatim: the orange frame
+   around the question, headed by the peer name, the fingerprint, the project and the path
    (or "whole repository").
 2. `AskUserQuestion` with four options:
    - **Allow once** — `owl allow <fingerprint> --once`: releases this peer's held questions
@@ -49,11 +56,10 @@ For every record in state `consent`:
 
 ## 3. `pending` records (question with no draft yet)
 
-- One `pending` record: run `owl show <id>` and, at once,
-  print the framed message block (see the skill, "Framed message"): the question verbatim,
-  with peer name, project and path.
+- One `pending` record: run `owl show <id> --format claude` and paste its output verbatim
+  (the framed question with peer name, project and path).
 - Several: print the table (id, peer, path, age), `AskUserQuestion` to pick one, then run
-  `owl show <id>` for the pick and print the framed message block.
+  `owl show <id> --format claude` for the pick and paste its output verbatim.
 
 Then `AskUserQuestion` with **Draft / Draft & send / Reject / Skip**:
 
@@ -70,18 +76,18 @@ Then `AskUserQuestion` with **Draft / Draft & send / Reject / Skip**:
 
 ## 4. `drafted` records (draft stored, not sent)
 
-1. Run `owl show <id>` (unless the draft output is already in view from step 3) and print
-   the draft verbatim in a code block, under the question it answers. When the draft's
-   language differs from the question's language (a Polish question, an English draft),
-   say so in one line before the picker and recommend Edit.
+1. Run `owl show <id> --format claude` (unless its output is already in view from step 3)
+   and paste its output verbatim: the question block, then `draft:` with the draft in a
+   plain code block and `harness: <name>`. When the CLI prints a `note:` line (the draft is
+   in a different language than the question), recommend Edit before the picker.
 2. `AskUserQuestion` with **Send / Edit / Reject**:
    - **Send** — run `owl send <id>`: signs the draft and moves it to the outbox. This is the
      only pick in this picker that runs `owl send`.
    - **Edit** — `owl edit <id>` opens `$EDITOR`, which cannot run inside a session (see
      `commands/edit.md`): tell the human to run `owl edit <id>` in a terminal and say when
-     they are done. Then run `owl show <id>` again, print the edited draft verbatim in a code
-     block, and ask again with the same Send / Edit / Reject picker. Never send a draft the
-     human has not seen after editing.
+     they are done. Then run `owl show <id> --format claude` again, paste its output
+     verbatim, and ask again with the same Send / Edit / Reject picker. Never send a draft
+     the human has not seen after editing.
    - **Reject** — run `owl reject <id>`; the draft is discarded and the peer gets no answer.
 3. Show the command's output. On a non-zero exit show the error line and stop; the record
    is untouched and the flow can be repeated.
@@ -90,11 +96,9 @@ Never chain `owl draft` and `owl send` unless the human picked "Draft & send" (o
 
 ## 5. `answer` records (a peer answered a question asked from here)
 
-Run `owl show <id>` for each answer and show them all in one table (see the owlpost skill,
-"Showing messages"): left column the local time and the peer name, right column the answer
-verbatim, newest last, only the last 24 hours and at most the 10 newest; name the question
-each one replies to above the table or in the left cell. The table keeps the per-peer
-colour markers and is not framed; for a single answer shown on its own,
-print the framed message block (see the skill, "Framed message"). Then apply the memory rule from the
-owlpost skill: only when the human accepts an answer, save it as a `reference` fact with
-provenance `owlpost:<peer>:<question id>` and today's date.
+Run `owl inbox --format claude` and paste its output verbatim. The output is the
+"Showing messages" table of the answers (last 24 hours, at most the 10 newest, newest last,
+one `↳` line per answer naming its question, one line under it when older ones were left
+out); the table keeps the per-peer colour markers and is not framed. Then apply the memory
+rule from the owlpost skill: only when the human accepts an answer, save it as a `reference`
+fact with provenance `owlpost:<peer>:<question id>` and today's date.

@@ -15,8 +15,9 @@ disagree, fix the document first; the task's acceptance criteria are derived fro
   port forwarding; `hyper` + `hyper-util` + `http-body-util` — serve the axum router and run
   an HTTP/1 client over an iroh bi-stream (already transitive deps of axum/reqwest, only
   feature flags added); `iroh-relay` (dev, `server`) — a plain-HTTP relay on `127.0.0.1:0`
-  so the iroh tests never touch n0's relays. Anything else needs a line in the PR explaining
-  why the above cannot do it.
+  so the iroh tests never touch n0's relays. Since OWL-032: `chrono` (`clock`, no default
+  features) — local `HH:MM` in `--format claude`; already a transitive dep, no new package.
+  Anything else needs a line in the PR explaining why the above cannot do it.
 - CLI paths are synchronous (`std::fs`, blocking `reqwest` where needed); only `owl daemon`
   and `owl ask --wait` use the tokio runtime.
 - Lints: `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check`. CI runs build, test,
@@ -64,6 +65,9 @@ scripts/
 ## 3. Configuration — `$OWLPOST_HOME/config.json`
 
 `$OWLPOST_HOME` defaults to `~/.config/owlpost`. Every test sets it to a fresh temp dir.
+Next to `config.json` it holds `key` (§4), `contacts/` (§5), `seen-ids.txt` (§6), `spool/`
+(§8), `log/`, `plugin.json` and `watch/` (§9) and `markers.json` (§9, OWL-032: the per-peer
+colour markers of `owl inbox --format claude`).
 
 ```json
 {
@@ -288,8 +292,8 @@ unavailable, `3` rate limited, `4` nothing to do (e.g. `watch` timeout).
 | `owl deny <peer>` | policy `never` |
 | `owl ask <peer> [path] "<question>" [--project <id>] [--wait <secs>] [--no-cache]` | send a question; the path is optional (a repo-level question sends no `body.path`); prints answer (cache/`200`/`--wait`) or `accepted <id>` |
 | `owl ask --file <path> "<question>"` | propose peers from `git blame` (top 3 by line share matched to contact emails); interactive pick, or `--json` list |
-| `owl inbox [--count] [--new] [--all] [--format plain\|claude\|codex\|kimi] [--follow [--session <id>]]` | list / count; `--format` emits the harness injection shape, empty output when count is 0; `--hook-event <NAME>` (default `UserPromptSubmit`) is echoed as `hookEventName`, which Claude Code requires to match the firing event; `--count --format claude --hook-event SessionStart` always prints the line (also at count 0) with `watchPaths: ["<home>/spool/inbox"]` unless `plugin.json` says `{"watch": false}`, and sweeps dead markers from `$OWLPOST_HOME/watch/`; `--count --format claude --hook-event FileChanged` reads the hook input JSON on stdin and exits 2 with the counter sentence on stderr when `event` is `add`, something is unseen and the watch is on (else exit 0, silent; `--hook-event FileChanged` with another format, or none, is a clap usage error); `--count --follow` (plain only) is the poll-loop fallback for hosts without a `FileChanged` hook: with `--session <id>` (`[A-Za-z0-9._-]{1,128}`, anything else is a clap usage error, exit 2) it writes its pid to `$OWLPOST_HOME/watch/<id>`, polls the count every 5 s (`OWLPOST_FOLLOW_SECS`, fractions allowed), prints the counter sentence only when it changed and nothing at zero, never marks anything seen, and ends — removing the marker — when the marker is removed from outside or its stdout is closed; `--session-start` is accepted and ignored (OWL-023 plugins not yet reinstalled) |
-| `owl show <id\|all>` | full content, marks seen |
+| `owl inbox [--count] [--new] [--all] [--format plain\|claude\|codex\|kimi] [--follow [--session <id>]]` | list / count; `--format` emits the harness injection shape, empty output when count is 0; `--hook-event <NAME>` (default `UserPromptSubmit`) is echoed as `hookEventName`, which Claude Code requires to match the firing event; `--count --format claude --hook-event SessionStart` always prints the line (also at count 0) with `watchPaths: ["<home>/spool/inbox"]` unless `plugin.json` says `{"watch": false}`, and sweeps dead markers from `$OWLPOST_HOME/watch/`; `--count --format claude --hook-event FileChanged` reads the hook input JSON on stdin and exits 2 with the counter sentence on stderr when `event` is `add`, something is unseen and the watch is on (else exit 0, silent; `--hook-event FileChanged` with another format, or none, is a clap usage error); `--count --follow` (plain only) is the poll-loop fallback for hosts without a `FileChanged` hook: with `--session <id>` (`[A-Za-z0-9._-]{1,128}`, anything else is a clap usage error, exit 2) it writes its pid to `$OWLPOST_HOME/watch/<id>`, polls the count every 5 s (`OWLPOST_FOLLOW_SECS`, fractions allowed), prints the counter sentence only when it changed and nothing at zero, never marks anything seen, and ends — removing the marker — when the marker is removed from outside or its stdout is closed; `--session-start` is accepted and ignored (OWL-023 plugins not yet reinstalled); listing mode with `--format claude` (codex, kimi: the same) prints the framed question blocks and the answers table as Markdown for the model to paste (OWL-032, below), still marking the listed records seen |
+| `owl show <id\|all> [--format plain\|claude\|codex\|kimi]` | full content, marks seen; `--format claude` (codex and kimi print the same) prints the framed Markdown block instead of the plain fields (OWL-032, below); `--json` wins over `--format` |
 | `owl draft <id> [--harness <name>]` | run the responder, store and print the draft |
 | `owl edit <id>` | open the draft in `$EDITOR` |
 | `owl send <id>` | sign + move to outbox |
@@ -339,6 +343,49 @@ Hook injection formats for `owl inbox --count --format …` (exact):
   whole-repo questions and answers), then `owlpost: run /owlpost:inbox now.` — the skill
   opens the inbox on the first turn. Lines are `\n`-joined inside the JSON string, so stdout
   stays one line; nothing is marked seen. Independent of `plugin.json`.
+
+Rendered Markdown for `--format claude` (OWL-032, `src/render.rs`; `codex` and `kimi` print
+the same — the harness-specific difference is only in the `--count` injection lines). The
+CLI renders, the model pastes verbatim (`commands/inbox.md`); nothing in the plugin
+describes a layout the model would have to reproduce.
+
+- `owl show <id> --format claude` on a question record (any state) and on an answer record
+  prints the framed block: line 1 and the last line are exactly 16 × `🟧`
+  (`🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧`); line 2 is the header
+  `🦉 **<peer name>** · HH:MM · <project or -> · <path or whole repository>`, on a `consent`
+  record `🦉 **<peer name>** (<fingerprint>) · HH:MM · …` (the fingerprint carries its `owl:`
+  prefix); then the message text verbatim (trailing line breaks dropped) in a ```` ```text ````
+  fence — the fence is one backtick longer than the longest backtick run inside the text, so
+  a text containing three backticks is fenced with four, both ends. `HH:MM` is the local time
+  of `received_at` (`TZ` honoured), `--:--` when it does not parse. An answer takes project
+  and path from the question it replies to (`done/`, `asks/` or `inbox/` by `in_reply_to`),
+  `-` / `whole repository` when that question is gone. A record with a draft prints, after
+  the frame, `draft:`, the draft in a plain ```` ```text ```` block (drafts are ours, never
+  framed), `harness: <name>` and — when a Polish/English stopword heuristic says the draft
+  and the question are in different languages (ponytail) — one line
+  `note: the draft is in a different language than the question — pick Edit`. `show all`
+  separates blocks with one blank line. `--format plain` and no `--format` print the plain
+  fields unchanged; `--json` wins over `--format`.
+- `owl inbox --format claude` in listing mode (no `--count`; `--new` filters as usual) prints
+  every question record as that framed block, `consent` ones first, then the rest in list
+  order, then the answers table — sections separated by one blank line, nothing else (no
+  consent prompt, no `auto_error` note). The table is header-less, two columns, Markdown
+  (`| <marker> HH:MM · <peer name> | <answer> |`, the first row followed by `|---|---|`);
+  the answer text verbatim with `|` escaped as `\|` and line breaks (`\n`, `\r\n`) as
+  `<br>`, trailing line breaks dropped. Only answers received in the last 24 h
+  (`now − received_at ≤ 86400`), newest last, at most the 10 newest; when any answer was cut
+  (older than 24 h or beyond the 10) one line under the table:
+  `<N> older answers not shown — owl history` (N = all answer records − rows shown). Above
+  the table one line per shown row, `<marker> ↳ <question id short> "<first line of the
+  question, ≤60 chars>"` — the short id is the last 8 characters of the question id (the
+  random tail of a UUIDv7), the first line comes from the question record found by
+  `in_reply_to` (`""` when it is gone, `-` for the id when the answer names none). Markers
+  come from 🟦 🟩 🟨 🟪 🟧 🟥 (then repeat) per peer fingerprint in order of first
+  appearance in the shown rows, persisted in `$OWLPOST_HOME/markers.json` (an append-only
+  JSON object fingerprint → appearance index, marker = index mod 6, written atomically only
+  when a new peer appeared; a missing or unparseable file is an empty map), so the same peer
+  keeps the same marker across calls and sessions. The listed records are marked seen as in
+  the plain listing; `--format plain` prints today's table; `--json` is unchanged.
 
 ## 10. Responder runner
 

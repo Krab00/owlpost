@@ -2099,7 +2099,13 @@ impl Home {
     /// An answer from `peer` to a question I asked (the question lands in `done/` as
     /// `answered`, the answer in `inbox/` as `pending`, `received_at` = `at`); returns
     /// (answer id, question id).
-    fn put_answer(&self, peer: &Identity, question_text: &str, answer: &str, at: &str) -> (String, String) {
+    fn put_answer(
+        &self,
+        peer: &Identity,
+        question_text: &str,
+        answer: &str,
+        at: &str,
+    ) -> (String, String) {
         let q = question(&self.me, peer, question_text);
         let qid = self.put_done(&Envelope::sign(&q, &self.me), "answered");
         let env = Envelope::sign(&Payload::answer(&q, answer, "claude", 0, false), peer);
@@ -2132,7 +2138,10 @@ fn show_format_claude_prints_the_framed_block() {
     let expected = format!(
         "{FRAME}\n🦉 **Maciek** · 23:08 · {PROJECT} · {PATH}\n```text\n{text}\n```\n{FRAME}\n"
     );
-    assert_eq!(h.ok_tz("UTC", &["show", &a, "--format", "claude"]), expected);
+    assert_eq!(
+        h.ok_tz("UTC", &["show", &a, "--format", "claude"]),
+        expected
+    );
     let lines: Vec<&str> = expected.lines().collect();
     assert_eq!(lines[0], FRAME);
     assert_eq!(lines[lines.len() - 1], FRAME);
@@ -2182,7 +2191,7 @@ fn show_format_claude_prints_the_framed_block() {
         format!("🦉 **Ana** ({}) · 23:08 · {PROJECT} · {PATH}", fp(&h.ana))
     );
     assert!(fp(&h.ana).starts_with("owl:"));
-    assert!(out.contains(&format!("** (owl:")), "{out}");
+    assert!(out.contains("** (owl:"), "{out}");
     assert!(h.inbox(&c).unwrap().seen, "show marks seen");
 
     // Three backticks inside: a four-backtick fence, both ends.
@@ -2198,7 +2207,11 @@ fn show_format_claude_prints_the_framed_block() {
 
     // `show all`: blocks separated by one blank line.
     let all = h.ok_tz("UTC", &["show", "all", "--format", "claude"]);
-    assert_eq!(all.matches(&format!("{FRAME}\n\n{FRAME}")).count(), 3, "{all}");
+    assert_eq!(
+        all.matches(&format!("{FRAME}\n\n{FRAME}")).count(),
+        3,
+        "{all}"
+    );
     assert_eq!(all.lines().filter(|l| *l == FRAME).count(), 8);
 }
 
@@ -2240,7 +2253,10 @@ fn show_format_claude_prints_the_draft_and_the_language_note() {
     let id = h.put(&h.maciek, pl_q, "pending");
     h.set_draft(&id, en_d, "fake");
     let plain = h.ok(&["show", &id]);
-    assert!(plain.contains("draft (ok via fake, redactions: 0, "), "{plain}");
+    assert!(
+        plain.contains("draft (ok via fake, redactions: 0, "),
+        "{plain}"
+    );
     assert!(!plain.contains(NOTE) && !plain.contains(FRAME), "{plain}");
 }
 
@@ -2263,7 +2279,9 @@ fn show_format_claude_frames_an_answer() {
     h.set_received(&orphan, Dir::Inbox, RECEIVED);
     assert_eq!(
         h.ok_tz("UTC", &["show", &orphan, "--format", "claude"]),
-        format!("{FRAME}\n🦉 **Ana** · 23:08 · - · whole repository\n```text\nOrphan.\n```\n{FRAME}\n")
+        format!(
+            "{FRAME}\n🦉 **Ana** · 23:08 · - · whole repository\n```text\nOrphan.\n```\n{FRAME}\n"
+        )
     );
 }
 
@@ -2287,7 +2305,12 @@ fn inbox_format_claude_prints_the_answers_table() {
             } else {
                 format!("answer {i}")
             };
-            let (aid, qid) = h.put_answer(peer, &format!("question {i}?\nmore"), &text, &envelope::unix_to_rfc3339(t));
+            let (aid, qid) = h.put_answer(
+                peer,
+                &format!("question {i}?\nmore"),
+                &text,
+                &envelope::unix_to_rfc3339(t),
+            );
             rows.push((aid, qid, t));
         }
         (h, rows)
@@ -2296,23 +2319,52 @@ fn inbox_format_claude_prints_the_answers_table() {
     let (h, rows) = build(&maciek, &ana);
     let out = h.ok_tz("UTC", &["inbox", "--format", "claude"]);
     let lines: Vec<&str> = out.lines().collect();
-    let refs: Vec<&str> = lines.iter().copied().filter(|l| l.contains(" ↳ ")).collect();
-    let table: Vec<&str> = lines.iter().copied().filter(|l| l.starts_with("| ")).collect();
+    let refs: Vec<&str> = lines
+        .iter()
+        .copied()
+        .filter(|l| l.contains(" ↳ "))
+        .collect();
+    let table: Vec<&str> = lines
+        .iter()
+        .copied()
+        .filter(|l| l.starts_with("| "))
+        .collect();
     assert_eq!(refs.len(), 10, "{out}");
     assert_eq!(table.len(), 10, "{out}");
     assert_eq!(lines[10], table[0]);
     assert_eq!(lines[11], "|---|---|");
     assert_eq!(lines[lines.len() - 1], OLDER_TWO);
-    assert_eq!(lines.len(), 10 + 10 + 1 + 1, "refs, rows, delimiter, older line: {out}");
+    assert_eq!(
+        lines.len(),
+        10 + 10 + 1 + 1,
+        "refs, rows, delimiter, older line: {out}"
+    );
     // Rows 2..12 shown (0 is older than 24 h, 1 the oldest in-window), newest last.
     for (k, i) in (2..12u64).enumerate() {
         let (_, qid, t) = &rows[i as usize];
-        let (name, marker) = if i % 2 == 0 { ("Maciek", "🟦") } else { ("Ana", "🟩") };
-        let text = if i == 7 { "a \\| b<br>second line".to_string() } else { format!("answer {i}") };
-        assert_eq!(table[k], format!("| {marker} {} · {name} | {text} |", utc_hh_mm(*t)));
-        assert_eq!(refs[k], format!("{marker} ↳ {} \"question {i}?\"", short(qid)));
+        let (name, marker) = if i % 2 == 0 {
+            ("Maciek", "🟦")
+        } else {
+            ("Ana", "🟩")
+        };
+        let text = if i == 7 {
+            "a \\| b<br>second line".to_string()
+        } else {
+            format!("answer {i}")
+        };
+        assert_eq!(
+            table[k],
+            format!("| {marker} {} · {name} | {text} |", utc_hh_mm(*t))
+        );
+        assert_eq!(
+            refs[k],
+            format!("{marker} ↳ {} \"question {i}?\"", short(qid))
+        );
     }
-    assert!(!out.contains("answer 0 |") && !out.contains("answer 1 |"), "{out}");
+    assert!(
+        !out.contains("answer 0 |") && !out.contains("answer 1 |"),
+        "{out}"
+    );
     // A second process prints the same markers; markers.json holds the two peers.
     assert_eq!(h.ok_tz("UTC", &["inbox", "--format", "claude"]), out);
     let markers: Value =
@@ -2336,8 +2388,16 @@ fn inbox_format_claude_prints_the_answers_table() {
     let (h2, _) = build(&ana, &maciek);
     let out2 = h2.ok_tz("UTC", &["inbox", "--format", "claude"]);
     let table2: Vec<&str> = out2.lines().filter(|l| l.starts_with("| ")).collect();
-    assert!(table2[0].starts_with("| 🟦 ") && table2[0].contains("· Ana |"), "{}", table2[0]);
-    assert!(table2[1].starts_with("| 🟩 ") && table2[1].contains("· Maciek |"), "{}", table2[1]);
+    assert!(
+        table2[0].starts_with("| 🟦 ") && table2[0].contains("· Ana |"),
+        "{}",
+        table2[0]
+    );
+    assert!(
+        table2[1].starts_with("| 🟩 ") && table2[1].contains("· Maciek |"),
+        "{}",
+        table2[1]
+    );
 }
 
 /// AC3: a consent question, a pending question and one answer: the two framed blocks
@@ -2371,6 +2431,9 @@ fn inbox_format_claude_prints_blocks_then_table_and_nothing_else() {
     let q = e.put(&e.maciek, "Only?", "pending");
     e.set_received(&q, Dir::Inbox, RECEIVED);
     let only = e.ok_tz("UTC", &["inbox", "--format", "claude"]);
-    assert!(only.starts_with(FRAME) && only.ends_with(&format!("{FRAME}\n")), "{only}");
+    assert!(
+        only.starts_with(FRAME) && only.ends_with(&format!("{FRAME}\n")),
+        "{only}"
+    );
     assert!(!only.contains("|---|---|"));
 }
