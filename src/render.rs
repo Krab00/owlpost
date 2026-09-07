@@ -494,10 +494,23 @@ mod tests {
         long.question_first_line = format!("{seventy}\nsecond line");
         let mut exact = row(&envelope::unix_to_rfc3339(now - 4), "a", "A", "y", "2");
         exact.question_first_line = sixty.clone();
-        let out = answers_table(&[long, exact], now, &mut Markers::default());
+        // 60 chars, not bytes: a 70 × `ł` line (140 bytes) keeps 60 chars (120 bytes), a
+        // 60 × `ł` line stays whole.
+        let mut polish = row(&envelope::unix_to_rfc3339(now - 3), "a", "A", "z", "3");
+        polish.question_first_line = format!("{}\nsecond line", "ł".repeat(70));
+        let mut polish_exact = row(&envelope::unix_to_rfc3339(now - 2), "a", "A", "w", "4");
+        polish_exact.question_first_line = "ł".repeat(60);
+        let out = answers_table(
+            &[long, exact, polish, polish_exact],
+            now,
+            &mut Markers::default(),
+        );
         let refs: Vec<&str> = out.lines().filter(|l| l.contains(" ↳ ")).collect();
         assert_eq!(refs[0], format!("🟦 ↳ 00000001 \"{}\"", "x".repeat(60)));
         assert_eq!(refs[1], format!("🟦 ↳ 00000002 \"{sixty}\""));
-        assert!(!out.contains(&"x".repeat(61)));
+        assert_eq!(refs[2], format!("🟦 ↳ 00000003 \"{}\"", "ł".repeat(60)));
+        assert_eq!(refs[2].len(), "🟦 ↳ 00000003 \"\"".len() + 120);
+        assert_eq!(refs[3], format!("🟦 ↳ 00000004 \"{}\"", "ł".repeat(60)));
+        assert!(!out.contains(&"x".repeat(61)) && !out.contains(&"ł".repeat(61)));
     }
 }

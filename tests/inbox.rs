@@ -2489,17 +2489,37 @@ fn inbox_format_claude_prints_the_answers_table() {
         "new",
         &envelope::unix_to_rfc3339(now - 120),
     );
+    // 60 chars, not bytes: a 70 × `ł` first line keeps 60 `ł` (120 bytes).
+    let (_, polish_q) = h3.put_answer(
+        &ana,
+        &format!("{}\ndruga linia", "ł".repeat(70)),
+        "polish",
+        &envelope::unix_to_rfc3339(now - 90),
+    );
     let (_, exact_q) = h3.put_answer(&ana, &sixty, "newer", &envelope::unix_to_rfc3339(now - 60));
+    // An orphan answer: its `in_reply_to` matches no question in `done/`, `asks/` or
+    // `inbox/` — the `↳` line quotes an empty first line and the row still renders.
+    let gone = question(&h3.me, &maciek, "gone?");
+    let orphan = h3.put_env(
+        &Envelope::sign(&Payload::answer(&gone, "lost", "claude", 0, false), &maciek),
+        "pending",
+    );
+    h3.set_received(&orphan, Dir::Inbox, &envelope::unix_to_rfc3339(now - 30));
     let out3 = h3.ok_tz("UTC", &["inbox", "--format", "claude"]);
     let table3: Vec<&str> = out3.lines().filter(|l| l.starts_with("| ")).collect();
-    assert_eq!(table3.len(), 2, "{out3}");
+    assert_eq!(table3.len(), 4, "{out3}");
     assert!(
         table3[0].starts_with("| 🟦 ") && table3[0].ends_with("· Ana | new |"),
         "{out3}"
     );
-    assert!(table3[1].ends_with("· Ana | newer |"), "{out3}");
+    assert!(table3[1].ends_with("· Ana | polish |"), "{out3}");
+    assert!(table3[2].ends_with("· Ana | newer |"), "{out3}");
     assert!(
-        !out3.contains("| old |") && !out3.contains("\"old?\""),
+        table3[3].starts_with("| 🟩 ") && table3[3].ends_with("· Maciek | lost |"),
+        "{out3}"
+    );
+    assert!(
+        !out3.contains("| old |") && !out3.contains("\"old?\"") && !out3.contains("gone?"),
         "{out3}"
     );
     assert!(
@@ -2511,10 +2531,19 @@ fn inbox_format_claude_prints_the_answers_table() {
         refs3,
         [
             format!("🟦 ↳ {} \"{}\"", short(&long_q), "q".repeat(60)),
+            format!("🟦 ↳ {} \"{}\"", short(&polish_q), "ł".repeat(60)),
             format!("🟦 ↳ {} \"{sixty}\"", short(&exact_q)),
+            format!("🟩 ↳ {} \"\"", short(&gone.id)),
         ]
     );
-    assert!(!out3.contains(&"q".repeat(61)), "{out3}");
+    assert_eq!(
+        refs3[1].len(),
+        format!("🟦 ↳ {} \"\"", short(&polish_q)).len() + 120
+    );
+    assert!(
+        !out3.contains(&"q".repeat(61)) && !out3.contains(&"ł".repeat(61)),
+        "{out3}"
+    );
 }
 
 /// AC3: a consent question, a pending question and one answer: the two framed blocks
@@ -2536,12 +2565,7 @@ fn inbox_format_claude_prints_blocks_then_table_and_nothing_else() {
     let d = h.put(&h.maciek, pl_q, "pending");
     h.set_received(&d, Dir::Inbox, RECEIVED);
     h.set_draft(&d, en_d, "fake");
-    // `--json` wins over `--format`: the JSON array, no Markdown, no markers.json.
-    let json_out = h.ok(&["inbox", "--json", "--format", "claude"]);
-    let listed: Value = serde_json::from_str(&json_out).unwrap();
-    assert_eq!(listed.as_array().unwrap().len(), 4);
-    assert!(!json_out.contains(FRAME) && !json_out.contains("|---|---|"));
-    assert!(!h.path().join("markers.json").exists());
+    assert!(!h.inbox(&p).unwrap().seen && !h.inbox(&c).unwrap().seen);
     let out = h.ok_tz("UTC", &["inbox", "--format", "claude"]);
     assert_eq!(
         out,
@@ -2563,6 +2587,12 @@ fn inbox_format_claude_prints_blocks_then_table_and_nothing_else() {
     assert_eq!(e.ok(&["inbox", "--format", "claude"]), "");
     let q = e.put(&e.maciek, "Only?", "pending");
     e.set_received(&q, Dir::Inbox, RECEIVED);
+    // `--json` wins over `--format`: the JSON array, no Markdown, no markers.json.
+    let json_out = e.ok(&["inbox", "--json", "--format", "claude"]);
+    let listed: Value = serde_json::from_str(&json_out).unwrap();
+    assert_eq!(listed.as_array().unwrap().len(), 1);
+    assert!(!json_out.contains(FRAME) && !json_out.contains("|---|---|"));
+    assert!(!e.path().join("markers.json").exists());
     let only = e.ok_tz("UTC", &["inbox", "--format", "claude"]);
     assert!(
         only.starts_with(FRAME) && only.ends_with(&format!("{FRAME}\n")),
