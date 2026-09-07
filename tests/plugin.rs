@@ -1709,7 +1709,10 @@ const ICON: &str = "🦉 ";
 const FRAME_LINE: &str = "🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧";
 const FRAME_HEADER: &str = "🦉 **<peer>** · HH:MM · <project> · <path or \"whole repository\">";
 const DRAFTS_NOT_FRAMED: &str = "Drafts (our own text) are not framed: they keep the plain code block, so the orange frame always means \"from a peer\".";
-const FRAMED_REF: &str = "print the framed message block (see the skill, \"Framed message\")";
+/// OWL-032: the CLI renders the block, the command says to paste it (was "print the framed
+/// message block (see the skill, ...)", which pointed at text the model never had in context).
+const FRAMED_REF: &str = "run `owl show <id> --format claude` and paste its output verbatim";
+const TABLE_REF: &str = "Run `owl inbox --format claude` and paste its output verbatim.";
 const OLD_PHRASE: &str = "in a code block with peer name";
 const WATCH_EVENT: &str = "`🦉 owlpost: 1 new answer from Maciek`";
 
@@ -1837,9 +1840,9 @@ fn skill_documents_the_framed_message() {
     );
 }
 
-/// AC3: inbox.md steps 2, 3 and 5 print the framed block (the old "in a code block with
-/// peer name" phrase is gone from them), step 4 keeps the plain draft code block; watch.md
-/// carries the event example with the icon.
+/// AC3: inbox.md steps 2 and 3 paste the rendered block, step 5 the rendered listing (the
+/// old "in a code block with peer name" phrase is gone from them), step 4 keeps the plain
+/// draft code block; watch.md carries the event example with the icon.
 #[test]
 fn inbox_steps_print_the_framed_block_and_watch_event_has_the_icon() {
     let (_, body) = frontmatter("commands/inbox.md");
@@ -1853,9 +1856,10 @@ fn inbox_steps_print_the_framed_block_and_watch_event_has_the_icon() {
     };
     for n in [2, 3, 5] {
         let s = step(n);
+        let want = if n == 5 { TABLE_REF } else { FRAMED_REF };
         assert!(
-            s.contains(FRAMED_REF),
-            "inbox.md step {n} lacks {FRAMED_REF:?}"
+            s.to_lowercase().contains(&want.to_lowercase()),
+            "inbox.md step {n} lacks {want:?}"
         );
         assert!(
             !s.contains(OLD_PHRASE),
@@ -1863,6 +1867,7 @@ fn inbox_steps_print_the_framed_block_and_watch_event_has_the_icon() {
         );
     }
     assert!(step(3).contains(FRAMED_REF));
+    assert!(step(2).contains("Run `owl show <id> --format claude` and paste its output verbatim"));
     assert!(
         step(2).contains("the fingerprint"),
         "consent header keeps the fingerprint"
@@ -1872,7 +1877,7 @@ fn inbox_steps_print_the_framed_block_and_watch_event_has_the_icon() {
         !drafts.contains("framed"),
         "step 4 (drafts) must stay unframed: {drafts}"
     );
-    assert!(drafts.contains("print\n   the draft verbatim in a code block"));
+    assert!(drafts.contains("`draft:` with the draft in a\n   plain code block"));
     assert!(
         step(5).contains("is not framed"),
         "answers table stays unframed"
@@ -1886,5 +1891,38 @@ fn inbox_steps_print_the_framed_block_and_watch_event_has_the_icon() {
     assert!(
         !watch.contains("(\"owlpost: 1 new answer from"),
         "watch.md still quotes the icon-free event"
+    );
+}
+
+// ---------- OWL-032: the CLI renders the framed block ----------
+
+/// AC6: end to end through the real binary — one consent question from a contact,
+/// `owl show <id> --format claude`: the first and last lines are 🟧 × 16 and the header
+/// starts with `🦉 **`.
+#[test]
+fn show_format_claude_frames_a_consent_question_end_to_end() {
+    let home = home_with(1, false);
+    let spool = Spool::new(home.path()).unwrap();
+    let (id, _) = spool.list(Dir::Inbox, |_| true).unwrap().remove(0);
+    spool.set_state(Dir::Inbox, &id, "consent").unwrap();
+    let out = Command::new(OWL)
+        .args(["show", &id, "--format", "claude"])
+        .env("OWLPOST_HOME", home.path())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{:?}", out.status);
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.first().copied(), Some(FRAME_LINE), "{stdout}");
+    assert_eq!(lines.last().copied(), Some(FRAME_LINE), "{stdout}");
+    assert_eq!(FRAME_LINE.chars().filter(|c| *c == '🟧').count(), 16);
+    assert!(lines[1].starts_with("🦉 **Maciek** (owl:"), "{}", lines[1]);
+    assert!(
+        stdout.contains("```text\nwhy does session 0 retry?\n```"),
+        "{stdout}"
+    );
+    assert!(
+        spool.get(Dir::Inbox, &id).unwrap().unwrap().seen,
+        "show marks seen"
     );
 }
