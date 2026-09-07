@@ -67,7 +67,8 @@ pub fn render_record(
 
 pub fn run(home: &Path, id: &str, json: bool, format: Option<&str>) -> anyhow::Result<()> {
     let format = format.map(Format::parse).transpose()?;
-    let framed = !json && matches!(format, Some(Format::Claude | Format::Codex | Format::Kimi));
+    // `--json` wins: the json branch below is checked first.
+    let framed = matches!(format, Some(Format::Claude | Format::Codex | Format::Kimi));
     let spool = Spool::new(home)?;
     let book = super::contact_book(home)?;
     let records: Vec<(String, Record)> = if id == "all" {
