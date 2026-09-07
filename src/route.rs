@@ -608,8 +608,11 @@ pub fn end_session(home: &Path, sid: &str) {
     }
 }
 
-/// One lease tick over `spool/routing/*.json` (see the module doc). `now` is unix seconds,
-/// `lease_secs` the lease. Per-record errors are logged, never propagated.
+/// One lease tick over `spool/routing/*.json` (see the module doc), in path order so every
+/// tick walks the routings the same way. `now` is unix seconds, `lease_secs` the lease.
+/// Per-record errors are logged, never propagated: an unreadable record file or a record
+/// whose payload does not parse is skipped (its routing and wake file stay as they are, the
+/// record stays visible in the inbox for a human) and the tick moves on to the next routing.
 pub fn lease_tick(home: &Path, config: &Config, spool: &Spool, now: u64, lease_secs: u64) {
     let Ok(entries) = std::fs::read_dir(routing_dir(home)) else {
         return;
@@ -618,8 +621,9 @@ pub fn lease_tick(home: &Path, config: &Config, spool: &Spool, now: u64, lease_s
         .into_iter()
         .map(|m| m.session_id)
         .collect();
-    for entry in entries.flatten() {
-        let path = entry.path();
+    let mut paths: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
+    paths.sort();
+    for path in paths {
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
             continue;
         }
@@ -642,6 +646,12 @@ pub fn lease_tick(home: &Path, config: &Config, spool: &Spool, now: u64, lease_s
             }
         };
         if rec.seen {
+            continue;
+        }
+        // A payload that does not parse could never be routed: leave its routing and wake
+        // file alone rather than tearing the wake down for a `route` that is bound to fail.
+        if let Err(e) = serde_json::from_str::<Payload>(&rec.raw) {
+            tracing::warn!(id, error = %e, "lease: malformed record skipped");
             continue;
         }
         let routing = load_routing(home, &id);
@@ -784,5 +794,26 @@ mod tests {
     #[test]
     fn env_secs_fall_back_to_defaults() {
         assert_eq!(env_secs("OWLPOST_TEST_UNSET_SECS_X", 7), 7);
+    }
+
+    /// `OWLPOST_CLAUDE_HOME` wins when set and non-empty; otherwise `$HOME/.claude`. Nothing
+    /// else in this binary reads the variable, and every read goes through `std::env`.
+    #[test]
+    fn claude_home_is_the_env_override_or_home_dot_claude() {
+        let home = std::env::var_os("HOME").expect("HOME is set in the test environment");
+        let fallback = Path::new(&home).join(".claude");
+        // SAFETY: see above.
+        unsafe {
+            std::env::set_var(CLAUDE_HOME_ENV, "/tmp/owlpost-test-claude");
+        }
+        assert_eq!(claude_home(), PathBuf::from("/tmp/owlpost-test-claude"));
+        unsafe {
+            std::env::set_var(CLAUDE_HOME_ENV, "");
+        }
+        assert_eq!(claude_home(), fallback, "empty means unset");
+        unsafe {
+            std::env::remove_var(CLAUDE_HOME_ENV);
+        }
+        assert_eq!(claude_home(), fallback);
     }
 }

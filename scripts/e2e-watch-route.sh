@@ -88,12 +88,16 @@ start_session() {
                 <"$2" >"$3" 2>"$4"
         ) &
     fi
-    echo $!
 }
-runner_a=$(start_session "$CWD_A" "$FIFO_A" "$STREAM_A" "$STDERR_A")
+# Plain calls, `$!` taken right after: inside a `$(...)` substitution the backgrounded
+# subshell would inherit the substitution pipe and the main shell would wait for its EOF
+# while the subshell waits for the FIFO's write end below — a deadlock.
+start_session "$CWD_A" "$FIFO_A" "$STREAM_A" "$STDERR_A"
+runner_a=$!
 # Hold the write end open for the whole run (opening blocks until claude opens the read end).
 exec 3>"$FIFO_A"
-runner_b=$(start_session "$CWD_B" "$FIFO_B" "$STREAM_B" "$STDERR_B")
+start_session "$CWD_B" "$FIFO_B" "$STREAM_B" "$STDERR_B"
+runner_b=$!
 exec 4>"$FIFO_B"
 
 pid_alive() {
