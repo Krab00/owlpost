@@ -79,7 +79,14 @@ fn event_stdin(sid: &str, event: &str) -> String {
 
 /// `owl inbox --count --format claude --hook-event <event>` arguments.
 fn hook_args(event: &str) -> [&str; 6] {
-    ["inbox", "--count", "--format", "claude", "--hook-event", event]
+    [
+        "inbox",
+        "--count",
+        "--format",
+        "claude",
+        "--hook-event",
+        event,
+    ]
 }
 
 struct Home {
@@ -219,10 +226,7 @@ impl Home {
 
     /// `owl route <id>` to the one live session `sid`; asserts the wake file and routing.
     fn routed_to(&self, sid: &str, id: &str) {
-        assert_eq!(
-            self.ok(&["route", id]),
-            format!("routed {id} -> {sid}\n")
-        );
+        assert_eq!(self.ok(&["route", id]), format!("routed {id} -> {sid}\n"));
         assert!(self.wake_file(sid, id).is_file(), "wake file for {id}");
         assert_eq!(self.routing(id).unwrap()["current"], sid);
     }
@@ -2739,16 +2743,20 @@ fn session_start_writes_the_marker_and_assigns_the_backlog() {
         Some(r#"{"session_id":"a/b","cwd":"/c"}"#),
         Some(r#"{"session_id":"../S1","cwd":"/c"}"#),
     ] {
-        assert_eq!(h.hook(&hook_args("SessionStart"), bad), (0, String::new(), Vec::new()));
+        assert_eq!(
+            h.hook(&hook_args("SessionStart"), bad),
+            (0, String::new(), Vec::new())
+        );
         assert!(!h.path().join("sessions").exists(), "{bad:?}: no marker");
     }
     // Backlog: two unseen records (one already routed to a live S0, one never routed) and
-    // one seen record; a `{"watch": false}` start still writes the marker and assigns.
+    // one seen record; a `{"watch": false}` start still writes the marker and assigns. S0
+    // starts before the records exist (a start after them would assign them all to S0).
+    h.start("S0");
     let live = h.put(&h.maciek, "Why is the refresh token rotated?", "pending");
     let fresh = h.put(&h.maciek, "Where is the retry policy?", "consent");
     let seen = h.put(&h.ana, "old news?", "pending");
     h.ok(&["show", &seen]);
-    h.start("S0");
     assert_eq!(h.ok(&["route", &live]), format!("routed {live} -> S0\n"));
     // A dead session holds nothing: S9's marker names a pid that has exited.
     std::fs::create_dir_all(h.path().join("sessions/S9/wake")).unwrap();
@@ -2774,7 +2782,10 @@ fn session_start_writes_the_marker_and_assigns_the_backlog() {
     let line = h.start("S1");
     assert!(!line.contains("watchPaths"), "{line}");
     assert!(line.contains(OPEN), "{line}");
-    assert!(h.marker("S1").is_some(), "marker written with the watch off");
+    assert!(
+        h.marker("S1").is_some(),
+        "marker written with the watch off"
+    );
     assert!(!h.path().join("sessions/S9").exists(), "dead S9 swept");
     // `live` stays with S0; `fresh` and `stale` go to S1 (routing only); `seen` is untouched.
     assert_eq!(h.routing(&live).unwrap()["current"], "S0");
@@ -2783,7 +2794,10 @@ fn session_start_writes_the_marker_and_assigns_the_backlog() {
         assert_eq!(r["current"], "S1", "{id}: {r}");
         let at = envelope::parse_rfc3339_to_unix(r["routed_at"].as_str().unwrap()).unwrap();
         assert!(at >= before, "{id}: {r}");
-        assert!(!h.wake_file("S1", id).exists(), "{id}: no wake file at start");
+        assert!(
+            !h.wake_file("S1", id).exists(),
+            "{id}: no wake file at start"
+        );
     }
     assert_eq!(h.routing(&fresh).unwrap()["tried"], json!(["S1"]));
     assert_eq!(h.routing(&stale).unwrap()["tried"], json!(["S9", "S1"]));
@@ -2818,7 +2832,10 @@ fn heartbeat_and_session_end_keep_the_hooks_silent_and_never_failing() {
     for event in ["UserPromptSubmit", "PostToolUse"] {
         backdate("S1");
         let expected = h.ok(&hook_args(event));
-        assert!(expected.contains("2 new questions (Maciek 2)"), "{expected}");
+        assert!(
+            expected.contains("2 new questions (Maciek 2)"),
+            "{expected}"
+        );
         let line = h.hook_ok(&hook_args(event), Some(&event_stdin("S1", event)));
         assert_eq!(line, expected, "{event}: OWL-031 output unchanged");
         let m = h.marker("S1").unwrap();
@@ -2828,7 +2845,10 @@ fn heartbeat_and_session_end_keep_the_hooks_silent_and_never_failing() {
         // Another session's marker is not touched; an unknown session creates nothing.
         assert_eq!(h.marker("S2").unwrap()["session_id"], "S2");
         h.hook_ok(&hook_args(event), Some(&event_stdin("S7", event)));
-        assert!(!h.path().join("sessions/S7").exists(), "{event}: no marker created");
+        assert!(
+            !h.path().join("sessions/S7").exists(),
+            "{event}: no marker created"
+        );
     }
     // Routings: `id` with S1, `other` with S2.
     h.routed_to("S1", &id);
@@ -2847,13 +2867,22 @@ fn heartbeat_and_session_end_keep_the_hooks_silent_and_never_failing() {
         Some(&event_stdin("S1", "SessionEnd")),
     );
     assert_eq!(out, (0, String::new(), Vec::new()), "SessionEnd is silent");
-    assert!(!h.path().join("sessions/S1").exists(), "sessions/S1 removed");
-    assert!(h.path().join("sessions/S2/marker.json").is_file(), "S2 kept");
+    assert!(
+        !h.path().join("sessions/S1").exists(),
+        "sessions/S1 removed"
+    );
+    assert!(
+        h.path().join("sessions/S2/marker.json").is_file(),
+        "S2 kept"
+    );
     let r = h.routing(&id).unwrap();
     assert_eq!(r["current"], Value::Null, "{r}");
     assert_eq!(r["tried"], json!(["S1"]), "tried kept: {r}");
     let r = h.routing(&other).unwrap();
-    assert_eq!(r["current"], "S2", "another session's routing untouched: {r}");
+    assert_eq!(
+        r["current"], "S2",
+        "another session's routing untouched: {r}"
+    );
     assert_eq!(h.ok(&["inbox", "--count"]), "2\n", "nothing marked seen");
     // SessionEnd for an unknown session, without a session id, with garbage stdin: silent.
     for stdin in [
@@ -2876,7 +2905,10 @@ fn heartbeat_and_session_end_keep_the_hooks_silent_and_never_failing() {
         assert_eq!(line, h.ok(&hook_args(event)), "{event}");
     }
     assert_eq!(
-        h.hook(&hook_args("SessionEnd"), Some(&event_stdin("S1", "SessionEnd"))),
+        h.hook(
+            &hook_args("SessionEnd"),
+            Some(&event_stdin("S1", "SessionEnd"))
+        ),
         (0, String::new(), Vec::new())
     );
     assert_eq!(
@@ -2886,11 +2918,17 @@ fn heartbeat_and_session_end_keep_the_hooks_silent_and_never_failing() {
         ),
         (0, String::new(), Vec::new())
     );
-    assert!(!h.path().join("sessions").exists(), "the context events create nothing");
+    assert!(
+        !h.path().join("sessions").exists(),
+        "the context events create nothing"
+    );
     // `sessions` unwritable (a regular file): SessionStart prints the counter and previews
     // without watchPaths, the others print their usual line or nothing, all exit 0.
     std::fs::write(h.path().join("sessions"), "x").unwrap();
-    let line = h.hook_ok(&hook_args("SessionStart"), Some(&start_stdin("S1", &h.checkout())));
+    let line = h.hook_ok(
+        &hook_args("SessionStart"),
+        Some(&start_stdin("S1", &h.checkout())),
+    );
     assert!(!line.contains("watchPaths"), "{line}");
     let v: Value = serde_json::from_str(line.trim()).unwrap();
     assert!(
@@ -2907,7 +2945,10 @@ fn heartbeat_and_session_end_keep_the_hooks_silent_and_never_failing() {
         );
     }
     assert_eq!(
-        h.hook(&hook_args("SessionEnd"), Some(&event_stdin("S1", "SessionEnd"))),
+        h.hook(
+            &hook_args("SessionEnd"),
+            Some(&event_stdin("S1", "SessionEnd"))
+        ),
         (0, String::new(), Vec::new())
     );
     assert!(h.path().join("sessions").is_file(), "left as it was");
@@ -2929,7 +2970,13 @@ fn file_changed_prints_the_wake_file_byte_for_byte() {
     // The routed file is `owl show <id> --format claude`, one trailing newline; a hand-written
     // one with a `\r\n`, a blank line and two trailing newlines round-trips just the same.
     let shown = h.ok(&["show", &id, "--format", "claude"]);
-    h.ok(&["route", &id]);
+    // `show` marked it seen and released it: undo the flag (the count below must stay 1)
+    // and route it again.
+    let spool = h.spool();
+    let mut rec = spool.get(Dir::Inbox, &id).unwrap().unwrap();
+    rec.seen = false;
+    spool.put(Dir::Inbox, &id, &rec).unwrap();
+    h.routed_to("S1", &id);
     let bytes = std::fs::read(&file).unwrap();
     assert_eq!(bytes, shown.as_bytes(), "the wake file is the show block");
     let input = |sid: &str, event: &str, path: &Path| {
@@ -2957,14 +3004,20 @@ fn file_changed_prints_the_wake_file_byte_for_byte() {
     for event in ["change", "unlink", "", "ADD"] {
         silent(event, Some(&input("S1", event, &file)));
     }
-    silent("no event", Some(&json!({"session_id": "S1", "file_path": file}).to_string()));
+    silent(
+        "no event",
+        Some(&json!({"session_id": "S1", "file_path": file}).to_string()),
+    );
     let other = h.wake_file("S10", &id);
     std::fs::write(&other, "other").unwrap();
     std::fs::create_dir_all(h.path().join("sessions/S1/wake-evil")).unwrap();
     std::fs::write(h.path().join("sessions/S1/wake-evil/x.md"), "evil").unwrap();
     for (what, path) in [
         ("another session's wake file", other.clone()),
-        ("a look-alike dir", h.path().join("sessions/S1/wake-evil/x.md")),
+        (
+            "a look-alike dir",
+            h.path().join("sessions/S1/wake-evil/x.md"),
+        ),
         ("the OWL-031 inbox path", h.spool().path(Dir::Inbox, &id)),
         ("the marker", route::marker_path(h.path(), "S1")),
         ("a missing file", h.wake_file("S1", "missing")),
@@ -2972,7 +3025,10 @@ fn file_changed_prints_the_wake_file_byte_for_byte() {
     ] {
         silent(what, Some(&input("S1", "add", &path)));
     }
-    silent("S10 asking for S1's file", Some(&input("S10", "add", &file)));
+    silent(
+        "S10 asking for S1's file",
+        Some(&input("S10", "add", &file)),
+    );
     silent("no session id", Some(&input("", "add", &file)));
     silent("bad session id", Some(&input("../S1", "add", &file)));
     for bad in [Some(""), Some("not json"), Some("{}"), None] {
@@ -3024,8 +3080,17 @@ fn edit_releases_the_wake() {
     h.ok(&["draft", &id]);
     h.routed_to("S1", &id);
     let editor = h.editor_script("printf 'edited\\n' > \"$1\"");
-    let out = h.owl().env("EDITOR", &editor).args(["edit", &id]).output().unwrap();
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let out = h
+        .owl()
+        .env("EDITOR", &editor)
+        .args(["edit", &id])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     h.assert_released(&id, "edit");
 }
 
@@ -3057,7 +3122,10 @@ fn inbox_listing_releases_the_wake_and_count_does_not() {
         h.routed_to("S1", &id);
         h.ok(&["inbox", "--count"]);
         h.ok(&["inbox", "--count", "--format", "claude"]);
-        assert!(h.wake_file("S1", &id).is_file(), "{args:?}: --count keeps the wake");
+        assert!(
+            h.wake_file("S1", &id).is_file(),
+            "{args:?}: --count keeps the wake"
+        );
         assert!(h.routing(&id).is_some());
         h.ok(args);
         h.assert_released(&id, &format!("{args:?}"));

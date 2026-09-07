@@ -286,7 +286,12 @@ fn hook_script_forwards_session_start_and_reads_plugin_json() {
     let empty = home_with(0, false);
     assert_silent(&run_hook(owl, empty.path()), "0 records, no flag");
     assert_eq!(
-        stdout(run_hook_stdin(owl, empty.path(), &ss, &start_stdin("sess-1"))),
+        stdout(run_hook_stdin(
+            owl,
+            empty.path(),
+            &ss,
+            &start_stdin("sess-1")
+        )),
         format!("{}\n", claude_watch_zero(empty.path(), "sess-1"))
     );
     // Stdin closed: no session, so no watchPaths — and nothing at all at 0 unseen.
@@ -341,13 +346,23 @@ fn hook_script_forwards_session_start_and_reads_plugin_json() {
     // `{"watch": true}` restores watchPaths.
     std::fs::write(empty.path().join("plugin.json"), r#"{"watch": true}"#).unwrap();
     assert_eq!(
-        stdout(run_hook_stdin(owl, empty.path(), &ss, &start_stdin("sess-1"))),
+        stdout(run_hook_stdin(
+            owl,
+            empty.path(),
+            &ss,
+            &start_stdin("sess-1")
+        )),
         format!("{}\n", claude_watch_zero(empty.path(), "sess-1"))
     );
     // The script stays a no-op with the flag when owl is missing or fails.
     let without_owl = path_dir(false);
     assert_silent(
-        &run_hook_stdin(without_owl.path(), empty.path(), &ss, &start_stdin("sess-1")),
+        &run_hook_stdin(
+            without_owl.path(),
+            empty.path(),
+            &ss,
+            &start_stdin("sess-1"),
+        ),
         "no owl on PATH",
     );
     let file = tempfile::tempdir().unwrap();
@@ -361,7 +376,10 @@ fn hook_script_forwards_session_start_and_reads_plugin_json() {
     // still goes out: it is gated on the stored choice only, not on `owl init`.
     let dir = tempfile::tempdir().unwrap();
     let line = stdout(run_hook_stdin(owl, dir.path(), &ss, &start_stdin("sess-9")));
-    assert_eq!(line, format!("{}\n", claude_watch_zero(dir.path(), "sess-9")));
+    assert_eq!(
+        line,
+        format!("{}\n", claude_watch_zero(dir.path(), "sess-9"))
+    );
     let v: Value = serde_json::from_str(line.trim()).unwrap();
     assert_eq!(
         v["hookSpecificOutput"]["watchPaths"],
@@ -417,9 +435,8 @@ fn hook_script_via_env_i_registers_the_watch_and_wakes_on_add() {
     let owl = with_owl.path();
     let home = home_with(0, false);
     let inbox = inbox_path(home.path());
-    let file_changed = |path: &str, event: &str| {
-        format!(r#","file_path":"{path}","event":"{event}""#)
-    };
+    let file_changed =
+        |path: &str, event: &str| format!(r#","file_path":"{path}","event":"{event}""#);
     let context = |out: &Output| -> Option<Value> {
         assert_eq!(out.status.code(), Some(0), "{:?}", out.status);
         assert_eq!(String::from_utf8_lossy(&out.stderr), "");
@@ -451,7 +468,10 @@ fn hook_script_via_env_i_registers_the_watch_and_wakes_on_add() {
     )
     .unwrap();
     assert_eq!(marker["session_id"], "sess-1");
-    assert_eq!(marker["cwd"], "/c", "a cwd that does not exist stays as given");
+    assert_eq!(
+        marker["cwd"], "/c",
+        "a cwd that does not exist stays as given"
+    );
     assert_eq!(marker["source"], "startup");
     for event in ["UserPromptSubmit", "PostToolUse"] {
         assert_eq!(
@@ -507,7 +527,11 @@ fn hook_script_via_env_i_registers_the_watch_and_wakes_on_add() {
     .unwrap();
     std::fs::write(home.path().join("sessions/sess-10/wake/rec-1.md"), "other").unwrap();
     std::fs::create_dir_all(home.path().join("sessions/sess-1/wake-evil")).unwrap();
-    std::fs::write(home.path().join("sessions/sess-1/wake-evil/rec-1.md"), "evil").unwrap();
+    std::fs::write(
+        home.path().join("sessions/sess-1/wake-evil/rec-1.md"),
+        "evil",
+    )
+    .unwrap();
     for other in [
         wake_path(home.path(), "sess-10") + "/rec-1.md",
         home.path()
@@ -517,7 +541,12 @@ fn hook_script_via_env_i_registers_the_watch_and_wakes_on_add() {
         format!("{wake}/missing.md"),
     ] {
         assert_silent(
-            &run_hook_env_i(owl, home.path(), "FileChanged", &file_changed(&other, "add")),
+            &run_hook_env_i(
+                owl,
+                home.path(),
+                "FileChanged",
+                &file_changed(&other, "add"),
+            ),
             &format!("FileChanged add {other}"),
         );
     }
@@ -1042,8 +1071,8 @@ fn commands_have_descriptions() {
     // The set of arg-taking subcommands the rule above derives from `--help`, pinned so a
     // clap change that drops the `Arguments:` section is noticed.
     let with_args: Vec<&str> = [
-        "card", "contact", "add", "allow", "deny", "ask", "show", "draft", "edit", "send", "reject",
-        "route",
+        "card", "contact", "add", "allow", "deny", "ask", "show", "draft", "edit", "send",
+        "reject", "route",
     ]
     .to_vec();
     for sub in &subs {
@@ -1881,7 +1910,10 @@ fn counter_wears_the_owl_icon_records_do_not() {
         .stdout,
     )
     .unwrap();
-    assert_eq!(zero, format!("{}\n", claude_watch_zero(empty.path(), "sess-z")));
+    assert_eq!(
+        zero,
+        format!("{}\n", claude_watch_zero(empty.path(), "sess-z"))
+    );
     assert!(!zero.contains('🦉'));
     // Two unseen at session start: icon once, on the counter; every preview line and the
     // open sentence are icon-free.
@@ -1896,7 +1928,10 @@ fn counter_wears_the_owl_icon_records_do_not() {
     )
     .unwrap();
     let ctx = context(&two_ss);
-    assert_eq!(ctx, context(&format!("{}\n", claude_watch_two(two.path(), "sess-t"))));
+    assert_eq!(
+        ctx,
+        context(&format!("{}\n", claude_watch_two(two.path(), "sess-t")))
+    );
     assert_eq!(ctx.matches('🦉').count(), 1, "{ctx}");
     assert!(ctx.starts_with(ICON), "{ctx}");
     let lines: Vec<&str> = ctx.lines().collect();

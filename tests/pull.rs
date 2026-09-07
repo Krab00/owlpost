@@ -614,3 +614,58 @@ async fn status_file_is_written_each_loop() {
     let TestDaemon { running, .. } = a;
     running.wait().await.unwrap();
 }
+
+// OWL-033 AC8
+/// A pulled answer is a new inbox record: within 2 s of its spool write a wake file sits
+/// under the live session whose cwd is the configured checkout of the question's project
+/// (an answer is routed by its question's project), not under the other live session with
+/// the newer heartbeat; the routing names it and the ingestion is otherwise unchanged.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pulled_answer_wakes_the_affine_live_session() {
+    use owlpost::route::{self, Marker};
+    logs();
+    let checkout = tempfile::tempdir().unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let checkout_path = checkout.path().to_string_lossy().into_owned();
+    let a = spawn_daemon_with(1, &[], |cfg| {
+        cfg.pull_interval_secs = 1;
+        cfg.projects.insert(common::PROJECT.into(), checkout_path);
+    })
+    .await;
+    let b = spawn_b(&a.id).await;
+    point_at(&a, &b.id, &b.addr.to_string());
+    let marker = |sid: &str, cwd: &Path, age: u64| {
+        let mut m = Marker::new(sid, &cwd.to_string_lossy(), "startup");
+        m.heartbeat_at = envelope::unix_to_rfc3339(envelope::now_unix() - age);
+        route::write_marker(a.home(), &m).unwrap();
+    };
+    marker("S1", checkout.path(), 300);
+    marker("S2", elsewhere.path(), 0);
+    let q = open_ask(&a, &b.id, "why does session expiry drift?");
+    let ans = outbox_answer(&b, &b.id, &q, ANSWER, None);
+    wait_until(Duration::from_secs(5), "answer in A's inbox", || {
+        a.spool().get(Dir::Inbox, &ans.id).unwrap().is_some()
+    });
+    let wake = route::wake_file(a.home(), "S1", &ans.id);
+    let took = wait_until(Duration::from_secs(2), "wake file under S1", || {
+        wake.is_file()
+    });
+    assert!(took < Duration::from_secs(2), "{took:?}");
+    let block = std::fs::read_to_string(&wake).unwrap();
+    assert!(block.starts_with("🟧"), "{block}");
+    assert!(block.contains(ANSWER), "{block}");
+    assert!(block.contains(common::PATH), "the question's path: {block}");
+    assert!(
+        !route::wake_file(a.home(), "S2", &ans.id).exists(),
+        "S2 stays silent"
+    );
+    let r = route::load_routing(a.home(), &ans.id);
+    assert_eq!(r.current.as_deref(), Some("S1"));
+    assert_eq!(r.tried, vec!["S1".to_string()]);
+    wait_until(Duration::from_secs(5), "answer acked on B", || {
+        b.spool().get(Dir::Done, &ans.id).unwrap().is_some()
+    });
+    assert_ingested(&a, &b, &q, &ans, "why does session expiry drift?");
+    a.running.shutdown();
+    b.running.shutdown();
+}

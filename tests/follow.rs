@@ -311,7 +311,14 @@ fn follow_removes_its_marker_when_stdout_closes() {
     assert_eq!(h.unseen(), 1);
     // `--hook-event SessionEnd` (OWL-033) needs `--count --format claude` the same way.
     for args in [
-        vec!["inbox", "--count", "--format", "plain", "--hook-event", "SessionEnd"],
+        vec![
+            "inbox",
+            "--count",
+            "--format",
+            "plain",
+            "--hook-event",
+            "SessionEnd",
+        ],
         vec!["inbox", "--count", "--hook-event", "SessionEnd"],
         vec!["inbox", "--format", "claude", "--hook-event", "SessionEnd"],
         vec!["inbox", "--hook-event", "SessionEnd"],
@@ -692,7 +699,11 @@ fn hook_context_events_ignore_unusable_stdin_and_session_start_flag() {
         r#"{"sessionId": "S"}"#,
     ] {
         for event in EVENTS {
-            assert_eq!(hook_output(&h.hook(event, Some(stdin))), None, "{event} {stdin:?}");
+            assert_eq!(
+                hook_output(&h.hook(event, Some(stdin))),
+                None,
+                "{event} {stdin:?}"
+            );
         }
         assert!(
             !h.path().join("sessions").exists(),
@@ -723,7 +734,8 @@ fn hook_context_events_ignore_unusable_stdin_and_session_start_flag() {
         .unwrap();
     assert_eq!(hook_output(&out), None);
     // A usable session id (`S`, `event: add` along with it is irrelevant here): the line.
-    let v = hook_output(&h.hook("SessionStart", Some(r#"{"session_id":"S","event":"add"}"#))).unwrap();
+    let v =
+        hook_output(&h.hook("SessionStart", Some(r#"{"session_id":"S","event":"add"}"#))).unwrap();
     assert_eq!(watch_paths(&v), Some(vec![h.wake_path("S")]));
     assert!(h.path().join("sessions/S/marker.json").is_file());
 }
@@ -897,7 +909,11 @@ fn file_changed_prints_the_sessions_wake_file_on_add_only() {
                         assert_eq!(String::from_utf8_lossy(&out.stderr), "", "{cell}: stderr");
                     }
                     assert_eq!(h.unseen(), count, "{cell}: nothing marked seen");
-                    assert_eq!(std::fs::read(&own).unwrap(), body.as_bytes(), "{cell}: file stays");
+                    assert_eq!(
+                        std::fs::read(&own).unwrap(),
+                        body.as_bytes(),
+                        "{cell}: file stays"
+                    );
                     cells += 1;
                 }
             }
@@ -911,7 +927,10 @@ fn file_changed_prints_the_sessions_wake_file_on_add_only() {
     );
     // The hook never composes text: the old counter sentence appears nowhere.
     h.put("one?");
-    let out = h.hook("FileChanged", Input::Add.stdin(&own.to_string_lossy()).as_deref());
+    let out = h.hook(
+        "FileChanged",
+        Input::Add.stdin(&own.to_string_lossy()).as_deref(),
+    );
     assert_eq!(out.status.code(), Some(2));
     assert!(!String::from_utf8_lossy(&out.stderr).contains(COUNTER_ONE));
     assert_eq!(
