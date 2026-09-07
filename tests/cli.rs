@@ -43,6 +43,7 @@ fn help_lists_all_subcommands() {
         "edit",
         "send",
         "reject",
+        "route",
         "history",
         "watch",
         "daemon",
