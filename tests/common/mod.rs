@@ -5,7 +5,7 @@
 
 use std::net::SocketAddr;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use owlpost::config::Config;
 use owlpost::contacts::{Mode, Policy, Scope};
@@ -18,6 +18,22 @@ use tempfile::TempDir;
 
 pub const PROJECT: &str = "github.com/company/monorepo";
 pub const PATH: &str = "src/auth/session.rs";
+
+/// The process-wide `OWLPOST_CLAUDE_HOME` (OWL-033): a temp dir with an empty `sessions/`,
+/// set once so no in-process daemon or spawned `owl` ever reads the real `~/.claude` and a
+/// live Claude session on this machine can never influence a test. Every environment read
+/// in the test binaries goes through `std::env`, whose lock serialises this single write.
+pub fn claude_home() -> &'static Path {
+    static DIR: OnceLock<TempDir> = OnceLock::new();
+    DIR.get_or_init(|| {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("sessions")).unwrap();
+        // SAFETY: see above — nothing here reads the environment outside `std::env`.
+        unsafe { std::env::set_var(owlpost::route::CLAUDE_HOME_ENV, dir.path()) };
+        dir
+    })
+    .path()
+}
 
 pub fn id(seed: u8) -> Identity {
     Identity::from_seed([seed; 32])
@@ -160,8 +176,10 @@ pub async fn spawn_daemon_with(
     respawn(dir, id).await
 }
 
-/// (Re)starts a daemon on an already prepared home, e.g. after `running.shutdown()`.
+/// (Re)starts a daemon on an already prepared home, e.g. after `running.shutdown()`. The
+/// daemon's session liveness lookup is pointed at [`claude_home`], never the real one.
 pub async fn respawn(dir: TempDir, id: Identity) -> TestDaemon {
+    claude_home();
     let cfg = Config::load(dir.path()).unwrap();
     let running = daemon::spawn(dir.path(), cfg).await.unwrap();
     TestDaemon {

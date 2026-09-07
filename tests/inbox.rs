@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use common::{
-    PATH, PROJECT, Peer, client, fp, id, policy, post_envelope, prepare_home_with, question,
-    respawn, signed,
+    PATH, PROJECT, Peer, claude_home, client, fp, id, policy, post_envelope, prepare_home_with,
+    question, respawn, signed,
 };
 use owlpost::config::Harness;
 use owlpost::contacts::Mode;
@@ -245,6 +245,7 @@ impl Home {
         let mut c = Command::new(OWL);
         c.env_remove("OWLPOST_HOME")
             .env_remove("EDITOR")
+            .env(route::CLAUDE_HOME_ENV, claude_home())
             .arg("--home")
             .arg(self.path());
         c
@@ -634,12 +635,14 @@ fn watch_path_follows_the_home_and_is_canonical() {
     };
     let via_link = run(Command::new(OWL)
         .env_remove("OWLPOST_HOME")
+        .env(route::CLAUDE_HOME_ENV, claude_home())
         .args(["--home"])
         .arg(&link));
     assert_eq!(via_link, format!("{}\n", claude_watch_zero(&wake)));
     // Through the environment, relative to the current directory.
     let via_env = run(Command::new(OWL)
         .current_dir(link_dir.path())
+        .env(route::CLAUDE_HOME_ENV, claude_home())
         .env("OWLPOST_HOME", "home-link"));
     assert_eq!(via_env, format!("{}\n", claude_watch_zero(&wake)));
 }

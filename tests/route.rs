@@ -9,11 +9,10 @@ mod common;
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use common::{PATH, PROJECT, Peer, fp, id, policy, prepare_home_with};
+use common::{PATH, PROJECT, Peer, claude_home, fp, id, policy, prepare_home_with};
 use owlpost::config::Config;
 use owlpost::contacts::Mode;
 use owlpost::envelope::{self, Envelope, Payload};
@@ -25,21 +24,6 @@ use tempfile::TempDir;
 
 const OWL: &str = env!("CARGO_BIN_EXE_owl");
 const QUESTION: &str = "Why is the refresh token rotated on every read?";
-
-/// The process-wide `OWLPOST_CLAUDE_HOME`: a temp dir with an empty `sessions/`, set once
-/// before any test in this binary routes. Every environment read in this binary goes
-/// through `std::env`, whose lock serialises this single write against them.
-fn claude_home() -> &'static Path {
-    static DIR: OnceLock<TempDir> = OnceLock::new();
-    DIR.get_or_init(|| {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join("sessions")).unwrap();
-        // SAFETY: see above — no other thread reads the environment outside `std::env`.
-        unsafe { std::env::set_var(route::CLAUDE_HOME_ENV, dir.path()) };
-        dir
-    })
-    .path()
-}
 
 struct Home {
     dir: TempDir,
@@ -467,6 +451,46 @@ fn the_wake_file_appears_by_rename_never_partial() {
     assert!(content.contains(&text));
 }
 
+/// Round 2: a `config.projects` checkout that no longer exists neither panics nor errors —
+/// rule 1 finds no session there and rule 2 (newest heartbeat) decides; a marker whose cwd
+/// is that same missing path still counts as affine (both sides compare as given).
+#[test]
+fn route_with_a_missing_checkout_falls_back_to_the_newest_heartbeat() {
+    let h = Home::new();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let gone = tempfile::tempdir().unwrap();
+    let gone_path = gone.path().to_path_buf();
+    drop(gone);
+    assert!(!gone_path.exists());
+    let mut cfg = h.config();
+    cfg.projects
+        .insert(PROJECT.into(), gone_path.to_string_lossy().into_owned());
+    h.marker("S1", &h.checkout(), 300);
+    h.marker("S2", elsewhere.path(), 0);
+    let id = h.put(QUESTION);
+    assert_eq!(
+        route::route(h.path(), &cfg, &h.spool(), &id)
+            .unwrap()
+            .as_deref(),
+        Some("S2")
+    );
+    assert!(h.wake("S2", &id).is_file());
+    assert_eq!(h.wake_names("S1"), Vec::<String>::new());
+    // A session that says it sits in the missing checkout is the affine one.
+    h.marker("S3", &gone_path, 600);
+    let second = h.put("still there?");
+    assert_eq!(
+        route::route(h.path(), &cfg, &h.spool(), &second)
+            .unwrap()
+            .as_deref(),
+        Some("S3")
+    );
+    // Through the CLI (the saved config) the same holds.
+    cfg.save(h.path()).unwrap();
+    let third = h.put("and via the cli?");
+    assert_eq!(h.ok(&["route", &third]), format!("routed {third} -> S3\n"));
+}
+
 // ---------------------------------------------------------------- AC4: liveness
 
 /// A child process killed and reaped when dropped, so a failing assertion never leaks it.
@@ -846,4 +870,72 @@ fn lease_tick_moves_expired_and_dead_routings_and_releases_finished_records() {
     }
     // Nothing was marked seen by the loop.
     assert_eq!(h.spool().count_unseen(Dir::Inbox).unwrap(), 4);
+}
+
+/// Round 2: a routing whose inbox record does not parse — a `raw` that is not a payload, or
+/// a record file that is not JSON — is skipped by the tick (routing and wake file left as
+/// they are, nothing released) and the routings after it are still processed. The tick
+/// walks the routing files in path order, so the two broken ids sort first.
+#[test]
+fn lease_tick_skips_malformed_records_and_keeps_going() {
+    let h = Home::new();
+    let elsewhere = tempfile::tempdir().unwrap();
+    h.marker("S1", &h.checkout(), 0);
+    h.marker("S2", elsewhere.path(), 0);
+    let now = envelope::now_unix();
+    let expired = |id: &str, sid: &str| {
+        route::save_routing(
+            h.path(),
+            id,
+            &Routing {
+                current: Some(sid.into()),
+                routed_at: Some(envelope::unix_to_rfc3339(now - 5)),
+                tried: vec![sid.into()],
+            },
+        )
+        .unwrap();
+    };
+    // "0000-…" and "0001-…" sort before the uuid v7 ids of the good records ("01…").
+    let bad_raw = "0000-bad-raw";
+    let mut rec = h
+        .spool()
+        .get(Dir::Inbox, &h.put("template"))
+        .unwrap()
+        .unwrap();
+    rec.raw = "{not a payload".into();
+    h.spool().put(Dir::Inbox, bad_raw, &rec).unwrap();
+    let bad_json = "0001-bad-json";
+    std::fs::write(h.spool().path(Dir::Inbox, bad_json), "{").unwrap();
+    for id in [bad_raw, bad_json] {
+        expired(id, "S1");
+        route::write_wake(h.path(), "S1", id, "stale wake\n").unwrap();
+    }
+    let good: Vec<String> = (0..3).map(|i| h.put(&format!("good {i}?"))).collect();
+    for id in &good {
+        assert_eq!(h.route(id).as_deref(), Some("S1"));
+        expired(id, "S1");
+    }
+    let before = (h.routing(bad_raw), h.routing(bad_json));
+    h.tick(now, 1);
+    for id in &good {
+        assert!(!h.wake("S1", id).exists(), "{id}: moved off S1");
+        assert!(h.wake("S2", id).is_file(), "{id}: under S2");
+        assert_eq!(h.routing(id).current.as_deref(), Some("S2"), "{id}");
+    }
+    assert_eq!(
+        (h.routing(bad_raw), h.routing(bad_json)),
+        before,
+        "left as they were"
+    );
+    for id in [bad_raw, bad_json] {
+        assert!(h.wake("S1", id).is_file(), "{id}: wake file kept");
+        assert!(!h.wake("S2", id).exists(), "{id}: not re-routed");
+        assert!(
+            route::routing_path(h.path(), id).is_file(),
+            "{id}: not released"
+        );
+    }
+    // The broken records are still in the inbox for a human to look at.
+    assert!(h.spool().path(Dir::Inbox, bad_raw).is_file());
+    assert!(h.spool().path(Dir::Inbox, bad_json).is_file());
 }

@@ -745,6 +745,12 @@ fn route_docs_and_scripts_pin_one_session_wakes_per_record() {
         "both claude invocations use --input-format stream-json"
     );
     assert!(!code.contains("--input-format text"));
+    // The sessions are started by plain calls: a `$(start_session …)` substitution around the
+    // backgrounded subshell deadlocked on the stdin FIFO (round 2).
+    assert!(
+        !code.contains("$(start_session"),
+        "no command substitution around start_session"
+    );
     for needle in [
         "--include-hook-events --permission-mode bypassPermissions",
         "--plugin-dir \"$E2E_PLUGIN_DIR\"",
@@ -754,8 +760,8 @@ fn route_docs_and_scripts_pin_one_session_wakes_per_record() {
         "\\\"projects\\\": {\\\"github.com/e2e/repo\\\": \\\"$CWD_A\\\"}",
         "mkfifo \"$FIFO_A\"",
         "mkfifo \"$FIFO_B\"",
-        "runner_a=$(start_session \"$CWD_A\" \"$FIFO_A\" \"$STREAM_A\" \"$STDERR_A\")",
-        "runner_b=$(start_session \"$CWD_B\" \"$FIFO_B\" \"$STREAM_B\" \"$STDERR_B\")",
+        "start_session \"$CWD_A\" \"$FIFO_A\" \"$STREAM_A\" \"$STDERR_A\"\nrunner_a=$!\n",
+        "start_session \"$CWD_B\" \"$FIFO_B\" \"$STREAM_B\" \"$STDERR_B\"\nrunner_b=$!\n",
         "mv \"$WORK/$id.json\" \"$HOME_DIR/spool/inbox/$id.json\"",
         "routed=$(OWLPOST_HOME=$HOME_DIR owl route \"$id\" 2>\"$OUT/route.stderr\")",
         "\"routed $id -> \"*) ;;",
