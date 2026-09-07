@@ -421,8 +421,13 @@ mod tests {
                 row(&t, fp, name, &format!("answer {i}"), &i.to_string())
             })
             .collect();
+        // Handed over out of order: the table sorts by `received_at`, not by input order.
+        let mut shuffled = rows.clone();
+        shuffled.rotate_left(5);
+        shuffled.swap(0, 3);
+        assert_ne!(shuffled, rows);
         let mut m = Markers::default();
-        let out = answers_table(&rows, now, &mut m);
+        let out = answers_table(&shuffled, now, &mut m);
         let lines: Vec<&str> = out.lines().collect();
         let refs: Vec<&&str> = lines.iter().filter(|l| l.contains(" ↳ ")).collect();
         let table: Vec<&&str> = lines.iter().filter(|l| l.starts_with("| ")).collect();
@@ -478,5 +483,21 @@ mod tests {
         assert!(out.starts_with("🟦 ↳ - \"\"\n"), "{out}");
         assert_eq!(short_id("0192aaaa-bbbb-7ccc-8ddd-000000000001"), "00000001");
         assert_eq!(short_id("abc"), "abc");
+    }
+
+    #[test]
+    fn reference_line_keeps_the_first_60_chars_of_the_first_line() {
+        let now = envelope::parse_rfc3339_to_unix("2026-09-07T12:00:00Z").unwrap();
+        let seventy = "x".repeat(70);
+        let sixty = "y".repeat(60);
+        let mut long = row(&envelope::unix_to_rfc3339(now - 5), "a", "A", "x", "1");
+        long.question_first_line = format!("{seventy}\nsecond line");
+        let mut exact = row(&envelope::unix_to_rfc3339(now - 4), "a", "A", "y", "2");
+        exact.question_first_line = sixty.clone();
+        let out = answers_table(&[long, exact], now, &mut Markers::default());
+        let refs: Vec<&str> = out.lines().filter(|l| l.contains(" ↳ ")).collect();
+        assert_eq!(refs[0], format!("🟦 ↳ 00000001 \"{}\"", "x".repeat(60)));
+        assert_eq!(refs[1], format!("🟦 ↳ 00000002 \"{sixty}\""));
+        assert!(!out.contains(&"x".repeat(61)));
     }
 }

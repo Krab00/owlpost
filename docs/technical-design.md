@@ -15,8 +15,9 @@ disagree, fix the document first; the task's acceptance criteria are derived fro
   port forwarding; `hyper` + `hyper-util` + `http-body-util` — serve the axum router and run
   an HTTP/1 client over an iroh bi-stream (already transitive deps of axum/reqwest, only
   feature flags added); `iroh-relay` (dev, `server`) — a plain-HTTP relay on `127.0.0.1:0`
-  so the iroh tests never touch n0's relays. Since OWL-032: `chrono` (`clock`, no default
-  features) — local `HH:MM` in `--format claude`; already a transitive dep, no new package.
+  so the iroh tests never touch n0's relays.
+  Since OWL-032: `chrono` (`clock`, no default features) — local `HH:MM` in `--format claude`;
+  already a transitive dep, no new package.
   Anything else needs a line in the PR explaining why the above cannot do it.
 - CLI paths are synchronous (`std::fs`, blocking `reqwest` where needed); only `owl daemon`
   and `owl ask --wait` use the tokio runtime.
@@ -376,9 +377,10 @@ describes a layout the model would have to reproduce.
   (`now − received_at ≤ 86400`), newest last, at most the 10 newest; when any answer was cut
   (older than 24 h or beyond the 10) one line under the table:
   `<N> older answers not shown — owl history` (N = all answer records − rows shown). Above
-  the table one line per shown row, `<marker> ↳ <question id short> "<first line of the
-  question, ≤60 chars>"` — the short id is the last 8 characters of the question id (the
-  random tail of a UUIDv7), the first line comes from the question record found by
+  the table one line per shown row,
+  `<marker> ↳ <question id short> "<first line of the question, ≤60 chars>"`
+  — the short id is the last 8 characters of the question id (the random tail of a
+  UUIDv7), the first line comes from the question record found by
   `in_reply_to` (`""` when it is gone, `-` for the id when the answer names none). Markers
   come from 🟦 🟩 🟨 🟪 🟧 🟥 (then repeat) per peer fingerprint in order of first
   appearance in the shown rows, persisted in `$OWLPOST_HOME/markers.json` (an append-only

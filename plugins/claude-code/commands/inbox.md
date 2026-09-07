@@ -77,9 +77,10 @@ Then `AskUserQuestion` with **Draft / Draft & send / Reject / Skip**:
 ## 4. `drafted` records (draft stored, not sent)
 
 1. Run `owl show <id> --format claude` (unless its output is already in view from step 3)
-   and paste its output verbatim: the question block, then `draft:` with the draft in a
-   plain code block and `harness: <name>`. When the CLI prints a `note:` line (the draft is
-   in a different language than the question), recommend Edit before the picker.
+   and paste its output verbatim: the question block,
+   then `draft:` with the draft in a plain code block and `harness: <name>`.
+   When the CLI prints a `note:` line (the draft is in a different language than the
+   question), recommend Edit before the picker.
 2. `AskUserQuestion` with **Send / Edit / Reject**:
    - **Send** — run `owl send <id>`: signs the draft and moves it to the outbox. This is the
      only pick in this picker that runs `owl send`.

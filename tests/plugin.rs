@@ -1877,7 +1877,10 @@ fn inbox_steps_print_the_framed_block_and_watch_event_has_the_icon() {
         !drafts.contains("framed"),
         "step 4 (drafts) must stay unframed: {drafts}"
     );
-    assert!(drafts.contains("`draft:` with the draft in a\n   plain code block"));
+    assert!(
+        drafts
+            .contains("then `draft:` with the draft in a plain code block and `harness: <name>`.")
+    );
     assert!(
         step(5).contains("is not framed"),
         "answers table stays unframed"

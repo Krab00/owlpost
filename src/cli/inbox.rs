@@ -463,10 +463,7 @@ fn print_rendered(
                 }
             }
             Body::Answer { answer, .. } => {
-                let question_id = payload
-                    .in_reply_to
-                    .clone()
-                    .or_else(|| rec.meta.get("in_reply_to")?.as_str().map(str::to_string));
+                let question_id = payload.in_reply_to.clone();
                 let question_first_line = question_id
                     .as_deref()
                     .and_then(|q| render::find_question(spool, q))

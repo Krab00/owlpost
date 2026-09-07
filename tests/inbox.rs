@@ -2272,6 +2272,76 @@ fn show_format_claude_frames_an_answer() {
             "{FRAME}\n🦉 **Ana** · 23:08 · {PROJECT} · {PATH}\n```text\nBecause of X.\n```\n{FRAME}\n"
         )
     );
+    // The question may still be an open ask (`asks/`) or a question received here
+    // (`inbox/`): each arm yields its own path in the header and its first line in the
+    // listing's `↳` line.
+    let open = Payload::question(
+        &fp(&h.me),
+        &fp(&h.ana),
+        PROJECT,
+        Some("src/asks.rs"),
+        "open ask?",
+    );
+    let open_env = Envelope::sign(&open, &h.me);
+    let mut open_rec = common::record(&open_env, "waiting");
+    open_rec.seen = true;
+    h.spool().put(Dir::Asks, &open.id, &open_rec).unwrap();
+    let from_ask = h.put_env(
+        &Envelope::sign(
+            &Payload::answer(&open, "From ask.", "claude", 0, false),
+            &h.ana,
+        ),
+        "pending",
+    );
+    h.set_received(&from_ask, Dir::Inbox, RECEIVED);
+    assert_eq!(
+        h.ok_tz("UTC", &["show", &from_ask, "--format", "claude"]),
+        format!(
+            "{FRAME}\n🦉 **Ana** · 23:08 · {PROJECT} · src/asks.rs\n```text\nFrom ask.\n```\n{FRAME}\n"
+        )
+    );
+    let received = Payload::question(
+        &fp(&h.ana),
+        &fp(&h.me),
+        PROJECT,
+        Some("src/inbox.rs"),
+        "received here?",
+    );
+    h.put_env(&Envelope::sign(&received, &h.ana), "pending");
+    // `Payload::answer` replies as the question's addressee (me); the arm needs an answer
+    // signed by the peer, so flip the parties.
+    let mut reply = Payload::answer(&received, "From inbox.", "claude", 0, false);
+    reply.from = fp(&h.ana);
+    reply.to = fp(&h.me);
+    let from_inbox = h.put_env(&Envelope::sign(&reply, &h.ana), "pending");
+    h.set_received(&from_inbox, Dir::Inbox, RECEIVED);
+    assert_eq!(
+        h.ok_tz("UTC", &["show", &from_inbox, "--format", "claude"]),
+        format!(
+            "{FRAME}\n🦉 **Ana** · 23:08 · {PROJECT} · src/inbox.rs\n```text\nFrom inbox.\n```\n{FRAME}\n"
+        )
+    );
+    // The listing's `↳` lines resolve the same three arms; the three answers are older than
+    // 24 h (RECEIVED), so bring them into the window first.
+    for a in [&aid, &from_ask, &from_inbox] {
+        h.set_received(
+            a,
+            Dir::Inbox,
+            &envelope::unix_to_rfc3339(envelope::now_unix() - 30),
+        );
+    }
+    let listing = h.ok_tz("UTC", &["inbox", "--format", "claude"]);
+    for (qid, first) in [
+        (open.id.as_str(), "open ask?"),
+        (received.id.as_str(), "received here?"),
+    ] {
+        assert!(
+            listing.contains(&format!(" ↳ {} \"{first}\"", short(qid))),
+            "{listing}"
+        );
+    }
+    assert!(listing.contains("\"asked earlier?\""), "{listing}");
+
     // Without the question in the spool: `-` and `whole repository`.
     let q = question(&h.me, &h.ana, "gone?");
     let env = Envelope::sign(&Payload::answer(&q, "Orphan.", "claude", 0, false), &h.ana);
@@ -2296,8 +2366,10 @@ fn inbox_format_claude_prints_the_answers_table() {
     let now = envelope::now_unix();
     let build = |first: &Identity, second: &Identity| -> (Home, Vec<(String, String, u64)>) {
         let h = Home::new();
-        let mut rows = Vec::new();
-        for i in 0..12u64 {
+        let mut rows = vec![(String::new(), String::new(), 0u64); 12];
+        // Spooled out of chronological order (ids, hence list order, follow creation):
+        // the table must sort by `received_at`.
+        for i in [5u64, 0, 11, 3, 8, 1, 10, 2, 7, 4, 9, 6] {
             let t = now - 26 * 3_600 + i * 2 * 3_600 + 5;
             let peer = if i % 2 == 0 { first } else { second };
             let text = if i == 7 {
@@ -2311,7 +2383,7 @@ fn inbox_format_claude_prints_the_answers_table() {
                 &text,
                 &envelope::unix_to_rfc3339(t),
             );
-            rows.push((aid, qid, t));
+            rows[i as usize] = (aid, qid, t);
         }
         (h, rows)
     };
@@ -2399,8 +2471,9 @@ fn inbox_format_claude_prints_the_answers_table() {
         table2[1]
     );
 
-    // The 24 h window on its own (no row cap in play): one answer 25 h old and one recent —
-    // one row, and the older one counted under the table.
+    // The 24 h window on its own (no row cap in play): one answer 25 h old and two recent —
+    // two rows, and the older one counted under the table. The `↳` line carries the first
+    // 60 characters of the question's first line: a 70-char line is cut, a 60-char one not.
     let h3 = Home::new();
     h3.put_answer(
         &maciek,
@@ -2408,14 +2481,23 @@ fn inbox_format_claude_prints_the_answers_table() {
         "old",
         &envelope::unix_to_rfc3339(now - 25 * 3_600),
     );
-    h3.put_answer(&ana, "new?", "new", &envelope::unix_to_rfc3339(now - 60));
+    let seventy = "q".repeat(70);
+    let sixty = "s".repeat(60);
+    let (_, long_q) = h3.put_answer(
+        &ana,
+        &format!("{seventy}\nsecond line"),
+        "new",
+        &envelope::unix_to_rfc3339(now - 120),
+    );
+    let (_, exact_q) = h3.put_answer(&ana, &sixty, "newer", &envelope::unix_to_rfc3339(now - 60));
     let out3 = h3.ok_tz("UTC", &["inbox", "--format", "claude"]);
     let table3: Vec<&str> = out3.lines().filter(|l| l.starts_with("| ")).collect();
-    assert_eq!(table3.len(), 1, "{out3}");
+    assert_eq!(table3.len(), 2, "{out3}");
     assert!(
         table3[0].starts_with("| 🟦 ") && table3[0].ends_with("· Ana | new |"),
         "{out3}"
     );
+    assert!(table3[1].ends_with("· Ana | newer |"), "{out3}");
     assert!(
         !out3.contains("| old |") && !out3.contains("\"old?\""),
         "{out3}"
@@ -2424,6 +2506,15 @@ fn inbox_format_claude_prints_the_answers_table() {
         out3.ends_with("1 older answers not shown — owl history\n"),
         "{out3}"
     );
+    let refs3: Vec<&str> = out3.lines().filter(|l| l.contains(" ↳ ")).collect();
+    assert_eq!(
+        refs3,
+        [
+            format!("🟦 ↳ {} \"{}\"", short(&long_q), "q".repeat(60)),
+            format!("🟦 ↳ {} \"{sixty}\"", short(&exact_q)),
+        ]
+    );
+    assert!(!out3.contains(&"q".repeat(61)), "{out3}");
 }
 
 /// AC3: a consent question, a pending question and one answer: the two framed blocks
@@ -2438,18 +2529,34 @@ fn inbox_format_claude_prints_blocks_then_table_and_nothing_else() {
     h.set_received(&c, Dir::Inbox, RECEIVED);
     let t = envelope::now_unix() - 90;
     let (_, qid) = h.put_answer(&h.maciek, "asked?", "yes|no", &envelope::unix_to_rfc3339(t));
+    // A drafted question (Polish question, English draft) in the listing: the same block
+    // `owl show` prints — the frame, `draft:`, `harness:` and the language note.
+    let pl_q = "Jaki masz ostatni commit u siebie i czy to jest ok?";
+    let en_d = "The last commit is abc123 and it is fine.";
+    let d = h.put(&h.maciek, pl_q, "pending");
+    h.set_received(&d, Dir::Inbox, RECEIVED);
+    h.set_draft(&d, en_d, "fake");
+    // `--json` wins over `--format`: the JSON array, no Markdown, no markers.json.
+    let json_out = h.ok(&["inbox", "--json", "--format", "claude"]);
+    let listed: Value = serde_json::from_str(&json_out).unwrap();
+    assert_eq!(listed.as_array().unwrap().len(), 4);
+    assert!(!json_out.contains(FRAME) && !json_out.contains("|---|---|"));
+    assert!(!h.path().join("markers.json").exists());
     let out = h.ok_tz("UTC", &["inbox", "--format", "claude"]);
     assert_eq!(
         out,
         format!(
             "{FRAME}\n🦉 **Ana** ({}) · 23:08 · {PROJECT} · {PATH}\n```text\nHeld one?\n```\n{FRAME}\n\n\
              {FRAME}\n🦉 **Maciek** · 23:08 · {PROJECT} · {PATH}\n```text\nPending one?\n```\n{FRAME}\n\n\
+             {FRAME}\n🦉 **Maciek** · 23:08 · {PROJECT} · {PATH}\n```text\n{pl_q}\n```\n{FRAME}\n\
+             draft:\n```text\n{en_d}\n```\nharness: fake\n{NOTE}\n\n\
              🟦 ↳ {} \"asked?\"\n| 🟦 {} · Maciek | yes\\|no |\n|---|---|\n",
             fp(&h.ana),
             short(&qid),
             utc_hh_mm(t)
         )
     );
+    assert!(h.path().join("markers.json").exists());
     assert!(h.inbox(&p).unwrap().seen && h.inbox(&c).unwrap().seen);
     // Only questions: the blocks, no table; an empty inbox: nothing.
     let e = Home::new();
