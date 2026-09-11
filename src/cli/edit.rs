@@ -8,6 +8,7 @@ use std::process::Command;
 
 use anyhow::Context;
 use owlpost::envelope;
+use owlpost::route;
 use owlpost::spool::{Dir, Spool};
 use serde_json::json;
 
@@ -64,6 +65,8 @@ pub fn run(home: &Path, id: &str, json: bool) -> anyhow::Result<()> {
     }
     rec.draft = Some(v);
     spool.put(Dir::Inbox, id, &rec)?;
+    // Being handled: no session needs to wake for it (OWL-033).
+    route::release(home, id);
     if json {
         print_json(&json!({ "id": id, "state": rec.state, "draft": rec.draft }))?;
     } else {

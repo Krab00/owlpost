@@ -9,8 +9,10 @@ use std::path::Path;
 
 use anyhow::Context;
 
-use crate::envelope::{self, Payload};
-use crate::spool::{Dir, Spool};
+use crate::answer::StoredDraft;
+use crate::contacts::ContactBook;
+use crate::envelope::{self, Body, Payload};
+use crate::spool::{Dir, Record, Spool};
 
 /// The top and bottom line of a framed message: exactly 16 × 🟧.
 pub const FRAME: &str = "🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧";
@@ -274,6 +276,62 @@ pub fn answers_table(rows: &[AnswerRow], now_unix: u64, markers: &mut Markers) -
         out.push(older_line(cut));
     }
     out.join("\n")
+}
+
+/// Contact name for a fingerprint, or the fingerprint itself for unknown peers.
+pub fn peer_name(book: &ContactBook, fp: &str) -> String {
+    book.contacts
+        .iter()
+        .find(|c| c.fingerprint == fp)
+        .map_or_else(|| fp.to_string(), |c| c.name.clone())
+}
+
+/// The `--format claude` block for one record — what `owl show <id> --format claude` prints
+/// and what the daemon writes into a session's wake file (OWL-033): a question in its frame
+/// (the fingerprint in the header on a `consent` record), a drafted one followed by
+/// [`draft_block`], `harness: <name>` and the [`language_note`]; an answer framed the same
+/// way, project and path taken from the question it replies to.
+pub fn record_block(
+    spool: &Spool,
+    book: &ContactBook,
+    rec: &Record,
+    payload: &Payload,
+    draft: Option<&StoredDraft>,
+) -> String {
+    let name = peer_name(book, &payload.from);
+    let hh_mm = local_hh_mm(&rec.received_at);
+    let fingerprint = (rec.state == "consent").then_some(payload.from.as_str());
+    match &payload.body {
+        Body::Question {
+            project,
+            path,
+            question,
+        } => {
+            let head = header(&name, fingerprint, &hh_mm, project, path.as_deref());
+            let mut out = frame(&head, question);
+            if let Some(d) = draft {
+                out.push('\n');
+                out.push_str(&draft_block(&d.text));
+                out.push_str(&format!("\nharness: {}", d.harness));
+                if let Some(note) = language_note(question, &d.text) {
+                    out.push('\n');
+                    out.push_str(note);
+                }
+            }
+            out
+        }
+        Body::Answer { answer, .. } => {
+            let question = payload
+                .in_reply_to
+                .as_deref()
+                .and_then(|q| find_question(spool, q));
+            let (project, path) = match question.as_ref().map(|q| &q.body) {
+                Some(Body::Question { project, path, .. }) => (project.as_str(), path.as_deref()),
+                _ => ("-", None),
+            };
+            frame(&header(&name, fingerprint, &hh_mm, project, path), answer)
+        }
+    }
 }
 
 /// The question an answer replies to: `done/` (an answered ask), `asks/` (still open) or

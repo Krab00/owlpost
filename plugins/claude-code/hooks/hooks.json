@@ -44,6 +44,17 @@
           }
         ]
       }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/owl-count.sh --hook-event SessionEnd",
+            "timeout": 5
+          }
+        ]
+      }
     ]
   }
 }

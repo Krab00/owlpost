@@ -1,19 +1,22 @@
 #!/bin/sh
 # owlpost hook: print the Claude Code injection line for unseen questions, or nothing —
-# and, on FileChanged, wake the session when a record arrives.
+# and, on FileChanged, wake the session when the daemon routed a record to it.
 #
-# Registered for SessionStart, UserPromptSubmit, PostToolUse and FileChanged (hooks.json).
-# `owl inbox --count --format claude` prints exactly one JSON line when there are unseen
-# questions and nothing at all when there are none, and never marks anything seen.
+# Registered for SessionStart, UserPromptSubmit, PostToolUse, FileChanged and SessionEnd
+# (hooks.json). `owl inbox --count --format claude` prints exactly one JSON line when there
+# are unseen questions and nothing at all when there are none, and never marks anything seen.
 # Arguments are passed through (`--hook-event <name>`), and so is stdin: Claude Code's hook
-# input JSON. On SessionStart the line also carries `watchPaths` (the spool inbox directory)
-# unless $OWLPOST_HOME/plugin.json has `{"watch": false}`, so Claude Code runs the FileChanged
-# hook when a record lands there. On FileChanged owl exits 2 with the counter sentence on
-# stderr when a record was added and something is unseen — the exit code Claude Code's
-# asyncRewake hook turns into a new model turn — and the script lets exactly that through;
-# every other outcome is a silent exit 0. The script is a strict no-op (empty stdout, exit 0)
-# when `owl` is not on PATH or fails for any reason, e.g. an uninitialised home, so a broken
-# install can never block a Claude session.
+# input JSON, whose `session_id` names this session. On SessionStart owl creates this
+# session's private wake directory ($OWLPOST_HOME/sessions/<session_id>/wake) and the line
+# also carries it as `watchPaths` unless $OWLPOST_HOME/plugin.json has `{"watch": false}`, so
+# Claude Code runs the FileChanged hook when the daemon (or `owl route`) writes a wake file
+# there — for exactly one session per record. On FileChanged owl exits 2 with that file's
+# content on stderr — the exit code Claude Code's asyncRewake hook turns into a new model
+# turn — and the script lets exactly that through; every other outcome is a silent exit 0.
+# On SessionEnd owl removes the session's directory and prints nothing (the plain path
+# below). The script is a strict no-op (empty stdout, exit 0) when `owl` is not on PATH or
+# fails for any reason, e.g. an uninitialised home, so a broken install can never block a
+# Claude session.
 command -v owl >/dev/null 2>&1 || exit 0
 case " $* " in
 *" FileChanged "*)

@@ -12,6 +12,7 @@ pub mod iroh;
 pub mod notify;
 pub mod pull;
 pub mod render;
+pub mod route;
 pub mod runner;
 pub mod server;
 pub mod spool;

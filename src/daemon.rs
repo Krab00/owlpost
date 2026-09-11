@@ -1,6 +1,7 @@
 //! Daemon run loop: the mTLS listener, the iroh listener (`crate::iroh`), the pull loop
-//! (`crate::pull`) and the auto-accept scan (`crate::auto`) as sibling tasks; the event
-//! consumer notifies and triggers auto-accept.
+//! (`crate::pull`), the auto-accept scan (`crate::auto`) and the session wake lease loop
+//! (`crate::route`, OWL-033) as sibling tasks; the event consumer notifies and triggers
+//! auto-accept.
 
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -31,6 +32,8 @@ pub struct Running {
     pull: JoinHandle<()>,
     /// The auto-accept scan; aborted with the pull loop.
     auto: JoinHandle<()>,
+    /// The session wake lease loop (`crate::route`, OWL-033); aborted with the pull loop.
+    lease: JoinHandle<()>,
     /// The iroh endpoint (closed on `shutdown` / `wait`) and its accept loop.
     iroh: iroh::Endpoint,
     accept: JoinHandle<()>,
@@ -49,6 +52,7 @@ impl Running {
         self.handle.shutdown();
         self.pull.abort();
         self.auto.abort();
+        self.lease.abort();
         self.accept.abort();
         let endpoint = self.iroh.clone();
         tokio::spawn(async move { endpoint.close().await });
@@ -60,6 +64,7 @@ impl Running {
         let result = self.task.await.context("listener task");
         self.pull.abort();
         self.auto.abort();
+        self.lease.abort();
         self.accept.abort();
         self.iroh.close().await;
         result??;
@@ -145,6 +150,7 @@ pub async fn spawn(home: &Path, config: Config) -> anyhow::Result<Running> {
     tracing::info!(%addr, fingerprint = %state.fingerprint(), iroh = %endpoint.id().fmt_short(), "listening");
     let pull = tokio::spawn(crate::pull::run_loop(state.clone()));
     let auto = tokio::spawn(scheduler.run_scan(state.clone()));
+    let lease = tokio::spawn(crate::route::lease_loop(state.clone()));
     Ok(Running {
         addr,
         state,
@@ -152,6 +158,7 @@ pub async fn spawn(home: &Path, config: Config) -> anyhow::Result<Running> {
         task,
         pull,
         auto,
+        lease,
         iroh: endpoint,
         accept,
     })

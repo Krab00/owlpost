@@ -15,6 +15,7 @@ use std::path::Path;
 use owlpost::answer;
 use owlpost::config::Config;
 use owlpost::envelope::Kind;
+use owlpost::route;
 use owlpost::runner::DraftStatus;
 use owlpost::spool::{Dir, Spool};
 use serde_json::json;
@@ -55,6 +56,8 @@ pub fn run(home: &Path, id: &str, harness: Option<&str>, json: bool) -> anyhow::
     let (rec, draft) = answer::draft(&config, home, id, rec, harness)?;
     let stored = StoredDraft::from_runner(&draft);
     spool.put(Dir::Inbox, id, &rec)?;
+    // Being handled: no session needs to wake for it (OWL-033).
+    route::release(home, id);
 
     if json {
         let mut v = rec.draft.clone().unwrap_or_default();

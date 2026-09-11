@@ -112,12 +112,12 @@ sentence is the instruction. Then handle the user's prompt.
 ## Live watch
 
 The live watch is event-driven and there is nothing to arm: the `SessionStart` hook
-registers the spool inbox directory as a watch path and the `FileChanged` hook wakes this
-session with the counter sentence (`🦉 owlpost: N new ...`) the moment a record arrives; a
-record that is only marked seen or moved away wakes nothing. When a wake lands, report it in
-one line built from the counter, for example `🦉 owlpost: 1 new answer from Maciek`, and
-offer `/owlpost:inbox`; then wait for the human. The watch is a counter only: never list the
-inbox, show, draft or send anything because of a wake. Nothing is opened, drafted or sent
+registers this session's private wake directory as a watch path and the `FileChanged` hook
+wakes this session with the framed message block the moment the daemon routes a record to
+it — exactly one session wakes per record, the others stay silent; a record that is only
+marked seen or moved away wakes nothing. When a wake lands, paste the framed block it
+delivered verbatim and offer `/owlpost:inbox`; then wait for the human. The wake shows, it
+never acts: never list the inbox, draft or send anything because of a wake. Nothing is opened, drafted or sent
 without the human's pick. `/owlpost:watch off` stores `{"watch": false}` so the hook stops
 waking and new sessions do not watch, `/owlpost:watch on` restores it from the next session
 start, `/owlpost:watch status` reports the stored default (`commands/watch.md`).
