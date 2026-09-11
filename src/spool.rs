@@ -59,6 +59,11 @@ impl Spool {
         Ok(Spool { root })
     }
 
+    /// The `$OWLPOST_HOME` this spool lives under (`spool/`'s parent).
+    pub fn home(&self) -> &Path {
+        self.root.parent().unwrap_or(&self.root)
+    }
+
     pub fn path(&self, dir: Dir, id: &str) -> PathBuf {
         self.root.join(dir.name()).join(format!("{id}.json"))
     }

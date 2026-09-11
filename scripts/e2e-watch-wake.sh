@@ -1,8 +1,10 @@
 #!/bin/sh
 # e2e-watch-wake.sh — proof on the real Claude Code harness that the owlpost plugin wakes an
-# idle session when a record lands in the inbox (OWL-031, design §12): the SessionStart hook
-# registers $OWLPOST_HOME/spool/inbox as a watch path and the FileChanged hook (asyncRewake)
-# exits 2 with the counter sentence, which Claude Code turns into a new model turn.
+# idle session when a record lands in the inbox (OWL-031, design §12; per-session routing
+# since OWL-033): the SessionStart hook registers the session's private wake directory
+# $OWLPOST_HOME/sessions/<session_id>/wake as a watch path, `owl route <id>` writes the
+# record's framed block there (what the daemon does on arrival) and the FileChanged hook
+# (asyncRewake) exits 2 with that block, which Claude Code turns into a new model turn.
 #
 #   scripts/e2e-watch-wake.sh                      # installed plugin, the `owl` on PATH
 #   E2E_PLUGIN_DIR=plugins/claude-code PATH=$PWD/target/release:$PATH scripts/e2e-watch-wake.sh
@@ -16,10 +18,11 @@
 # --include-hook-events --permission-mode bypassPermissions` session runs in a throwaway
 # OWLPOST_HOME with its stdin held open (a FIFO). The script sends exactly one user message
 # (`Reply with exactly the word: ready`), waits for the first `"type":"result"` event, and only
-# then drops one unseen question record into $OWLPOST_HOME/spool/inbox/. Within 60 s the
-# stream must carry a `system` `hook_response` event with `"hook_event":"FileChanged"`,
-# `"exit_code":2` and the 🦉 counter sentence, followed by a second `"type":"assistant"`
-# event — no second user message is ever sent. Prints `PASS` or `FAIL <reason>`, exits
+# then drops one unseen question record into $OWLPOST_HOME/spool/inbox/ and runs
+# `owl route <id>`. Within 60 s the stream must carry a `system` `hook_response` event with
+# `"hook_event":"FileChanged"`, `"exit_code":2` and the 🦉 framed block (the question text
+# verbatim), followed by a second `"type":"assistant"` event — no second user message is
+# ever sent. Prints `PASS` or `FAIL <reason>`, exits
 # non-zero on FAIL (2 = precondition); the whole `claude` run is bounded by `timeout 180`.
 # Cost: one `claude -p` call.
 set -u
@@ -118,16 +121,23 @@ raw=$(printf '{"v":1,"id":"%s","type":"question","from":"owl:e2e-peer","to":"owl
 escaped=$(printf '%s' "$raw" | sed 's/"/\\"/g')
 printf '{"raw":"%s","sig":"e2e","state":"pending","seen":false,"received_at":"%s","draft":null,"meta":{}}\n' "$escaped" "$ts" >"$WORK/$id.json"
 mv "$WORK/$id.json" "$HOME_DIR/spool/inbox/$id.json"
+# Route it (what the daemon does when a record is born): the session is the only live one,
+# so its wake directory gets the framed block.
+OWLPOST_HOME=$HOME_DIR owl route "$id" >"$OUT/route.log" 2>&1 || {
+    finish
+    echo "FAIL owl route $id failed, see $OUT/route.log"
+    exit 1
+}
 dropped_at=$(date +%s)
 
-# Within 60 s: the FileChanged hook_response (exit 2, the sentence) and then an assistant event.
+# Within 60 s: the FileChanged hook_response (exit 2, the framed block) and then an assistant event.
 reason=""
 hook_line=""
 assistant_after=""
 waited=0
 while [ $waited -lt 60 ]; do
     after=$(tail -n "+$((result_line + 1))" "$STREAM")
-    hook_line=$(printf '%s\n' "$after" | grep -n -F '"hook_response"' | grep -F '"hook_event":"FileChanged"' | grep -F '"exit_code":2' | grep -F 'owlpost: 1 new question' | head -n 1 | cut -d: -f1)
+    hook_line=$(printf '%s\n' "$after" | grep -n -F '"hook_response"' | grep -F '"hook_event":"FileChanged"' | grep -F '"exit_code":2' | grep -F 'does the watch wake?' | head -n 1 | cut -d: -f1)
     if [ -n "$hook_line" ]; then
         assistant_after=$(printf '%s\n' "$after" | tail -n "+$((hook_line + 1))" | grep -c -F '"type":"assistant"')
         [ "$assistant_after" -gt 0 ] && break
@@ -140,7 +150,7 @@ while [ $waited -lt 60 ]; do
 done
 woke_after=$(( $(date +%s) - dropped_at ))
 if [ -z "$hook_line" ]; then
-    reason="no FileChanged hook_response with exit_code 2 and the counter sentence within ${waited}s of the drop"
+    reason="no FileChanged hook_response with exit_code 2 and the framed block within ${waited}s of the drop"
 elif [ "${assistant_after:-0}" -eq 0 ]; then
     reason="FileChanged hook_response seen but no assistant event followed within ${waited}s"
 else

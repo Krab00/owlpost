@@ -212,19 +212,20 @@ fn watch_docs_describe_the_event_driven_wake_and_drop_the_arm_sentence() {
         "`FileChanged`",
         "`asyncRewake`",
         "exit 2",
-        "carries `watchPaths: [\"<home>/spool/inbox\"]`",
-        "(absolute; `<home>` is the resolved `$OWLPOST_HOME`, canonicalised when it exists) next to",
-        "`additionalContext` is present only when there is text",
-        "When `$OWLPOST_HOME/plugin.json` reads `{\"watch\": false}` the `watchPaths`",
-        "key is absent and count 0 prints nothing",
-        "`UserPromptSubmit` and `PostToolUse` never carry `watchPaths`",
-        "`SessionStart` also sweeps `$OWLPOST_HOME/watch/`: every marker whose pid is dead is removed",
-        "(all session ids), live ones stay, and an absent or unreadable directory never fails the hook.",
-        "is `add`, the unseen count is above 0 and the watch is on, prints the counter sentence",
-        "(`sentence()`, 🦉 icon, byte-identical to `--follow`) to stderr and exits `2` — the exit",
-        "code Claude Code's `asyncRewake` hook turns into a new model turn, showing the hook's stderr",
-        "Keying on `add` only is the de-duplication:",
-        "marking seen and moving to `done/` are `change`/`unlink`, so they never wake",
+        "`watchPaths: [\"<home>/sessions/<sid>/wake\"]` (absolute; `<home>` is the resolved",
+        "`$OWLPOST_HOME`, canonicalised when it exists) next to `hookEventName`; `additionalContext`",
+        "is present only when there is text",
+        "`$OWLPOST_HOME/plugin.json` reads `{\"watch\": false}` the `watchPaths` key is absent and",
+        "count 0 prints nothing (the marker is still written)",
+        "`UserPromptSubmit` and `PostToolUse` never carry",
+        "`$OWLPOST_HOME/watch/`: every marker whose pid is dead is removed (all session ids), live",
+        "ones stay, and an absent or unreadable directory never fails the hook.",
+        "is `add`, `file_path` (canonicalised) is a file directly under",
+        "`<home>/sessions/<sid>/wake/` and the watch is on, prints that file's content byte for",
+        "byte to stderr and exits `2` — the exit",
+        "code Claude Code's `asyncRewake` hook turns into a",
+        "new model turn, showing the hook's stderr (stdout when stderr is empty) to the model; the",
+        "on `add` only is the de-duplication: the release (§8) is an `unlink`, so it never wakes.",
         "`--format plain|codex|kimi` (or no `--format`) is a clap usage error (exit 2, distinct from the wake by its",
         "`--count --follow` (plain only) is the poll-loop fallback for hosts without a `FileChanged` hook",
     ] {
@@ -235,11 +236,11 @@ fn watch_docs_describe_the_event_driven_wake_and_drop_the_arm_sentence() {
     }
     let s11 = section("11. Notifications and service install");
     for needle in [
-        "- Claude Code live watch (OWL-031): the plugin's `SessionStart` hook returns `watchPaths`",
-        "with the spool inbox directory and its `FileChanged` hook runs with `asyncRewake: true`",
-        "exits 2 with the counter sentence when a record is added, which wakes the idle session with",
-        "stays as the poll-loop fallback for hosts without such a hook; its marker under",
-        "`$OWLPOST_HOME/watch/` is informational and dead ones are swept on `SessionStart`.",
+        "- Claude Code live watch (OWL-031, per session since OWL-033): the plugin's `SessionStart`",
+        "(`$OWLPOST_HOME/sessions/<sid>/wake`, §8) and its `FileChanged` hook runs with",
+        "content when the daemon routed a record to this session, which wakes the idle session with",
+        "inbox are released. `owl inbox --count --follow` stays as the poll-loop fallback for hosts",
+        "without such a hook; its marker under `$OWLPOST_HOME/watch/` is informational and dead ones",
     ] {
         assert!(
             s11.lines().any(|l| l.contains(needle)),
@@ -250,7 +251,7 @@ fn watch_docs_describe_the_event_driven_wake_and_drop_the_arm_sentence() {
     for needle in [
         "`scripts/e2e-watch-wake.sh` (OWL-031)",
         "waits for the first `result` event, drops one unseen question record into `spool/inbox/`",
-        "`hook_response` for `FileChanged` with `exit_code` 2 and the 🦉 sentence followed by a second `assistant` event with no second user message sent",
+        "`hook_response` for `FileChanged` with `exit_code` 2 and the 🦉 framed block followed by a second `assistant` event with no second user message sent",
     ] {
         assert!(
             s12.lines().any(|l| l.contains(needle)),
@@ -429,7 +430,7 @@ fn e2e_watch_wake_script_is_executable_and_pins_the_flow() {
         "\"hook_response\"",
         "\"hook_event\":\"FileChanged\"",
         "\"exit_code\":2",
-        "owlpost: 1 new question",
+        "does the watch wake?",
         "\"type\":\"assistant\"",
         "spool/inbox/",
         "echo \"PASS",
@@ -462,9 +463,9 @@ fn e2e_watch_wake_script_is_executable_and_pins_the_flow() {
     // The wake check greps the hook_response for exit code 2 and the FileChanged event.
     assert!(
         code.contains(
-            "grep -F '\"hook_event\":\"FileChanged\"' | grep -F '\"exit_code\":2' | grep -F 'owlpost: 1 new question'"
+            "grep -F '\"hook_event\":\"FileChanged\"' | grep -F '\"exit_code\":2' | grep -F 'does the watch wake?'"
         ),
-        "the wake check pins hook_event FileChanged, exit_code 2 and the sentence"
+        "the wake check pins hook_event FileChanged, exit_code 2 and the question text"
     );
     // Order: one user message is sent, the first result event is awaited (and its absence
     // fails the run), only then is the record dropped into spool/inbox/ — exactly once — and
@@ -485,10 +486,19 @@ fn e2e_watch_wake_script_is_executable_and_pins_the_flow() {
         .unwrap()
         + wait_result;
     let drop = code.find(drop_cmd).unwrap();
+    // OWL-033: the record is routed (`owl route <id>`) right after the drop, before the wake
+    // is asserted — on the executable line, not in the header comment.
+    let route_cmd = "OWLPOST_HOME=$HOME_DIR owl route \"$id\" >\"$OUT/route.log\" 2>&1 || {";
+    assert_eq!(code.matches(route_cmd).count(), 1, "one owl route call");
+    let route = code.find(route_cmd).unwrap();
     let wake = code[drop..].find("\"hook_event\":\"FileChanged\"").unwrap() + drop;
     assert!(
-        send < wait_result && wait_result < no_result && no_result < drop && drop < wake,
-        "send={send} wait={wait_result} no_result={no_result} drop={drop} wake={wake}"
+        send < wait_result
+            && wait_result < no_result
+            && no_result < drop
+            && drop < route
+            && route < wake,
+        "send={send} wait={wait_result} no_result={no_result} drop={drop} route={route} wake={wake}"
     );
     // Exactly one user message is ever written to the FIFO.
     assert_eq!(
@@ -620,4 +630,257 @@ fn format_claude_docs_pin_the_cli_renders_the_model_pastes() {
     );
     let config = md_section(&design, "## 3. Configuration — `$OWLPOST_HOME/config.json`");
     assert!(config.contains("`markers.json`"));
+}
+
+/// OWL-033 AC10: the design doc pins the per-session wake routing — §8 the routing state and
+/// the wake directories, §9 the two knobs, `owl route` and `SessionEnd`, §11 the lease loop,
+/// §12 the two-session script — and the scripts pin the flow: `e2e-watch-route.sh` is
+/// executable, starts two `claude -p --input-format stream-json` sessions, calls `owl route`
+/// on its executable line and prints `PASS`/`FAIL`; `e2e-watch-wake.sh` calls `owl route`.
+/// Every literal is on one line.
+#[test]
+fn route_docs_and_scripts_pin_one_session_wakes_per_record() {
+    use std::os::unix::fs::PermissionsExt;
+    let design = repo_file("docs/technical-design.md");
+    let section = |name: &str| -> String {
+        let start = design
+            .find(&format!("\n## {name}"))
+            .unwrap_or_else(|| panic!("§{name}"));
+        let body = &design[start + 1..];
+        let end = body[1..].find("\n## ").map_or(body.len(), |i| i + 1);
+        body[..end].to_string()
+    };
+    let pin = |what: &str, text: &str, needles: &[&str]| {
+        for needle in needles {
+            assert!(
+                text.lines().any(|l| l.contains(needle)),
+                "{what} lacks {needle:?} on one line"
+            );
+        }
+    };
+    pin(
+        "design §2",
+        &section("2. Module layout"),
+        &[
+            "route.rs           per-session wake dirs, routing state, liveness, lease, release (OWL-033)",
+            "e2e-watch-route.sh two `claude -p` stream-json sessions; proves `owl route` wakes exactly the affine one (OWL-033)",
+            "scheduler + spool scan + session wake lease loop",
+        ],
+    );
+    pin(
+        "design §8",
+        &section("8. Spool state machine"),
+        &[
+            "### Session wake routing (OWL-033)",
+            "spool/routing/",
+            "sessions/<session_id>/wake",
+            "sessions/<session_id>/marker.json         {session_id, cwd, started_at, heartbeat_at, source}",
+            "spool/routing/<record_id>.json             {current: <session_id>|null, routed_at, tried: [..]}",
+            "One session wakes per record: every interactive Claude Code session owns a private wake",
+            "- `marker.json` is written by the plugin's `SessionStart` hook (`cwd` canonicalised, `source`",
+            "`OWLPOST_SESSION_STALE_SECS` (default 21600) and — when Claude Code's",
+            "(1) `cwd` equal to the configured checkout of the record's project (`config.projects`,",
+            "- Lease: the daemon's lease loop (§11) walks `spool/routing/` every 30 s. A routing whose",
+            "`OWLPOST_WAKE_LEASE_SECS` (default 600) has its wake file removed and is routed again (the",
+            "- Release points: `owl show`, `owl draft`, `owl edit` and the `owl inbox` listing (any format;",
+        ],
+    );
+    pin(
+        "design §9",
+        &section("9. CLI contract"),
+        &[
+            "OWLPOST_WAKE_LEASE_SECS",
+            "OWLPOST_SESSION_STALE_SECS",
+            "owl route",
+            "SessionEnd",
+            "| `owl route <id>` | route one inbox record to one live Claude Code session (§8, OWL-033)",
+            "prints `routed <id> -> <session id>` or `no live session for <id>` (exit 0 both ways; `--json`: `{\"id\", \"session\"}`, `null` for none); an unknown record is exit 1",
+            "- `claude` on `--hook-event SessionEnd` (OWL-033): removes `sessions/<sid>/` and clears",
+            "- Environment knobs of the routing (§8): `OWLPOST_WAKE_LEASE_SECS` (seconds a session keeps a",
+            "record before the lease moves it on; default 600), `OWLPOST_SESSION_STALE_SECS` (seconds",
+            "`--hook-event SessionEnd` removes `sessions/<sid>/`, clears `current` in the routings naming it and prints nothing",
+            "`watchPaths: [\"<home>/sessions/<sid>/wake\"]`",
+        ],
+    );
+    pin(
+        "design §11",
+        &section("11. Notifications and service install"),
+        &[
+            "lease loop",
+            "wakes per record. The daemon's lease loop (`route::lease_loop`, a sibling task of the pull",
+            "loop and the auto scheduler) runs `lease_tick` every 30 s off the async runtime: expired or",
+            "`asyncRewake: true` (`hooks.json`, timeout 5 s; `SessionEnd` is registered too, timeout 5 s);",
+        ],
+    );
+    pin(
+        "design §12",
+        &section("12. Testing strategy"),
+        &[
+            "scripts/e2e-watch-route.sh",
+            "| E2E (manual) | `scripts/e2e-watch-route.sh` (OWL-033): two `claude -p --input-format stream-json` sessions with the plugin, each in its own temp cwd, one of them the configured checkout of the test project (`config.json` `projects`)",
+            "the affine session's stream must carry a `FileChanged` `hook_response` with `exit_code` 2 and a second `assistant` event within 60 s, the other stream neither; prints `PASS`/`FAIL <reason>`",
+            "routes it with `owl route <id>` (OWL-033)",
+        ],
+    );
+    // The scripts.
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let path = root.join("scripts/e2e-watch-route.sh");
+    let mode = fs::metadata(&path)
+        .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+        .permissions()
+        .mode();
+    assert_ne!(mode & 0o111, 0, "e2e-watch-route.sh must be executable");
+    let s = fs::read_to_string(&path).unwrap();
+    assert!(s.starts_with("#!/bin/sh\n"));
+    // Pins on the code, not the header comment.
+    let code: String = s
+        .lines()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .map(|l| format!("{l}\n"))
+        .collect();
+    assert_eq!(
+        code.matches("--input-format stream-json --output-format stream-json --verbose")
+            .count(),
+        2,
+        "both claude invocations use --input-format stream-json"
+    );
+    assert!(!code.contains("--input-format text"));
+    // The sessions are started by plain calls: a `$(start_session …)` substitution around the
+    // backgrounded subshell deadlocked on the stdin FIFO (round 2).
+    assert!(
+        !code.contains("$(start_session"),
+        "no command substitution around start_session"
+    );
+    for needle in [
+        "--include-hook-events --permission-mode bypassPermissions",
+        "--plugin-dir \"$E2E_PLUGIN_DIR\"",
+        "E2E_OUT",
+        "owl init",
+        "timeout 180",
+        "\\\"projects\\\": {\\\"github.com/e2e/repo\\\": \\\"$CWD_A\\\"}",
+        "mkfifo \"$FIFO_A\"",
+        "mkfifo \"$FIFO_B\"",
+        "start_session \"$CWD_A\" \"$FIFO_A\" \"$STREAM_A\" \"$STDERR_A\"\nrunner_a=$!\n",
+        "start_session \"$CWD_B\" \"$FIFO_B\" \"$STREAM_B\" \"$STDERR_B\"\nrunner_b=$!\n",
+        "mv \"$WORK/$id.json\" \"$HOME_DIR/spool/inbox/$id.json\"",
+        "routed=$(OWLPOST_HOME=$HOME_DIR owl route \"$id\" 2>\"$OUT/route.stderr\")",
+        "\"routed $id -> \"*) ;;",
+        "grep -F '\"hook_event\":\"FileChanged\"' | grep -F '\"exit_code\":2' | grep -F 'does the watch wake?'",
+        "grep -c -F '\"type\":\"assistant\"'",
+        "hooks_b=$(printf '%s\\n' \"$after_b\" | grep -F '\"hook_response\"' | grep -c -F '\"hook_event\":\"FileChanged\"')",
+        "assistant_b=$(printf '%s\\n' \"$after_b\" | grep -c -F '\"type\":\"assistant\"')",
+        "reason=\"B: $hooks_b FileChanged hook_response event(s) after its first result (must be 0)\"",
+        "reason=\"B: $assistant_b assistant event(s) after its first result (must be 0)\"",
+        "echo \"PASS",
+        "echo \"FAIL $reason\"",
+        "exit 1",
+    ] {
+        assert!(
+            code.contains(needle),
+            "e2e-watch-route.sh code lacks {needle:?}"
+        );
+    }
+    // Exactly one user message per session, both first results awaited (and their absence
+    // fails the run) before the one drop, the route right after it, then the wake checks.
+    assert_eq!(
+        code.matches("\"type\":\"user\"").count(),
+        2,
+        "one user message per session"
+    );
+    let ready = code.find("Reply with exactly the word: ready").unwrap();
+    let both = code[ready..]
+        .find("[ -n \"$result_a\" ] && [ -n \"$result_b\" ] && break")
+        .unwrap()
+        + ready;
+    let no_result = code[both..]
+        .find("echo \"FAIL no result event from both sessions within")
+        .unwrap()
+        + both;
+    let drop_cmd = "mv \"$WORK/$id.json\" \"$HOME_DIR/spool/inbox/$id.json\"";
+    assert_eq!(
+        code.matches(drop_cmd).count(),
+        1,
+        "one drop into spool/inbox"
+    );
+    let drop = code.find(drop_cmd).unwrap();
+    let route = code.find("owl route \"$id\"").unwrap();
+    let wake_a = code[route..]
+        .find("hook_a=$(wake_line \"$STREAM_A\" \"$result_a\")")
+        .unwrap()
+        + route;
+    let silent_b = code[wake_a..].find("hooks_b=").unwrap() + wake_a;
+    assert!(
+        ready < both
+            && both < no_result
+            && no_result < drop
+            && drop < route
+            && route < wake_a
+            && wake_a < silent_b,
+        "ready={ready} both={both} no_result={no_result} drop={drop} route={route} wake_a={wake_a} silent_b={silent_b}"
+    );
+    // `e2e-watch-wake.sh` routes explicitly too, on its executable line.
+    let wake_sh = fs::read_to_string(root.join("scripts/e2e-watch-wake.sh")).unwrap();
+    let wake_code: String = wake_sh
+        .lines()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .map(|l| format!("{l}\n"))
+        .collect();
+    assert!(
+        wake_code
+            .contains("OWLPOST_HOME=$HOME_DIR owl route \"$id\" >\"$OUT/route.log\" 2>&1 || {"),
+        "e2e-watch-wake.sh calls owl route"
+    );
+    assert!(wake_code.contains("grep -F 'does the watch wake?'"));
+    assert!(
+        !wake_code.contains("owlpost: 1 new question"),
+        "the hook prints the wake file, not a counter"
+    );
+    // The plugin docs name the per-session directory and the framed block a wake delivers.
+    for (rel, needle) in [
+        (
+            "plugins/claude-code/README.md",
+            "registers this session's private wake directory `$OWLPOST_HOME/sessions/<session_id>/wake` as a `watchPaths` entry",
+        ),
+        (
+            "plugins/claude-code/README.md",
+            "`SessionEnd` removes the directory",
+        ),
+        (
+            "plugins/claude-code/commands/watch.md",
+            "registers this session's wake directory (`$OWLPOST_HOME/sessions/<session_id>/wake`) as a",
+        ),
+        (
+            "plugins/claude-code/commands/watch.md",
+            "the daemon routes a record to it — exactly one session wakes per record",
+        ),
+        (
+            "plugins/claude-code/skills/owlpost/SKILL.md",
+            "it — exactly one session wakes per record, the others stay silent",
+        ),
+        (
+            "plugins/claude-code/hooks/owl-count.sh",
+            "*\" FileChanged \"*)",
+        ),
+        (
+            "plugins/claude-code/hooks/owl-count.sh",
+            "# Registered for SessionStart, UserPromptSubmit, PostToolUse, FileChanged and SessionEnd",
+        ),
+    ] {
+        assert!(
+            repo_file(rel).lines().any(|l| l.contains(needle)),
+            "{rel} lacks {needle:?} on one line"
+        );
+    }
+    for gone in [
+        "spool/inbox` as a watch path",
+        "spool/inbox` as a `watchPaths`",
+    ] {
+        for rel in [
+            "plugins/claude-code/README.md",
+            "plugins/claude-code/commands/watch.md",
+            "plugins/claude-code/skills/owlpost/SKILL.md",
+        ] {
+            assert!(!repo_file(rel).contains(gone), "{rel} still says {gone:?}");
+        }
+    }
 }

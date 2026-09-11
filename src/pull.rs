@@ -309,6 +309,18 @@ pub fn pull_once(
                     if let Some(e) = &ing.ack_error {
                         tracing::warn!(peer, id = %ing.answer.id, error = %format!("{e:#}"), "ack failed");
                     }
+                    // The pulled answer is a new inbox record: wake one session (OWL-033).
+                    match Config::load(home)
+                        .and_then(|cfg| crate::route::route(home, &cfg, spool, &ing.answer.id))
+                    {
+                        Ok(Some(sid)) => {
+                            tracing::info!(id = %ing.answer.id, session = %sid, "routed to session")
+                        }
+                        Ok(None) => tracing::debug!(id = %ing.answer.id, "no live session to wake"),
+                        Err(e) => {
+                            tracing::warn!(id = %ing.answer.id, error = %format!("{e:#}"), "routing failed")
+                        }
+                    }
                     open.remove(&ing.ask.id);
                     on_answer(AnswerIngested {
                         id: ing.ask.id.clone(),

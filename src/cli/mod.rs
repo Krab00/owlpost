@@ -14,6 +14,7 @@ pub mod inbox;
 pub mod install;
 pub mod mcp;
 pub mod reject;
+pub mod route;
 pub mod send;
 pub mod setup;
 pub mod show;
@@ -74,10 +75,7 @@ pub fn contact_book(home: &Path) -> anyhow::Result<ContactBook> {
 
 /// Contact name for a fingerprint, or the fingerprint itself for unknown peers.
 pub fn peer_name(book: &ContactBook, fp: &str) -> String {
-    book.contacts
-        .iter()
-        .find(|c| c.fingerprint == fp)
-        .map_or_else(|| fp.to_string(), |c| c.name.clone())
+    owlpost::render::peer_name(book, fp)
 }
 
 /// Seconds between `received_at` and now (0 when unparsable or in the future).
