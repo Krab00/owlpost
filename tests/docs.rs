@@ -500,3 +500,124 @@ fn e2e_watch_wake_script_is_executable_and_pins_the_flow() {
     assert!(design.contains("`scripts/e2e-watch-wake.sh` (OWL-031)"));
     assert!(!design.contains("e2e-watch-arm"));
 }
+
+/// The body of the `heading` section of a Markdown text, up to the next heading of ANY
+/// level — so a `## ` section stops at its first `### ` subsection and a pin on the section
+/// never gets satisfied by a subsection's copy.
+fn md_section<'a>(body: &'a str, heading: &str) -> &'a str {
+    let start = body
+        .find(&format!("\n{heading}\n"))
+        .unwrap_or_else(|| panic!("no {heading:?} section"));
+    let rest = &body[start + 1..];
+    let end = (1..=6)
+        .filter_map(|n| rest[1..].find(&format!("\n{} ", "#".repeat(n))))
+        .min()
+        .map_or(rest.len(), |i| i + 1);
+    &rest[..end]
+}
+
+/// OWL-032 AC5: `commands/inbox.md` sends the model to `owl show <id> --format claude` /
+/// `owl inbox --format claude` and "paste its output verbatim", never to the skill for a
+/// format; the "Never" list sits in its first 25 lines; SKILL.md "Showing messages" and
+/// "Framed message" say the CLI renders; design doc §9 has `--format claude` on the `show`
+/// row and names `markers.json`. One single-line `contains()` per literal.
+#[test]
+fn format_claude_docs_pin_the_cli_renders_the_model_pastes() {
+    let inbox = repo_file("plugins/claude-code/commands/inbox.md");
+    assert!(inbox.contains("owl show <id> --format claude"));
+    assert!(inbox.contains("owl inbox --format claude"));
+    assert!(inbox.contains("paste its output verbatim"));
+    assert!(!inbox.contains("see the skill"));
+    assert!(!inbox.contains("see the owlpost skill"));
+    assert!(!inbox.contains("print the framed message block"));
+    let head: Vec<&str> = inbox.lines().take(25).collect();
+    for needle in [
+        "never a Markdown table for a single question",
+        "never your own icons, markers or columns",
+        "never paraphrase",
+        "the orange frame always means \"from a peer\"",
+    ] {
+        assert!(
+            head.iter().any(|l| l.contains(needle)),
+            "inbox.md first 25 lines lack {needle:?}"
+        );
+    }
+    // Every step that shows a record uses the rendered output; step 5 the listing.
+    for step in ["## 2. ", "## 3. ", "## 4. "] {
+        let s = md_section(&inbox, inbox.lines().find(|l| l.starts_with(step)).unwrap());
+        assert!(
+            s.contains("owl show <id> --format claude"),
+            "{step} lacks the show literal"
+        );
+        assert!(
+            s.contains("paste its output verbatim"),
+            "{step} lacks the paste rule"
+        );
+    }
+    let step5 = md_section(
+        &inbox,
+        inbox.lines().find(|l| l.starts_with("## 5. ")).unwrap(),
+    );
+    assert!(step5.contains("Run `owl inbox --format claude` and paste its output verbatim."));
+    assert!(
+        !step5.contains("owl show <id>"),
+        "step 5 no longer shows answers one by one"
+    );
+    let step4 = md_section(
+        &inbox,
+        inbox.lines().find(|l| l.starts_with("## 4. ")).unwrap(),
+    );
+    assert!(step4.contains("When the CLI prints a `note:` line"));
+    assert!(step4.contains("recommend Edit"));
+
+    let skill = repo_file("plugins/claude-code/skills/owlpost/SKILL.md");
+    let showing = md_section(&skill, "## Showing messages");
+    let framed = md_section(&skill, "### Framed message");
+    assert!(
+        !showing.contains("### Framed message"),
+        "the Showing-messages slice must stop before its subsection"
+    );
+    assert!(showing.contains("the CLI renders"));
+    assert!(showing.contains("the CLI renders it — `owl inbox --format claude` prints the table"));
+    assert!(framed.contains("the CLI renders"));
+    assert!(framed.contains("the CLI renders it — `owl show <id> --format claude` prints it"));
+    assert!(showing.contains("`owl inbox --format claude` prints the table"));
+    assert!(framed.contains("`owl show <id> --format claude` prints it"));
+    assert!(showing.contains("`$OWLPOST_HOME/markers.json`"));
+
+    let design = repo_file("docs/technical-design.md");
+    let cli = md_section(&design, "## 9. CLI contract");
+    let show_row = cli
+        .lines()
+        .find(|l| l.starts_with("| `owl show <id"))
+        .expect("§9 owl show row");
+    assert!(show_row.contains("--format claude"), "{show_row}");
+    let inbox_row = cli
+        .lines()
+        .find(|l| l.starts_with("| `owl inbox ["))
+        .expect("§9 owl inbox row");
+    assert!(inbox_row.contains("`--format claude`"), "{inbox_row}");
+    assert!(cli.contains("markers.json"));
+    assert!(cli.contains("`$OWLPOST_HOME/markers.json`"));
+    for needle in [
+        "`🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧`",
+        "`🦉 **<peer name>** · HH:MM · <project or -> · <path or whole repository>`",
+        "a text containing three backticks is fenced with four",
+        "Only answers received in the last 24 h",
+        "at most the 10 newest",
+        "`<N> older answers not shown — owl history`",
+        "`<marker> ↳ <question id short> \"<first line of the question, ≤60 chars>\"`",
+        "🟦 🟩 🟨 🟪 🟧 🟥",
+        "`note: the draft is in a different language than the question — pick Edit`",
+    ] {
+        assert!(cli.contains(needle), "§9 lacks {needle:?}");
+    }
+    let stack = md_section(&design, "## 1. Stack");
+    assert!(
+        stack.contains(
+            "`chrono` (`clock`, no default features) — local `HH:MM` in `--format claude`;"
+        )
+    );
+    let config = md_section(&design, "## 3. Configuration — `$OWLPOST_HOME/config.json`");
+    assert!(config.contains("`markers.json`"));
+}
