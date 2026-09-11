@@ -165,7 +165,10 @@ out, and show them only when the human asks for them. Questions and drafts that 
 decision are still printed in full, in a code block (see the answer loop). Markdown tables
 have no row background, so each peer gets one fixed colour marker at the start of the left
 cell instead, in order of first appearance in the session: 🟦 🟩 🟨 🟪 🟧 🟥 (then repeat);
-the same peer keeps the same marker for the whole session.
+the same peer keeps the same marker for the whole session. Do not build this table yourself:
+the CLI renders it — `owl inbox --format claude` prints the table (with one `↳ <question id>
+"<first line>"` line per answer above it, and the marker of each peer kept in
+`$OWLPOST_HOME/markers.json` across sessions) and the model pastes the output verbatim.
 
 | 🟦 00:16 · Krzysztof Abramczyk | Wszystko ok, ale późno już. |
 |---|---|
@@ -187,6 +190,7 @@ Jaki masz ostatni commit u Siebie?
 🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧
 ````
 
+Do not build this block yourself either: the CLI renders it — `owl show <id> --format claude` prints it (`owl inbox --format claude` prints one per question) and the model pastes the output verbatim.
 Top and bottom line: 16 × `🟧`. Header: `🦉 **<peer>** · HH:MM · <project> · <path or "whole repository">`.
 On a `consent` record the header also carries the peer's fingerprint, after the peer name.
 Body: the message text verbatim in a code block, exactly as in the answer loop.

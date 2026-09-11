@@ -32,6 +32,13 @@
 //! never marks anything seen, and ends (removing the marker) when the marker is removed from
 //! outside or its stdout is closed.
 //!
+//! Listing with `--format claude|codex|kimi` (OWL-032) prints Markdown for the model to paste
+//! verbatim: every question as its framed block (`consent` ones first, then list order),
+//! then the answers table (`owlpost::render::answers_table`: last 24 h, the 10 newest,
+//! newest last, per-peer markers persisted in `$OWLPOST_HOME/markers.json`), one blank line
+//! between sections and nothing else; the consent prompts and `auto_error` notes of the plain
+//! listing are not printed. The listed records are marked seen the same way.
+//!
 //! Consent records get a prompt line under the table (`<name> wants to ask your agent about
 //! <project> — owl allow <fp> [--once|--always] / owl deny <fp>`); records the auto-accept
 //! scheduler failed on show their `auto_error` (§3.4) with the command that retries them:
@@ -47,11 +54,12 @@ use anyhow::{Context, bail};
 use owlpost::answer::auto_error;
 use owlpost::contacts::ContactBook;
 use owlpost::envelope::{self, Body, Kind, Payload};
+use owlpost::render::{self, AnswerRow, Markers};
 use owlpost::spool::{Dir, Record, Spool};
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use super::{existing_answer, payload_of, peer_name, print_json, summary};
+use super::{StoredDraft, existing_answer, payload_of, peer_name, print_json, summary};
 
 pub struct Opts {
     pub count: bool,
@@ -392,6 +400,8 @@ pub fn run(home: &Path, opts: Opts) -> anyhow::Result<()> {
     }
     if opts.json {
         print_json(&Value::Array(rows.clone()))?;
+    } else if matches!(format, Some(Format::Claude | Format::Codex | Format::Kimi)) {
+        print_rendered(home, &spool, &book, &records, now)?;
     } else {
         let cells: Vec<Vec<String>> = rows
             .iter()
@@ -424,6 +434,65 @@ pub fn run(home: &Path, opts: Opts) -> anyhow::Result<()> {
         if !rec.seen {
             spool.mark_seen(Dir::Inbox, id)?;
         }
+    }
+    Ok(())
+}
+
+/// The `--format claude` listing: framed question blocks (`consent` first), then the answers
+/// table, sections separated by one blank line; nothing for an empty listing.
+fn print_rendered(
+    home: &Path,
+    spool: &Spool,
+    book: &ContactBook,
+    records: &[(String, Record)],
+    now: u64,
+) -> anyhow::Result<()> {
+    let mut consent = Vec::new();
+    let mut questions = Vec::new();
+    let mut answers = Vec::new();
+    for (id, rec) in records {
+        let payload = payload_of(id, rec)?;
+        match &payload.body {
+            Body::Question { .. } => {
+                let draft = StoredDraft::from_record(id, rec)?;
+                let block = super::show::render_record(spool, book, rec, &payload, draft.as_ref());
+                if rec.state == "consent" {
+                    consent.push(block);
+                } else {
+                    questions.push(block);
+                }
+            }
+            Body::Answer { answer, .. } => {
+                let question_id = payload.in_reply_to.clone();
+                let question_first_line = question_id
+                    .as_deref()
+                    .and_then(|q| render::find_question(spool, q))
+                    .and_then(|q| match q.body {
+                        Body::Question { question, .. } => Some(question),
+                        Body::Answer { .. } => None,
+                    })
+                    .unwrap_or_default();
+                answers.push(AnswerRow {
+                    received_at: rec.received_at.clone(),
+                    fingerprint: payload.from.clone(),
+                    peer_name: peer_name(book, &payload.from),
+                    answer: answer.clone(),
+                    question_id,
+                    question_first_line,
+                });
+            }
+        }
+    }
+    let mut markers = Markers::load(home);
+    let table = render::answers_table(&answers, now, &mut markers);
+    markers.save(home)?;
+    let sections: Vec<String> = consent
+        .into_iter()
+        .chain(questions)
+        .chain((!table.is_empty()).then_some(table))
+        .collect();
+    if !sections.is_empty() {
+        println!("{}", sections.join("\n\n"));
     }
     Ok(())
 }
