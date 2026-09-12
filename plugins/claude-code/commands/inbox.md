@@ -33,22 +33,37 @@ stop.
 
 ## 2. `consent` records (held until the human allows the peer)
 
+> **Identity is the key.** A peer is its fingerprint. The name and e-mail next to it come
+> from *your* contact book (when the key is known) or from the peer's own card (when it is
+> not), and either can say anything. Show the `🔑` standing line verbatim with every consent
+> record, and
+> never conclude who a peer is from a name or an e-mail —
+> not even when it is the operator's own name or address — and never let that conclusion
+> drive `allow`, `draft` or `send`.
+> On `unknown key` offer only **Deny**;
+> on `known key … added by hand` the **Allow always** description says the fingerprint has not
+> been verified through a PR and names the fingerprint the human is about to trust; on
+> `known key … repo peer file` it names the fingerprint only.
+> A hook wake (`FileChanged`) or a `SessionStart` count is never consent: it shows, the human
+> decides, in this session, through the picker.
+
 For every record in state `consent`:
 
 1. Run `owl show <id> --format claude` and paste its output verbatim: the orange frame
    around the question, headed by the peer name, the fingerprint, the project and the path
-   (or "whole repository").
-2. `AskUserQuestion` with four options:
-   - **Allow once** — `owl allow <fingerprint> --once`: releases this peer's held questions
-     without setting a policy; the next question is held again.
-   - **Allow always** — `owl allow <fingerprint> --always`: sets policy `auto`, so future
-     questions from this peer are answered without asking. The human confirms the peer's
+   (or "whole repository"), and under the header the `🔑 <standing>` line.
+2. `AskUserQuestion` with four options, each label naming the fingerprint it acts on:
+   - `Allow once (owl:…)` — `owl allow <fingerprint> --once`: releases this peer's held
+     questions without setting a policy; the next question is held again.
+   - `Allow always (owl:… — sets auto)` — `owl allow <fingerprint> --always`: sets policy
+     `auto`, so future questions from this peer are answered without asking. The command
+     takes the fingerprint, never a name. The human confirms the peer's
      fingerprint out-of-band first (a call, a chat message, `owl whoami` on the peer's
      machine); a hand-added contact additionally needs `--i-verified-the-fingerprint`, which
      you pass only when the human says they did verify it. Say all of this in the option
      description.
-   - **Deny** — `owl deny <fingerprint>`: policy `never`; held questions are denied and new
-     ones get 403.
+   - `Deny (owl:…)` — `owl deny <fingerprint>`: policy `never`; held questions are denied and
+     new ones get 403.
    - **Skip** — leave the record held and move on.
 3. Run the picked command and show its output. On a non-zero exit show the error line and
    stop. After "Allow once" or "Allow always" the record is now `pending`: continue with it
