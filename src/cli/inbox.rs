@@ -1150,29 +1150,50 @@ mod tests {
     fn consent_prompt_names_peer_project_and_both_commands() {
         use owlpost::contacts::Contact;
         let q = Payload::question("FPA", "FPB", "github.com/x/y", Some("src/a.rs"), "why?");
-        let book = ContactBook {
+        let book = |name: &str, source: &str| ContactBook {
             contacts: vec![Contact {
-                name: "Ana".into(),
+                name: name.into(),
                 emails: vec![],
                 pubkey: "ed25519:x".into(),
                 endpoints: vec![],
-                source: "local".into(),
+                source: source.into(),
                 policy: None,
                 added_at: None,
                 fingerprint: "FPA".into(),
             }],
         };
+        let prompt = |standing: &str| {
+            format!(
+                "Ana wants to ask your agent about github.com/x/y — {standing} — owl allow FPA [--once|--always] / owl deny FPA"
+            )
+        };
+        // OWL-035 AC2: the standing sits between the project and the `owl allow` hint, in
+        // each of the three wordings of §1.
         assert_eq!(
-            consent_prompt(&book, &q),
-            "Ana wants to ask your agent about github.com/x/y — owl allow FPA [--once|--always] / owl deny FPA"
+            consent_prompt(&book("Ana", "local"), &q),
+            prompt("known key: contact \"Ana\" — repo peer file (.agents/peers/, reviewed in a PR)")
         );
-        // Unknown peer: the fingerprint stands in for the name.
+        assert_eq!(
+            consent_prompt(&book("Ana", "global"), &q),
+            prompt(
+                "known key: contact \"Ana\" — added by hand (global book; fingerprint not verified through a PR)"
+            )
+        );
+        // Unknown peer: the fingerprint stands in for the name, in the display and in the
+        // standing, which says the key is not in the book any more.
         assert_eq!(
             consent_prompt(&ContactBook::default(), &q),
-            "FPA wants to ask your agent about github.com/x/y — owl allow FPA [--once|--always] / owl deny FPA"
+            "FPA wants to ask your agent about github.com/x/y — unknown key: no longer in your contacts — deny, or re-add the peer file before allowing — owl allow FPA [--once|--always] / owl deny FPA"
+        );
+        // A bare policy overlay (empty name): the standing shows the fingerprint in place of
+        // the name. `<display>` is unchanged by OWL-035 (contact name, else fingerprint), so
+        // for a nameless contact it stays the empty name the book holds.
+        assert_eq!(
+            consent_prompt(&book("", "global"), &q),
+            " wants to ask your agent about github.com/x/y — known key: contact \"FPA\" — added by hand (global book; fingerprint not verified through a PR) — owl allow FPA [--once|--always] / owl deny FPA"
         );
         let a = Payload::answer(&q, "because", "fake", 0, false);
-        assert!(consent_prompt(&book, &a).contains("about ? —"));
+        assert!(consent_prompt(&book("Ana", "local"), &a).contains("about ? —"));
     }
 
     #[test]

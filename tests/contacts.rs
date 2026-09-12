@@ -1198,7 +1198,7 @@ fn allow_then_list_keeps_policy_for_name_after_owl_prefix() {
     let o = owl(
         &home,
         &cwd,
-        &["allow", "Pawel", "--always", "--i-verified-the-fingerprint"],
+        &["allow", &fp(5), "--always", "--i-verified-the-fingerprint"],
         None,
     );
     assert_eq!(o.status.code(), Some(0), "{}", err(&o));
@@ -1224,7 +1224,7 @@ fn contact_remove_after_allow_deletes_contact_and_overlay_in_both_scopes() {
     let o = owl(
         &home,
         &sub,
-        &["allow", "Pawel", "--always", "--i-verified-the-fingerprint"],
+        &["allow", &fp(5), "--always", "--i-verified-the-fingerprint"],
         None,
     );
     assert_eq!(o.status.code(), Some(0), "{}", err(&o));
@@ -1250,7 +1250,7 @@ fn contact_remove_after_allow_deletes_contact_and_overlay_in_both_scopes() {
     // Local: add --local → allow → remove --local.
     let o = owl(&home, &sub, &["add", &pawel, "--local"], None);
     assert_eq!(o.status.code(), Some(0), "{}", err(&o));
-    let o = owl(&home, &sub, &["allow", "Pawel", "--always"], None);
+    let o = owl(&home, &sub, &["allow", &fp(5), "--always"], None);
     assert_eq!(o.status.code(), Some(0), "{}", err(&o));
     assert!(overlay_path.exists());
     assert_eq!(
