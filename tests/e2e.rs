@@ -351,6 +351,9 @@ fn accepted_id(out: &str) -> String {
     out.trim()
         .strip_prefix("accepted ")
         .unwrap_or_else(|| panic!("ask stdout {out:?}"))
+        .split_whitespace()
+        .next()
+        .unwrap()
         .to_string()
 }
 

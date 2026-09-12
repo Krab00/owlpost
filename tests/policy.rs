@@ -79,6 +79,7 @@ fn put(home: &Path, from: &Identity, to: &Identity, text: &str, state: &str) -> 
             project,
             path,
             question,
+            ..
         } => envelope::question_hash(project, path.as_deref(), question),
         Body::Answer { .. } => unreachable!(),
     };
@@ -423,9 +424,10 @@ async fn deny_makes_peer_unavailable() {
     assert_eq!(resp.status(), 403);
     let denied_headers = resp.headers().clone();
     let denied_body = resp.bytes().await.unwrap();
+    // OWL-034 AC2: the 403 body names the A2A state too.
     assert_eq!(
         serde_json::from_slice::<Value>(&denied_body).unwrap(),
-        json!({ "error": "unavailable" })
+        json!({ "error": "unavailable", "state": "TASK_STATE_REJECTED" })
     );
     assert!(
         Spool::new(home)

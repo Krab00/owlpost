@@ -168,16 +168,93 @@ pub fn question_body<'a>(
             project,
             path,
             question,
+            ..
         } if payload.kind == Kind::Question => Ok((project, path.as_deref(), question)),
         _ => bail!("record {id} is an answer, not a question"),
     }
+}
+
+/// The `context` of a question record's payload (`None` for answers).
+pub fn question_context(payload: &Payload) -> Option<&str> {
+    match &payload.body {
+        Body::Question { context, .. } => context.as_deref(),
+        Body::Answer { .. } => None,
+    }
+}
+
+/// Every parseable record of `dir` whose payload carries thread `context_id`, except the one
+/// with id `except` (the record being looked at itself). Corrupt files are skipped.
+fn thread_records(
+    spool: &Spool,
+    dir: Dir,
+    context_id: &str,
+    except: &str,
+) -> Vec<(String, Record, Payload)> {
+    spool
+        .list_lenient(dir)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(id, _)| id != except)
+        .filter_map(|(id, rec)| {
+            let payload = payload_of(&id, &rec).ok()?;
+            (payload.context_id.as_deref() == Some(context_id)).then_some((id, rec, payload))
+        })
+        .collect()
+}
+
+/// True when `done/` holds an earlier exchange of thread `context_id` other than `except`
+/// (OWL-034): what the `↩ follow-up in thread` line and the prompt history key on. Signed
+/// content only — our own records, never the incoming payload's word.
+pub fn thread_has_earlier(spool: &Spool, context_id: &str, except: &str) -> bool {
+    !thread_records(spool, Dir::Done, context_id, except).is_empty()
+}
+
+/// True when `inbox/` or `done/` holds any record of thread `context_id` other than `except`:
+/// such a question is never served from or written to the responder cache (OWL-034).
+pub fn thread_known(spool: &Spool, context_id: &str, except: &str) -> bool {
+    thread_has_earlier(spool, context_id, except)
+        || !thread_records(spool, Dir::Inbox, context_id, except).is_empty()
+}
+
+/// How many earlier exchanges the prompt shows at most.
+pub const THREAD_HISTORY_MAX: usize = 3;
+
+/// The `(question, answer we sent)` pairs of thread `context_id` from our own `done/`
+/// question records other than `except`, the [`THREAD_HISTORY_MAX`] most recent, oldest
+/// first (OWL-034). A question whose answer record cannot be found is left out.
+pub fn thread_history(spool: &Spool, context_id: &str, except: &str) -> Vec<(String, String)> {
+    let mut pairs: Vec<(String, String, String, String)> =
+        thread_records(spool, Dir::Done, context_id, except)
+            .into_iter()
+            .filter_map(|(id, rec, payload)| {
+                let (_, _, question) = question_body(&id, &payload).ok()?;
+                let answer_id = rec.meta.get("answer_id").and_then(Value::as_str)?;
+                let answer = [Dir::Outbox, Dir::Done]
+                    .into_iter()
+                    .find_map(|d| spool.get(d, answer_id).ok().flatten())
+                    .and_then(|a| match payload_of(answer_id, &a).ok()?.body {
+                        Body::Answer { answer, .. } => Some(answer),
+                        Body::Question { .. } => None,
+                    })?;
+                Some((rec.received_at.clone(), id, question.to_string(), answer))
+            })
+            .collect();
+    // Chronological: `received_at` first, the (time-ordered UUIDv7) id as the tiebreak.
+    pairs.sort();
+    let skip = pairs.len().saturating_sub(THREAD_HISTORY_MAX);
+    pairs
+        .into_iter()
+        .skip(skip)
+        .map(|(_, _, q, a)| (q, a))
+        .collect()
 }
 
 /// Runs the responder for question `rec` (§3.4 steps 1–3) and returns the record with the
 /// draft stored on it (state `drafted`) plus the runner's verdict. Nothing is written: the
 /// caller decides whether the drafted record goes back to the spool (`owl draft` always does;
 /// the scheduler only when the status is `ok`). Runner errors (unknown project, unknown or
-/// disabled harness, executable missing) leave `rec` untouched.
+/// disabled harness, executable missing) leave `rec` untouched. The prompt carries the
+/// asker's `context` and the thread's earlier exchanges from `done/` (OWL-034, §10).
 pub fn draft(
     config: &Config,
     home: &Path,
@@ -187,7 +264,15 @@ pub fn draft(
 ) -> anyhow::Result<(Record, runner::Draft)> {
     let payload = payload_of(id, &rec)?;
     let (project, path, question) = question_body(id, &payload)?;
-    let d = runner::draft(config, home, harness, project, path, question)?;
+    let history = match payload.context_id.as_deref() {
+        Some(cid) => thread_history(&Spool::new(home)?, cid, id),
+        None => Vec::new(),
+    };
+    let extras = runner::Extras {
+        context: question_context(&payload),
+        history: &history,
+    };
+    let d = runner::draft_with(config, home, harness, project, path, question, &extras)?;
     rec.draft = Some(StoredDraft::from_runner(&d).to_value());
     rec.state = "drafted".into();
     // A fresh draft supersedes whatever the scheduler failed on; the inbox stops nagging.
@@ -327,6 +412,13 @@ pub fn send(
     }
     let (project, path, text) = question_body(id, &question)?;
     let hash = envelope::question_hash(project, path, text);
+    // A question with a context snippet, or one continuing a thread we already hold, is
+    // answered for that thread only: it never feeds the responder cache (OWL-034).
+    let cacheable = question_context(&question).is_none()
+        && !question
+            .context_id
+            .as_deref()
+            .is_some_and(|cid| thread_known(spool, cid, id));
 
     let (answer_id, answer_to) = match existing_answer(spool, id)? {
         Some((aid, ato)) => (aid, ato),
@@ -349,7 +441,9 @@ pub fn send(
                 meta: json!({ "peer": question.from, "question_id": id, "hash": hash }),
             };
             spool.put(Dir::Outbox, &answer.id, &out)?;
-            spool.cache_put(&hash, &out)?;
+            if cacheable {
+                spool.cache_put(&hash, &out)?;
+            }
             (answer.id, answer.to)
         }
     };

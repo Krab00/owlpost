@@ -1,11 +1,12 @@
 //! `owl show <id|all> [--format plain|claude|codex|kimi]`: the full question or answer, the
-//! draft when present; marks seen (§9). `--format claude|codex|kimi` prints the framed
-//! Markdown block instead (OWL-032, `owlpost::render`): a question in its orange frame, on
-//! a `consent` record with the fingerprint in the header; a drafted one followed by `draft:`,
-//! the draft in a plain text block, `harness: <name>` and the language note when the draft's
-//! language differs from the question's; an answer framed the same way, project and path
-//! taken from the question it replies to. `--json` wins over `--format`. Every shown record
-//! is released from the session wake routing (`owlpost::route`, OWL-033).
+//! draft when present; marks seen (§9). `--format claude|codex|kimi` prints the Markdown
+//! message table instead (OWL-032, OWL-035, `owlpost::render`): a question as a one-column
+//! table, on a `consent` record with the fingerprint in the header; a drafted one followed by
+//! `draft:`, the draft in a plain text block, `harness: <name>` and the language note when the
+//! draft's language differs from the question's; an answer as the same table, project and path
+//! taken from the question it replies to. The wake's instruction line (`owlpost::route`) is
+//! never printed here. `--json` wins over `--format`. Every shown record is released from the
+//! session wake routing (`owlpost::route`, OWL-033).
 
 use std::path::Path;
 
@@ -22,7 +23,7 @@ use super::{StoredDraft, kind_str, payload_of, peer_name, print_json, summary};
 pub fn run(home: &Path, id: &str, json: bool, format: Option<&str>) -> anyhow::Result<()> {
     let format = format.map(Format::parse).transpose()?;
     // `--json` wins: the json branch below is checked first.
-    let framed = matches!(format, Some(Format::Claude | Format::Codex | Format::Kimi));
+    let rendered = matches!(format, Some(Format::Claude | Format::Codex | Format::Kimi));
     let spool = Spool::new(home)?;
     let book = super::contact_book(home)?;
     let records: Vec<(String, Record)> = if id == "all" {
@@ -43,7 +44,7 @@ pub fn run(home: &Path, id: &str, json: bool, format: Option<&str>) -> anyhow::R
             v["payload"] = serde_json::to_value(&payload)?;
             v["draft"] = draft.as_ref().map_or(Value::Null, StoredDraft::to_value);
             out.push(v);
-        } else if framed {
+        } else if rendered {
             if i > 0 {
                 println!();
             }
@@ -69,11 +70,17 @@ pub fn run(home: &Path, id: &str, json: bool, format: Option<&str>) -> anyhow::R
                     project,
                     path,
                     question,
+                    context,
                 } => {
                     println!("project:  {project}");
                     println!("path:     {}", path.as_deref().unwrap_or("-"));
                     println!("question:");
                     println!("{question}");
+                    // OWL-034: the asker's snippet after the question, when it sent one.
+                    if let Some(ctx) = context {
+                        println!("context:");
+                        println!("{ctx}");
+                    }
                 }
                 Body::Answer {
                     answer,

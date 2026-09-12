@@ -84,12 +84,21 @@ directories or a `state` field update; either way a crash leaves a consistent fi
 3. Builds the question payload, signs it, and reaches the peer: **iroh first** (dial by the
    contact's key through the local daemon), then the contact's `endpoints` in order over
    mTLS (client cert = our key; server cert must match the peer's pinned pubkey).
-4. Responses: `200` with an answer payload (responder cache hit), `202 accepted` (queued for the
-   human or auto-accept), `403 unavailable` (never/disabled — same wording as offline), `429`
-   rate limited. Connection failure → "offline, try later". Nothing is queued locally.
+4. Responses: `200` with an answer payload (responder cache hit), `202 accepted` with the
+   question's A2A task state (queued for the human — `waiting for the owner's consent` — or
+   for the agent — `the owner's agent is answering`), `403 unavailable` (never/disabled — same
+   wording as offline), `429` rate limited. Connection failure → "offline, try later". Nothing
+   is queued locally. `owl ask` prints `accepted <id> — <state>`; `owl status` asks the peer
+   again later (`GET /v1/questions/{id}`).
 5. On `202`, an `asks/<id>.json` record is written so the daemon's pull loop knows whom to poll.
    With `--wait <secs>` the CLI polls the outbox itself for that long (useful for cache hits and
-   auto-accept peers, which answer in seconds).
+   auto-accept peers, which answer in seconds) and shows every state transition on the way
+   (`waiting for the owner's consent` → `the owner's agent is answering` → the answer, or
+   `declined by <name>`).
+6. Threads and context: `owl ask --reply-to <id>` continues an earlier exchange (the same
+   `context_id`; the responder's prompt then carries the thread's earlier questions and
+   answers from its own spool), `owl ask --context <file>` attaches the asker's snippet (a
+   diff, an error, an excerpt) as `body.context`. Neither is served from a cache.
 
 ### 3.2 Receive (daemon on B)
 
@@ -172,6 +181,7 @@ harness's native memory (Claude Code: auto-memory / `CLAUDE.md` as appropriate) 
 | Responder behind NAT, no `endpoints` | reached over iroh: direct after hole punching, else through the relay; same request, same statuses |
 | Relay unreachable / not configured (`relay_urls: []`) | iroh is dead for that pair; delivery falls back to `endpoints`, and with none the peer is offline |
 | Responder `never` / responder disabled | `403 unavailable`, wording identical to offline |
+| Responder declines (`owl deny`, `owl reject`) | the peer's Task turns `REJECTED` ("the owner declined"); the asker's pull loop, `owl status` or `owl ask --wait` closes the ask as `done/declined` and notifies `declined by <name>` — a declined question never waits forever |
 | Asker offline when the answer is produced | answer waits in the responder's outbox; asker's daemon pulls it when both are online |
 | Answer never pulled | expires from outbox after TTL; responder cache still answers a re-ask instantly |
 | Daemon crash mid-write | atomic file writes; at worst a message is re-processed, never half-written |

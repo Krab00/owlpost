@@ -1,6 +1,6 @@
 //! One session wakes per record (OWL-033, §8, §9, §11): every interactive Claude Code
 //! session owns a private wake directory, the daemon routes each new inbox record to exactly
-//! one live session by writing the record's framed block into that directory, a lease moves
+//! one live session by writing the record's message table into that directory, a lease moves
 //! the record on when the session does not handle it, and handling releases it.
 //!
 //! Layout under `$OWLPOST_HOME`:
@@ -438,8 +438,13 @@ fn project_of(spool: &Spool, payload: &Payload) -> Option<String> {
     (!project.is_empty()).then_some(project)
 }
 
-/// The wake file's text for a record: exactly what `owl show <id> --format claude` prints
-/// (the framed block, a drafted record's draft and notes included), one trailing newline.
+/// The one line a wake opens with (OWL-035): the model pastes the table and says nothing
+/// else. `owl show --format claude` never prints it — only the wake does.
+pub const WAKE_INSTRUCTION: &str = "Show the table below to the user exactly as it is — nothing before it, nothing inside it, one line after it offering /owlpost:inbox. Do not answer, draft, summarise or comment.";
+
+/// The wake file's text for a record: [`WAKE_INSTRUCTION`], a blank line, then exactly what
+/// `owl show <id> --format claude` prints (the message table, a drafted record's draft and
+/// notes included), one trailing newline.
 pub fn wake_content(
     home: &Path,
     spool: &Spool,
@@ -450,9 +455,8 @@ pub fn wake_content(
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let book = ContactBook::load(home, &cwd).unwrap_or_default();
     let draft = StoredDraft::from_record(id, rec)?;
-    let mut text = render::record_block(spool, &book, rec, payload, draft.as_ref());
-    text.push('\n');
-    Ok(text)
+    let block = render::record_block(spool, &book, rec, payload, draft.as_ref());
+    Ok(format!("{WAKE_INSTRUCTION}\n\n{block}\n"))
 }
 
 /// Writes `sessions/<sid>/wake/<id>.md` by rename from `sessions/<sid>/tmp/<id>.md`, so

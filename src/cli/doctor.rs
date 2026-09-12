@@ -24,6 +24,7 @@ use owlpost::envelope;
 use owlpost::identity::{self, Identity};
 use owlpost::pull::{self, STATUS_FILE};
 use owlpost::runner;
+use owlpost::server;
 use owlpost::tls;
 
 /// How long the card fetch may take before the daemon counts as unreachable.
@@ -332,9 +333,9 @@ pub fn daemon_check(home: &Path, id: Option<&Identity>) -> (Check, Option<Value>
     let target = connect_addr(addr);
     match fetch_card(target, id) {
         Ok(card) => {
-            let got = card
-                .get("owlpost")
-                .and_then(|o| o.get("fingerprint"))
+            // OWL-034: the fingerprint lives in the card's identity extension params.
+            let got = server::extension_params(&card, server::EXT_IDENTITY)
+                .and_then(|p| p.get("fingerprint"))
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_string();
@@ -367,31 +368,36 @@ fn short_id(pubkey: &str) -> String {
     }
 }
 
-/// `iroh`: from the card's `iroh` block — `ok iroh: <id short>, relay <url>` when the
-/// endpoint is connected to a relay, `warn iroh: bound, no relay` when it is not; `warn`
-/// too when the card was not fetched (the daemon line says why) or carries no endpoint.
+/// `iroh`: from the card (OWL-034: the `owl-iroh://` interface and the identity extension's
+/// `pubkey` / `relay` params) — `ok iroh: <id short>, relay <url>` when the endpoint is
+/// connected to a relay, `warn iroh: bound, no relay` when it is not; `warn` too when the
+/// card was not fetched (the daemon line says why) or lists no iroh interface.
 pub fn iroh_check(card: Option<&Value>) -> Check {
     let Some(card) = card else {
         return Check::warn("iroh", "unknown (daemon unreachable)");
     };
-    let Some(id) = card
-        .get("iroh")
-        .and_then(|i| i.get("id"))
-        .and_then(Value::as_str)
-    else {
+    let bound = card
+        .get("supportedInterfaces")
+        .and_then(Value::as_array)
+        .is_some_and(|ifs| {
+            ifs.iter().any(|i| {
+                i.get("url")
+                    .and_then(Value::as_str)
+                    .is_some_and(|u| u.starts_with("owl-iroh://"))
+            })
+        });
+    let params = server::extension_params(card, server::EXT_IDENTITY);
+    let id = params.and_then(|p| p.get("pubkey")).and_then(Value::as_str);
+    let (Some(id), true) = (id, bound) else {
         return Check::warn("iroh", "not bound");
     };
-    match card
-        .get("iroh")
-        .and_then(|i| i.get("relay"))
-        .and_then(Value::as_str)
-    {
+    match params.and_then(|p| p.get("relay")).and_then(Value::as_str) {
         Some(relay) => Check::ok("iroh", format!("{}, relay {relay}", short_id(id))),
         None => Check::warn("iroh", "bound, no relay"),
     }
 }
 
-fn fetch_card(target: SocketAddr, id: Option<&Identity>) -> anyhow::Result<Value> {
+pub(crate) fn fetch_card(target: SocketAddr, id: Option<&Identity>) -> anyhow::Result<Value> {
     let expected = id.map(|i| *i.verifying_key().as_bytes());
     let tls_cfg = tls::client_config(None, expected)?;
     let client = reqwest::Client::builder()
@@ -756,32 +762,45 @@ mod tests {
             .map(|b| format!("{b:02x}"))
             .collect();
         assert_eq!(hex.len(), 10);
-        let connected = serde_json::json!({
-            "owlpost": { "fingerprint": "owl:x" },
-            "iroh": { "id": pubkey, "relay": "http://127.0.0.1:3340/" }
-        });
+        // OWL-034: a 1.0 card — the iroh interface plus the identity extension params.
+        let card = |bound: bool, pubkey: serde_json::Value, relay: serde_json::Value| {
+            let mut ifs = vec![serde_json::json!({ "url": "https://h:1/" })];
+            if bound {
+                ifs.push(serde_json::json!({ "url": "owl-iroh://AAAA" }));
+            }
+            serde_json::json!({
+                "supportedInterfaces": ifs,
+                "capabilities": { "extensions": [
+                    { "uri": "urn:owlpost:ext:human-gate:v1", "params": { "responds": true } },
+                    { "uri": server::EXT_IDENTITY,
+                      "params": { "fingerprint": "owl:x", "pubkey": pubkey, "relay": relay } }
+                ] }
+            })
+        };
+        let connected = card(true, pubkey.clone().into(), "http://127.0.0.1:3340/".into());
         assert_eq!(
             iroh_check(Some(&connected)).line(),
             format!("ok   iroh: {hex}, relay http://127.0.0.1:3340/")
         );
-        let bound = serde_json::json!({ "iroh": { "id": pubkey, "relay": null } });
+        let bound = card(true, pubkey.clone().into(), serde_json::Value::Null);
         assert_eq!(
             iroh_check(Some(&bound)).line(),
             "warn iroh: bound, no relay"
         );
-        let no_relay_key = serde_json::json!({ "iroh": { "id": pubkey } });
-        assert_eq!(
-            iroh_check(Some(&no_relay_key)).line(),
-            "warn iroh: bound, no relay"
-        );
         // A relay that is not a string is no relay.
-        let odd = serde_json::json!({ "iroh": { "id": pubkey, "relay": 7 } });
+        let odd = card(true, pubkey.clone().into(), 7.into());
         assert_eq!(iroh_check(Some(&odd)).line(), "warn iroh: bound, no relay");
-        // No endpoint in the card (`iroh: null`, missing, or an id that is not a string).
+        // No iroh interface (outside the daemon), a pubkey that is not a string, no identity
+        // extension at all, or a card that is not an object: not bound.
         for card in [
-            serde_json::json!({ "iroh": null }),
-            serde_json::json!({ "owlpost": {} }),
-            serde_json::json!({ "iroh": { "id": 5, "relay": "x" } }),
+            card(
+                false,
+                pubkey.clone().into(),
+                "http://127.0.0.1:3340/".into(),
+            ),
+            card(true, 5.into(), "x".into()),
+            serde_json::json!({ "supportedInterfaces": [ { "url": "owl-iroh://AAAA" } ] }),
+            serde_json::json!({ "capabilities": { "extensions": [] } }),
             serde_json::json!([]),
         ] {
             assert_eq!(
@@ -795,7 +814,7 @@ mod tests {
             "warn iroh: unknown (daemon unreachable)"
         );
         // An unparseable id is shown as is rather than hidden.
-        let raw = serde_json::json!({ "iroh": { "id": "ed25519:AAAA", "relay": "r" } });
+        let raw = card(true, "ed25519:AAAA".into(), "r".into());
         assert_eq!(
             iroh_check(Some(&raw)).line(),
             "ok   iroh: ed25519:AAAA, relay r"
