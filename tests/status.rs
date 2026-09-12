@@ -7,14 +7,20 @@
 
 mod common;
 
-use std::net::TcpListener;
+use std::net::{SocketAddr, TcpListener};
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use axum::extract::{Path as AxPath, State};
+use axum::http::StatusCode;
+use axum::routing::get;
+use axum::{Json, Router};
+use axum_server::Handle;
+use axum_server::tls_rustls::{RustlsAcceptor, RustlsConfig};
 use common::{
-    PATH, PROJECT, Peer, TestDaemon, fp, id, policy, prepare_home_with, question, record,
+    PATH, PROJECT, Peer, TestDaemon, fp, id, key, policy, prepare_home_with, question, record,
     spawn_daemon, write_contact_full,
 };
 use owlpost::contacts::Mode;
@@ -55,6 +61,68 @@ fn counting_endpoint() -> (String, Arc<AtomicUsize>) {
         }
     });
     (addr, dials)
+}
+
+// ---- a peer whose Task route fails --------------------------------------------------------
+// The real daemon never answers `GET /v1/questions/{id}` with a `5xx`, so the non-offline
+// error arm of `owl status` needs a scripted peer: B's pinned mTLS, no route but the Task
+// one, a `500` for every fetch, and a server-side counter so no test has to infer the
+// client's dialling from timing.
+
+/// The `error` detail the failing peer returns, and what `client::fetch_task` turns it into
+/// (`error_message`: the status line plus the JSON `error` field).
+const TASK_FAILURE_DETAIL: &str = "the task store is down";
+const TASK_FAILURE: &str = "peer returned 500 Internal Server Error: the task store is down";
+
+struct FailingPeer {
+    id: Identity,
+    addr: SocketAddr,
+    fetches: Arc<AtomicUsize>,
+    handle: Handle<SocketAddr>,
+}
+
+impl FailingPeer {
+    /// How many `GET /v1/questions/{id}` this peer has served.
+    fn fetches(&self) -> usize {
+        self.fetches.load(Ordering::SeqCst)
+    }
+    fn shutdown(&self) {
+        self.handle.shutdown();
+    }
+}
+
+async fn failing_task(
+    State(fetches): State<Arc<AtomicUsize>>,
+    AxPath(_id): AxPath<String>,
+) -> (StatusCode, Json<Value>) {
+    fetches.fetch_add(1, Ordering::SeqCst);
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(serde_json::json!({ "error": TASK_FAILURE_DETAIL })),
+    )
+}
+
+/// A peer with `seed`'s identity that admits only `asker`'s key and fails every Task fetch.
+async fn spawn_failing_peer(seed: u8, asker: &Identity) -> FailingPeer {
+    let id = id(seed);
+    let allowed = [key(asker)].into_iter().collect();
+    let cfg = owlpost::tls::server_config(&id, allowed, false).unwrap();
+    let fetches = Arc::new(AtomicUsize::new(0));
+    let app = Router::new()
+        .route("/v1/questions/{id}", get(failing_task))
+        .with_state(Arc::clone(&fetches));
+    let handle = Handle::new();
+    let server = axum_server::bind("127.0.0.1:0".parse().unwrap())
+        .acceptor(RustlsAcceptor::new(RustlsConfig::from_config(cfg)))
+        .handle(handle.clone());
+    tokio::spawn(server.serve(app.into_make_service()));
+    let addr = handle.listening().await.expect("failing peer bound");
+    FailingPeer {
+        id,
+        addr,
+        fetches,
+        handle,
+    }
 }
 
 /// A's home: key and config, no contacts and no daemon of its own (so `owl status` reaches
@@ -433,4 +501,49 @@ fn ask_to_an_unknown_contact_says_so() {
         "waiting"
     );
     assert!(spool.get(Dir::Done, &q.id).unwrap().is_none());
+}
+
+/// AC4, the other side of the `offline` split: the peer is REACHABLE but its Task route
+/// fails. The peer's own error is printed instead of `offline`, the ask stays open, and —
+/// unlike `offline` — the verdict is not cached per peer, so every open ask is fetched.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failing_task_route_prints_the_error_and_is_not_cached_per_peer() {
+    let a = id(1);
+    let peer = spawn_failing_peer(4, &a).await;
+    let home = asker_home(&a);
+    contact(home.path(), &peer.id, "Bea", &peer.addr.to_string(), None);
+    let first = file_ask(home.path(), &a, &peer.id, "the first question");
+    let second = file_ask(home.path(), &a, &peer.id, "the second question");
+
+    let out = ok(&status(home.path(), &[]));
+    assert_eq!(data_rows(&out).len(), 2, "{out}");
+    for q in [&first, &second] {
+        let row = row_for(&out, &q.id);
+        assert_eq!(row[1], "Bea");
+        assert_eq!(row[2], PATH);
+        assert_eq!(row[3], TASK_FAILURE, "the peer's own error, not `offline`");
+    }
+    // The behavioural difference from `offline`: no per-peer short circuit, so the second
+    // ask was fetched too.
+    assert_eq!(peer.fetches(), 2, "one Task fetch per open ask");
+
+    let out = ok(&status(home.path(), &["--json"]));
+    for q in [&first, &second] {
+        assert_eq!(
+            element(&out, &q.id),
+            serde_json::json!({ "id": q.id, "peer": fp(&peer.id), "error": TASK_FAILURE })
+        );
+    }
+    assert_eq!(peer.fetches(), 4, "the `--json` run fetched both again");
+
+    // Nothing was closed: an error is not an answer.
+    let spool = Spool::new(home.path()).unwrap();
+    for q in [&first, &second] {
+        assert_eq!(
+            spool.get(Dir::Asks, &q.id).unwrap().unwrap().state,
+            "waiting"
+        );
+        assert!(spool.get(Dir::Done, &q.id).unwrap().is_none());
+    }
+    peer.shutdown();
 }

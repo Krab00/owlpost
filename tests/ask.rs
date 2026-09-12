@@ -2555,3 +2555,197 @@ async fn each_ask_mints_a_fresh_thread_id() {
     assert_ne!(threads[0], threads[1], "a fresh thread per ask");
     peer.shutdown();
 }
+
+/// [`ask_bounded`] with a question of its own, so a test can seed a second exchange whose
+/// hash differs from [`QUESTION`]'s.
+fn ask_q_bounded(home: &Path, question: &str, extra: &[&str], limit: Duration) -> Output {
+    let mut args: Vec<&str> = vec!["ask", "Bea", PATH, question, "--project", PROJECT];
+    args.extend_from_slice(extra);
+    owl_bounded(home, &args, limit)
+}
+
+/// AC3: both ERROR arms of `client::fetch_task` — a non-200/404 status and a `200` whose
+/// body is not a Task — are swallowed by `wait_for_answer` (`if let Ok(Some(task))`). The
+/// pinned behaviour: the wait is NOT aborted, no `<HH:MM>` transition line and no warning
+/// reach stderr, and the outbox poll still delivers the answer. The peer's own fetch counter
+/// proves the failing route was really reached, twice, before the answer arrived.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn wait_survives_both_error_arms_of_the_task_fetch() {
+    let a = id(1);
+    for (label, row) in [
+        // `status => bail!(error_message(status, …))`.
+        ("500", (500u16, json!({ "error": "task store is down" }))),
+        // The `200` arm with `Task::parse` → `None` → `task body is not an A2A Task`.
+        // `fake_task` fills in `id`, `contextId` and `status.message.messageId`, so the body
+        // does end up with a `status` object — but still no `status.state`, which is the one
+        // key `Task::parse` requires, so this genuinely fails to parse.
+        ("200-not-a-task", (200u16, json!({ "hello": "world" }))),
+    ] {
+        let peer = spawn_fake(
+            2,
+            &a,
+            FakeScript {
+                tasks: vec![row],
+                // Hold the answer back until the failing route has been hit twice.
+                answer_after_tasks: 2,
+                ..well_formed()
+            },
+        )
+        .await;
+        let home = home_for(&a, &peer);
+        let out = ask_bounded(home.path(), &["--wait", "20"], BOUND);
+        let (qid, _aid) = assert_answered_via_wait(&out, &peer, home.path());
+        let err = stderr(&out);
+        assert!(transitions(&err).is_empty(), "{label}: {err}");
+        // The whole of stderr is the accepted line: the error is swallowed without a word.
+        assert_eq!(
+            err.trim(),
+            format!("accepted {qid}; waiting up to 20s for an answer"),
+            "{label}"
+        );
+        assert_eq!(
+            peer.task_fetches(),
+            [qid.clone(), qid],
+            "{label}: the failing route was really called"
+        );
+        peer.shutdown();
+    }
+}
+
+/// AC5 (mutant M52 at `src/cli/ask.rs:232`): the inline-answer path writes the asker cache
+/// only for an UNTHREADED question. All three arms send the same `<project, path, question>`
+/// — neither `--context` nor `--reply-to` enters `question_hash` — so they share one hash
+/// and differ in exactly the one flag that makes the question threaded.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn inline_answer_caches_only_unthreaded_questions() {
+    let a = id(1);
+    let b = id(2);
+    // The peer answers every question straight away with a `200` out of its responder cache
+    // (§7: that cache is shared, so the body may answer C's earlier, equivalent question).
+    let c = id(3);
+    let earlier = Payload::question(&fp(&c), &fp(&b), PROJECT, Some(PATH), QUESTION);
+    let ans = Payload::answer(&earlier, "From the responder cache.", "fake", 1, false);
+    let env = Envelope::sign(&ans, &b);
+    let peer = spawn_fake(
+        2,
+        &a,
+        FakeScript {
+            accept: Some((200, env.raw.clone())),
+            accept_headers: vec![("x-owl-signature".to_string(), env.sig.clone())],
+            ..well_formed()
+        },
+    )
+    .await;
+    let hash = question_hash(PROJECT, Some(PATH), QUESTION);
+
+    // 1. Positive twin: a plain question answered inline IS cached.
+    let home = home_for(&a, &peer);
+    let spool = Spool::new(home.path()).unwrap();
+    let out = ask_bounded(home.path(), &[], BOUND);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(stdout(&out).trim(), "From the responder cache.");
+    assert_eq!(
+        spool.cache_get(&hash).unwrap().expect("plain: cached").raw,
+        env.raw
+    );
+
+    // 2. The same question with `--context` is NOT cached — while the rest of the inline
+    //    path still runs: the answer lands in `inbox/` and the ask in `done/` as `answered`.
+    let home = home_for(&a, &peer);
+    let spool = Spool::new(home.path()).unwrap();
+    let file = home.path().join("snippet.txt");
+    std::fs::write(&file, "let token = rotate(&t);").unwrap();
+    let out = ask_bounded(home.path(), &["--context", file.to_str().unwrap()], BOUND);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(stdout(&out).trim(), "From the responder cache.");
+    assert!(
+        ids(&spool, Dir::Cache).is_empty(),
+        "--context: the asker cache stays empty"
+    );
+    let ctx_qid = peer.questions().last().unwrap().id.clone();
+    assert_eq!(
+        question_context(peer.questions().last().unwrap()),
+        Some("let token = rotate(&t);"),
+        "the arm really was the threaded one"
+    );
+    let inbox = spool
+        .get(Dir::Inbox, &ans.id)
+        .unwrap()
+        .expect("answer in inbox");
+    assert_eq!(inbox.raw, env.raw);
+    assert_eq!(inbox.meta["hash"], hash.as_str());
+    assert_eq!(
+        spool.get(Dir::Done, &ctx_qid).unwrap().unwrap().state,
+        "answered"
+    );
+
+    // 3. `--reply-to` makes the question threaded the same way. The thread is seeded with a
+    //    DIFFERENT question, so its (unthreaded) answer caches under its own hash and leaves
+    //    `hash` untouched — the reply's absence from the cache is therefore its own doing.
+    let other = "Which module owns the refresh loop?";
+    let home = home_for(&a, &peer);
+    let spool = Spool::new(home.path()).unwrap();
+    let seed = ask_q_bounded(home.path(), other, &[], BOUND);
+    assert_eq!(seed.status.code(), Some(0), "{}", stderr(&seed));
+    let seed_qid = peer.questions().last().unwrap().id.clone();
+    let other_hash = question_hash(PROJECT, Some(PATH), other);
+    assert!(
+        spool.cache_get(&other_hash).unwrap().is_some(),
+        "the seed is unthreaded, so it is cached"
+    );
+    assert!(spool.cache_get(&hash).unwrap().is_none());
+    let out = ask_bounded(home.path(), &["--reply-to", &seed_qid], BOUND);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(stdout(&out).trim(), "From the responder cache.");
+    assert!(
+        spool.cache_get(&hash).unwrap().is_none(),
+        "--reply-to: the asker cache is not written"
+    );
+    assert_eq!(
+        ids(&spool, Dir::Cache),
+        [other_hash],
+        "only the unthreaded seed's entry"
+    );
+    let reply_qid = peer.questions().last().unwrap().id.clone();
+    assert_ne!(reply_qid, seed_qid);
+    assert_eq!(
+        spool.get(Dir::Done, &reply_qid).unwrap().unwrap().state,
+        "answered"
+    );
+    peer.shutdown();
+}
+
+/// AC5 (test-planner row 35): `--context` naming a file that does not exist fails in
+/// `read_context`, before the question is signed or sent — exit 1, the path and the IO
+/// reason on stderr, an untouched spool and a peer that saw nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn context_file_that_does_not_exist_sends_nothing() {
+    let a = id(1);
+    let peer = spawn_fake(2, &a, accepts_only(None)).await;
+    let home = home_for(&a, &peer);
+    let out = ask_bounded(
+        home.path(),
+        &["--context", "/no/such/file/anywhere.txt"],
+        BOUND,
+    );
+    let err = stderr(&out);
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert_eq!(
+        err.trim(),
+        "owl: reading /no/such/file/anywhere.txt: No such file or directory (os error 2)"
+    );
+    assert!(stdout(&out).is_empty(), "{}", stdout(&out));
+    assert!(
+        peer.questions().is_empty(),
+        "the failure is before the send"
+    );
+    let spool = Spool::new(home.path()).unwrap();
+    for dir in Dir::ALL {
+        assert!(
+            ids(&spool, dir).is_empty(),
+            "{} must stay empty",
+            dir.name()
+        );
+    }
+    peer.shutdown();
+}
