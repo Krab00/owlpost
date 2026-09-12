@@ -18,7 +18,7 @@ use crate::config::Config;
 use crate::contacts::{Contact, ContactBook};
 use crate::envelope::{self, Body, Envelope, Payload};
 use crate::identity::Identity;
-use crate::server::{AnswerIngested, AppState, on_answer_ingested};
+use crate::server::{AnswerIngested, AppState, DaemonEvent, Declined, on_pull_event};
 use crate::spool::{Dir, Record, Spool};
 
 /// `$OWLPOST_HOME/daemon.status`, rewritten after every loop.
@@ -99,6 +99,9 @@ pub struct OpenAsk {
     pub hash: String,
     /// Path the question was about (for the notification); `-` for a repo-level question.
     pub path: String,
+    /// The question carried a context snippet or continued a thread (`meta.threaded`,
+    /// OWL-034): its answer is stored but never written to the asker cache.
+    pub threaded: bool,
 }
 
 /// Parses one `asks/` record; `None` (warned) when `raw` is not a question payload.
@@ -114,6 +117,7 @@ pub fn open_ask(id: &str, rec: &Record) -> Option<OpenAsk> {
         project,
         path,
         question,
+        ..
     } = &payload.body
     else {
         tracing::warn!(id, "skipping ask: payload is not a question");
@@ -132,6 +136,11 @@ pub fn open_ask(id: &str, rec: &Record) -> Option<OpenAsk> {
         hash: meta_str("hash")
             .unwrap_or_else(|| envelope::question_hash(project, path.as_deref(), question)),
         path: path.clone().unwrap_or_else(|| "-".to_string()),
+        threaded: rec
+            .meta
+            .get("threaded")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
     })
 }
 
@@ -146,7 +155,8 @@ pub fn open_asks(spool: &Spool) -> anyhow::Result<BTreeMap<String, OpenAsk>> {
 }
 
 /// Verified answer → `inbox/<answer id>` (state `pending`, unseen, `meta = {peer, hash,
-/// in_reply_to}`) and the asker cache under `hash`.
+/// in_reply_to}`) and, when `cache` (the question was not threaded, OWL-034), the asker
+/// cache under `hash`.
 pub fn store_answer(
     spool: &Spool,
     env: &Envelope,
@@ -154,6 +164,7 @@ pub fn store_answer(
     peer: &str,
     hash: &str,
     question_id: &str,
+    cache: bool,
 ) -> anyhow::Result<()> {
     let rec = Record {
         raw: env.raw.clone(),
@@ -165,7 +176,10 @@ pub fn store_answer(
         meta: json!({ "peer": peer, "hash": hash, "in_reply_to": question_id }),
     };
     spool.put(Dir::Inbox, &answer.id, &rec)?;
-    spool.cache_put(hash, &rec)
+    if cache {
+        spool.cache_put(hash, &rec)?;
+    }
+    Ok(())
 }
 
 /// An answer that went through `ingest_envelope`.
@@ -238,6 +252,7 @@ pub fn ingest_envelope(
         &contact.fingerprint,
         &ask.hash,
         &ask.id,
+        !ask.threaded,
     )?;
     spool.move_to(Dir::Asks, &ask.id, Dir::Done)?;
     spool.set_state(Dir::Done, &ask.id, "answered")?;
@@ -257,9 +272,18 @@ fn claimed_id(env: &Envelope) -> String {
         .unwrap_or_else(|| "?".to_string())
 }
 
+/// Closes ask `id` as declined (OWL-034): the `asks/` record moves to `done/` with state
+/// `declined`. Move first, like the ack handler, so a failed move leaves the ask open.
+pub fn close_declined(spool: &Spool, id: &str) -> anyhow::Result<()> {
+    spool.move_to(Dir::Asks, id, Dir::Done)?;
+    spool.set_state(Dir::Done, id, "declined")
+}
+
 /// One pull over every responder with an open ask (iroh first, then `endpoints`, see
 /// `client`). Contacts are reloaded on each call so an endpoint edit is picked up without
-/// a restart. Returns the status to write.
+/// a restart. For every ask still open to a responder that was reached, the peer's Task
+/// is fetched too (OWL-034): a `REJECTED` one closes the ask as `done/declined` and
+/// reports `DaemonEvent::Declined`. Returns the status to write.
 #[allow(clippy::too_many_arguments)]
 pub fn pull_once(
     home: &Path,
@@ -269,7 +293,7 @@ pub fn pull_once(
     spool: &Spool,
     liveness: &mut Liveness,
     now: Instant,
-    mut on_answer: impl FnMut(AnswerIngested),
+    mut on_event: impl FnMut(DaemonEvent),
 ) -> anyhow::Result<PullStatus> {
     let mut open = open_asks(spool)?;
     let book = ContactBook::load(home, cwd)?;
@@ -322,16 +346,43 @@ pub fn pull_once(
                         }
                     }
                     open.remove(&ing.ask.id);
-                    on_answer(AnswerIngested {
+                    on_event(DaemonEvent::Answer(AnswerIngested {
                         id: ing.ask.id.clone(),
                         peer: peer.clone(),
                         path: ing.ask.path.clone(),
-                    });
+                    }));
                 }
                 Ok(Verdict::Forged | Verdict::Unrelated) => {}
                 Err(e) => {
                     tracing::warn!(peer, error = %format!("{e:#}"), "ingesting answer failed");
                 }
+            }
+        }
+        // The responder is online: ask it where every still-open ask stands (OWL-034). A
+        // fetch error is logged and the ask stays open; only `REJECTED` closes it.
+        let still_open: Vec<String> = open
+            .values()
+            .filter(|a| &a.peer == peer)
+            .map(|a| a.id.clone())
+            .collect();
+        for id in still_open {
+            match client::fetch_task(identity, contact, iroh, &id) {
+                Ok(Some(task)) if task.rejected() => match close_declined(spool, &id) {
+                    Ok(()) => {
+                        tracing::info!(peer, id, text = %task.text, "question declined");
+                        open.remove(&id);
+                        on_event(DaemonEvent::Declined(Declined {
+                            id,
+                            peer: peer.clone(),
+                        }));
+                    }
+                    Err(e) => {
+                        tracing::warn!(peer, id, error = %format!("{e:#}"), "closing declined ask failed")
+                    }
+                },
+                Ok(Some(task)) => tracing::debug!(peer, id, state = %task.state, "task state"),
+                Ok(None) => tracing::debug!(peer, id, "peer holds no task for the ask"),
+                Err(e) => tracing::warn!(peer, id, error = %format!("{e:#}"), "task fetch failed"),
             }
         }
     }
@@ -414,7 +465,7 @@ pub fn tick(state: &AppState, liveness: &mut Liveness) {
         &state.spool,
         liveness,
         Instant::now(),
-        |ev| on_answer_ingested(state, ev),
+        |ev| on_pull_event(state, ev),
     ) {
         Ok(status) => status,
         Err(e) => {
@@ -609,8 +660,19 @@ mod tests {
                 peer: "owl:override".into(),
                 hash: "h1".into(),
                 path: "src/x.rs".into(),
+                threaded: false,
             }
         );
+        // OWL-034: `meta.threaded` is read as a bool; anything else means not threaded.
+        let threaded = rec(
+            &env,
+            "waiting",
+            "2026-09-01T00:00:00Z",
+            json!({ "peer": "owl:override", "hash": "h1", "threaded": true }),
+        );
+        assert!(open_ask("q1", &threaded).unwrap().threaded);
+        let odd = rec(&env, "waiting", "x", json!({ "threaded": "yes" }));
+        assert!(!open_ask("q1", &odd).unwrap().threaded);
         // No meta at all: peer from `to`, hash recomputed.
         let bare = rec(&env, "waiting", "2026-09-01T00:00:00Z", Value::Null);
         let ask = open_ask("q1", &bare).unwrap();
@@ -638,6 +700,7 @@ mod tests {
             project: "proj".into(),
             path: None,
             question: "why?".into(),
+            context: None,
         };
         let env_np = Envelope::sign(&no_path, &a);
         let ask = open_ask("q2", &rec(&env_np, "waiting", "x", Value::Null)).unwrap();

@@ -52,6 +52,39 @@ pub fn frame(header: &str, text: &str) -> String {
     format!("{FRAME}\n{header}\n{}\n{FRAME}", text_block(text))
 }
 
+/// The line under the header of a question that continues a thread (OWL-034).
+pub fn follow_up_line(context_id: &str) -> String {
+    format!("↩ follow-up in thread {}", short_id(context_id))
+}
+
+/// `context:` and the asker's snippet in its own text block (OWL-034).
+pub fn context_block(context: &str) -> String {
+    format!("context:\n{}", text_block(context))
+}
+
+/// [`frame`] for a question: the [`follow_up_line`] under the header when `thread` is
+/// given, the [`context_block`] after the question when `context` is given.
+pub fn frame_question(
+    header: &str,
+    question: &str,
+    thread: Option<&str>,
+    context: Option<&str>,
+) -> String {
+    let mut out = format!("{FRAME}\n{header}\n");
+    if let Some(cid) = thread {
+        out.push_str(&follow_up_line(cid));
+        out.push('\n');
+    }
+    out.push_str(&text_block(question));
+    if let Some(ctx) = context {
+        out.push('\n');
+        out.push_str(&context_block(ctx));
+    }
+    out.push('\n');
+    out.push_str(FRAME);
+    out
+}
+
 /// `🦉 **<name>** · HH:MM · <project or "-"> · <path or "whole repository">`; with a
 /// fingerprint (a `consent` record) ` (<fingerprint>)` follows the bold name.
 pub fn header(
@@ -306,9 +339,16 @@ pub fn record_block(
             project,
             path,
             question,
+            context,
         } => {
             let head = header(&name, fingerprint, &hh_mm, project, path.as_deref());
-            let mut out = frame(&head, question);
+            // The follow-up line only when this thread has an earlier exchange of ours in
+            // `done/` (never trusting the payload's word for it).
+            let thread = payload
+                .context_id
+                .as_deref()
+                .filter(|cid| crate::answer::thread_has_earlier(spool, cid, &payload.id));
+            let mut out = frame_question(&head, question, thread, context.as_deref());
             if let Some(d) = draft {
                 out.push('\n');
                 out.push_str(&draft_block(&d.text));

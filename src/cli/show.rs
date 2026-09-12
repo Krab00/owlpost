@@ -69,11 +69,17 @@ pub fn run(home: &Path, id: &str, json: bool, format: Option<&str>) -> anyhow::R
                     project,
                     path,
                     question,
+                    context,
                 } => {
                     println!("project:  {project}");
                     println!("path:     {}", path.as_deref().unwrap_or("-"));
                     println!("question:");
                     println!("{question}");
+                    // OWL-034: the asker's snippet after the question, when it sent one.
+                    if let Some(ctx) = context {
+                        println!("context:");
+                        println!("{ctx}");
+                    }
                 }
                 Body::Answer {
                     answer,

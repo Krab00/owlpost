@@ -71,6 +71,8 @@ enum Cmd {
     Deny { peer: String },
     /// Send a question to a peer
     Ask(cli::ask::AskArgs),
+    /// Where every open question stands (the peer's task state), or one by id
+    Status { id: Option<String> },
     /// List or count inbox records
     Inbox {
         #[arg(long)]
@@ -403,6 +405,8 @@ fn main() -> ExitCode {
             cli::history::run(&home, cli::history::Filters { peer, path, since }, cli.json)
         }
         Cmd::Ask(args) => cli::ask::run(&home, args, cli.json, cli.quiet),
+        Cmd::Status { id } => cli::status::run(&home, id.as_deref(), cli.json),
+        Cmd::Card { peer } => cli::card::run(&home, peer.as_deref()),
         Cmd::Watch { id, timeout } => cli::watch::run(&home, id.as_deref(), timeout),
         Cmd::Install { dry_run } => {
             cli::install::owl_path().and_then(|owl| cli::install::install(&home, dry_run, &owl))
@@ -427,7 +431,6 @@ fn main() -> ExitCode {
         Cmd::Update { source, dry_run } => {
             cli::update::run_update(&home, source.as_deref(), dry_run)
         }
-        _ => Err(anyhow::anyhow!("not implemented yet")),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

@@ -100,6 +100,7 @@ pub fn run(home: &Path, filters: Filters, json: bool) -> anyhow::Result<()> {
                 project,
                 path,
                 question,
+                ..
             } => (
                 Some(project.as_str()),
                 path.as_deref().unwrap_or("-"),

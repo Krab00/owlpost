@@ -13,6 +13,8 @@ use crate::identity::{self, Identity};
 pub const REPLAY_WINDOW_SECS: u64 = 300;
 pub const SEEN_IDS_TTL_SECS: u64 = 600;
 const SEEN_IDS_FILE: &str = "seen-ids.txt";
+/// Largest `body.context` (the asker's snippet) after trimming, in bytes (OWL-034).
+pub const MAX_CONTEXT_BYTES: usize = 8192;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Payload {
@@ -24,6 +26,10 @@ pub struct Payload {
     pub to: String,
     pub ts: String,
     pub in_reply_to: Option<String>,
+    /// Thread id (A2A `contextId`, OWL-034): set by `owl ask`, copied by `--reply-to` and by
+    /// the answer. Omitted on the wire when absent; `null` reads as absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_id: Option<String>,
     pub body: Body,
 }
 
@@ -43,6 +49,10 @@ pub enum Body {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         path: Option<String>,
         question: String,
+        /// The asker's snippet (a diff, an error, an excerpt), ≤ `MAX_CONTEXT_BYTES` after
+        /// trimming; omitted on the wire when absent, `null` reads as absent (OWL-034).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context: Option<String>,
     },
     Answer {
         answer: String,
@@ -69,10 +79,12 @@ impl Payload {
             to: to.into(),
             ts: rfc3339_now(),
             in_reply_to: None,
+            context_id: None,
             body: Body::Question {
                 project: project.into(),
                 path: path.map(str::to_string),
                 question: question.into(),
+                context: None,
             },
         }
     }
@@ -93,6 +105,7 @@ impl Payload {
             to: question.from.clone(),
             ts: rfc3339_now(),
             in_reply_to: Some(question.id.clone()),
+            context_id: question.context_id.clone(),
             body: Body::Answer {
                 answer: answer.into(),
                 harness: harness.into(),
@@ -146,6 +159,58 @@ pub fn question_hash(project: &str, path: Option<&str>, question: &str) -> Strin
         .to_lowercase();
     let digest = Sha256::digest(format!("{project}\n{path}\n{norm}").as_bytes());
     digest.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// A2A 1.0 `TaskState` names the responder exposes (OWL-034). `INPUT_REQUIRED`,
+/// `AUTH_REQUIRED`, `CANCELED` and `FAILED` are never produced.
+pub const TASK_STATE_SUBMITTED: &str = "TASK_STATE_SUBMITTED";
+pub const TASK_STATE_WORKING: &str = "TASK_STATE_WORKING";
+pub const TASK_STATE_COMPLETED: &str = "TASK_STATE_COMPLETED";
+pub const TASK_STATE_REJECTED: &str = "TASK_STATE_REJECTED";
+
+/// `(A2A state, status.message text)` for a spooled question (OWL-034 state table):
+/// `consent` → SUBMITTED "waiting for the owner's consent"; `pending` → WORKING "the
+/// owner's agent is answering" (or, with `auto_error` — a draft timeout or runner error in
+/// auto mode — "the owner's agent could not answer; waiting for the owner"); `drafted` →
+/// WORKING "the owner is reviewing the answer"; `unacked` (outbox), `acked`, `expired`,
+/// `answered` → COMPLETED "answered"; `denied`, `rejected` → REJECTED "the owner declined";
+/// anything else (no record, `never` policy, responder disabled) → REJECTED "unavailable".
+pub fn a2a_state(spool_state: &str, auto_error: bool) -> (&'static str, &'static str) {
+    match spool_state {
+        "consent" => (TASK_STATE_SUBMITTED, "waiting for the owner's consent"),
+        "pending" if auto_error => (
+            TASK_STATE_WORKING,
+            "the owner's agent could not answer; waiting for the owner",
+        ),
+        "pending" => (TASK_STATE_WORKING, "the owner's agent is answering"),
+        "drafted" => (TASK_STATE_WORKING, "the owner is reviewing the answer"),
+        "unacked" | "acked" | "expired" | "answered" => (TASK_STATE_COMPLETED, "answered"),
+        "denied" | "rejected" => (TASK_STATE_REJECTED, "the owner declined"),
+        _ => (TASK_STATE_REJECTED, "unavailable"),
+    }
+}
+
+/// The words `owl ask` prints for a `202` body's `state` (the responder's own text is only
+/// on the Task): `None` for a state name this version does not know.
+pub fn state_text(state: &str) -> Option<&'static str> {
+    match state {
+        TASK_STATE_SUBMITTED => Some("waiting for the owner's consent"),
+        TASK_STATE_WORKING => Some("the owner's agent is answering"),
+        TASK_STATE_COMPLETED => Some("answered"),
+        TASK_STATE_REJECTED => Some("the owner declined"),
+        _ => None,
+    }
+}
+
+/// `context` trimmed, or an error naming its byte length when it exceeds
+/// [`MAX_CONTEXT_BYTES`]. Bytes, not characters: a Polish snippet counts its `ł` twice.
+pub fn check_context(context: &str) -> Result<&str, usize> {
+    let trimmed = context.trim();
+    if trimmed.len() > MAX_CONTEXT_BYTES {
+        Err(trimmed.len())
+    } else {
+        Ok(trimmed)
+    }
 }
 
 /// `|now − ts| ≤ window`. Unparsable `ts` is never fresh.
@@ -299,10 +364,12 @@ mod tests {
             to: "owl:bbbbbbbbbbbbbbbb".into(),
             ts: TS.into(),
             in_reply_to: None,
+            context_id: None,
             body: Body::Question {
                 project: "github.com/company/monorepo".into(),
                 path: Some("src/auth/session.rs".into()),
                 question: "Why is the refresh token rotated on every read?".into(),
+                context: None,
             },
         }
     }
@@ -463,6 +530,7 @@ mod tests {
             project: "github.com/company/monorepo".into(),
             path: None,
             question: "How long is your README?".into(),
+            context: None,
         };
         let json = String::from_utf8(q.to_signed_bytes()).unwrap();
         assert_eq!(
