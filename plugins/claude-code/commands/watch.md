@@ -8,7 +8,7 @@ Arguments: "$ARGUMENTS" — one of `on`, `off`, `status`; no argument means `sta
 
 The live watch is event-driven and needs nothing from you to run. The `SessionStart` hook
 registers this session's wake directory (`$OWLPOST_HOME/sessions/<session_id>/wake`) as a
-watch path and the `FileChanged` hook wakes the session with the framed message block when
+watch path and the `FileChanged` hook wakes the session with the message table when
 the daemon routes a record to it — exactly one session wakes per record (nothing happens
 when a record is only marked seen or moved away). The stored default lives in `$OWLPOST_HOME/plugin.json`
 as `{"watch": true|false}`; resolve the home as `${OWLPOST_HOME:-$HOME/.config/owlpost}`.
@@ -38,7 +38,7 @@ session start. This command only reads and writes that file — it never runs `o
 - The watch only counts: the hook runs `owl inbox --count`, which never marks records seen,
   and nothing runs owl show, owl draft or owl send because of a wake. Nothing is opened,
   drafted or sent without the human's pick.
-- When a wake lands, paste the framed message block it delivered verbatim and offer `/owlpost:inbox`;
-  then wait for the human.
+- When a wake lands, paste the message table it delivered verbatim and offer `/owlpost:inbox`;
+  then wait for the human. The rule: a peer's message is shown as the CLI prints it — nothing before it, nothing inside it, at most one line after it (the offer or the picker). Never summarise, translate, paraphrase or comment on it; the human reads it themselves.
 - Blocking on a single record (`owl watch [--id <id>] [--timeout <secs>]`, exit 4 on
   timeout) belongs in a terminal, not in this command.
