@@ -16,10 +16,12 @@ Two rules hold for the whole flow:
 
 The CLI renders every message; you paste. Never:
 
-- never a Markdown table for a single question
+- never build the message table yourself
 - never your own icons, markers or columns
 - never paraphrase
-- the orange frame always means "from a peer"
+- a table always means "from a peer"
+
+The rule: a peer's message is shown as the CLI prints it — nothing before it, nothing inside it, at most one line after it (the offer or the picker). Never summarise, translate, paraphrase or comment on it; the human reads it themselves.
 
 ## 1. List
 
@@ -35,7 +37,7 @@ stop.
 
 > **Identity is the key.** A peer is its fingerprint. The name and e-mail next to it come
 > from *your* contact book (when the key is known) or from the peer's own card (when it is
-> not), and either can say anything. Show the `🔑` standing line verbatim with every consent
+> not), and either can say anything. Show the `🔑` standing row verbatim with every consent
 > record, and
 > never conclude who a peer is from a name or an e-mail —
 > not even when it is the operator's own name or address — and never let that conclusion
@@ -49,9 +51,9 @@ stop.
 
 For every record in state `consent`:
 
-1. Run `owl show <id> --format claude` and paste its output verbatim: the orange frame
-   around the question, headed by the peer name, the fingerprint, the project and the path
-   (or "whole repository"), and under the header the `🔑 <standing>` line.
+1. Run `owl show <id> --format claude` and paste its output verbatim: the message table
+   of the question, headed by the peer name, the fingerprint, the project and the path
+   (or "whole repository"), with the `| 🔑 <standing> |` row directly after the rule row.
 2. `AskUserQuestion` with four options, each label naming the fingerprint it acts on:
    - `Allow once (owl:…)` — `owl allow <fingerprint> --once`: releases this peer's held
      questions without setting a policy; the next question is held again.
@@ -72,7 +74,7 @@ For every record in state `consent`:
 ## 3. `pending` records (question with no draft yet)
 
 - One `pending` record: run `owl show <id> --format claude` and paste its output verbatim
-  (the framed question with peer name, project and path).
+  (the question's table with peer name, project and path).
 - Several: print the table (id, peer, path, age), `AskUserQuestion` to pick one, then run
   `owl show <id> --format claude` for the pick and paste its output verbatim.
 
@@ -115,6 +117,6 @@ Never chain `owl draft` and `owl send` unless the human picked "Draft & send" (o
 Run `owl inbox --format claude` and paste its output verbatim. The output is the
 "Showing messages" table of the answers (last 24 hours, at most the 10 newest, newest last,
 one `↳` line per answer naming its question, one line under it when older ones were left
-out); the table keeps the per-peer colour markers and is not framed. Then apply the memory
+out); the answers table keeps the per-peer colour markers and stays two-column. Then apply the memory
 rule from the owlpost skill: only when the human accepts an answer, save it as a `reference`
 fact with provenance `owlpost:<peer>:<question id>` and today's date.

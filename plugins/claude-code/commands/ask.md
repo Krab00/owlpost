@@ -29,5 +29,8 @@ context so the peer's agent answers the question actually being asked.
    `owl ask ... --wait <secs>` only if the user wants to block (the wait prints each state
    change, and `declined by <name>` when the peer turns the question down); otherwise tell
    them the answer will show up in the inbox counter.
-4. When an answer arrives and the user accepts it, follow the memory rule from the owlpost
+4. When an answer arrives — through `--wait` or through a wake — show it with
+   `owl show <id> --format claude` and paste that output verbatim, then offer the next step
+   in one line. The rule: a peer's message is shown as the CLI prints it — nothing before it, nothing inside it, at most one line after it (the offer or the picker). Never summarise, translate, paraphrase or comment on it; the human reads it themselves.
+5. When the user accepts the answer, follow the memory rule from the owlpost
    skill: save it with provenance `owlpost:<peer>:<question id>` and today's date.

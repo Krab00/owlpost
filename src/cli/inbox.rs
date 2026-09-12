@@ -40,7 +40,7 @@
 //! outside or its stdout is closed.
 //!
 //! Listing with `--format claude|codex|kimi` (OWL-032) prints Markdown for the model to paste
-//! verbatim: every question as its framed block (`consent` ones first, then list order),
+//! verbatim: every question as its message table (`consent` ones first, then list order),
 //! then the answers table (`owlpost::render::answers_table`: last 24 h, the 10 newest,
 //! newest last, per-peer markers persisted in `$OWLPOST_HOME/markers.json`), one blank line
 //! between sections and nothing else; the consent prompts and `auto_error` notes of the plain
@@ -455,7 +455,7 @@ pub fn run(home: &Path, opts: Opts) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The `--format claude` listing: framed question blocks (`consent` first), then the answers
+/// The `--format claude` listing: one question table (`consent` first), then the answers
 /// table, sections separated by one blank line; nothing for an empty listing.
 fn print_rendered(
     home: &Path,
@@ -938,7 +938,7 @@ mod tests {
         std::fs::create_dir_all(route::wake_dir(home, "S10")).unwrap();
         std::fs::create_dir_all(home.join("sessions").join("S1").join("wake-evil")).unwrap();
         std::fs::create_dir_all(wake.join("nested")).unwrap();
-        let body = "🟧 line one\nline two\n\n";
+        let body = "| line one |\nline two\n\n";
         std::fs::write(wake.join("r.md"), body).unwrap();
         std::fs::write(route::wake_dir(home, "S10").join("r.md"), "other").unwrap();
         std::fs::write(

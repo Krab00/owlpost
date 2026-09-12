@@ -217,9 +217,10 @@ owl inbox
 Table of ID, FROM, TYPE, STATE, PATH, AGE. Listing marks records seen.
 A held question shows a line under the table, with the standing of the signing key in it —
 a name is a label, the key is the identity:
-`Ania wants to ask your agent about <project> — 🔑 known key: contact "Ania" — added by hand (global book; fingerprint not verified through a PR) — owl allow <fp> [--once|--always] / owl deny <fp>`.
-The framed block (`owl show <id> --format claude`) carries the same standing as a `🔑` line
-under the header.
+`Ania wants to ask your agent about <project> — known key: contact "Ania" — added by hand (global book; fingerprint not verified through a PR) — owl allow <fp> [--once|--always] / owl deny <fp>`.
+The message table (`owl show <id> --format claude`) carries the same standing as its first
+body row, directly after the rule row:
+`| 🔑 known key: contact "Ania" — added by hand (global book; fingerprint not verified through a PR) |`.
 `owl inbox --new` lists only unseen records; `owl inbox --count` prints the unseen count without
 marking anything.
 

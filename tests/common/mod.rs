@@ -19,8 +19,8 @@ use tempfile::TempDir;
 pub const PROJECT: &str = "github.com/company/monorepo";
 pub const PATH: &str = "src/auth/session.rs";
 
-/// OWL-035 §1: the `🔑` standing line a `consent` record carries for `name`, whose key is a
-/// hand-added (global) contact — the shape every integration fixture here produces
+/// OWL-036 §1: the `🔑` standing wording a `consent` record carries for `name`, whose key is
+/// a hand-added (global) contact — the shape every integration fixture here produces
 /// (`write_contact` writes `source: "global"`). One definition, so the three surfaces
 /// (`owl show --format claude`, `owl inbox --format claude`, the `owl route` wake file) are
 /// checked against the same bytes.
@@ -30,9 +30,11 @@ pub fn key_standing(name: &str) -> String {
     )
 }
 
-/// The `🔑` line itself, as it appears under the header of a framed `consent` block.
+/// The `🔑` row itself, as it appears in the message table of a `consent` record: the first
+/// body row, directly after the `|---|` rule (OWL-036 AC3). The three wordings contain no
+/// `|`, so nothing is escaped here.
 pub fn key_line(name: &str) -> String {
-    format!("🔑 {}", key_standing(name))
+    format!("| 🔑 {} |", key_standing(name))
 }
 
 /// The process-wide `OWLPOST_CLAUDE_HOME` (OWL-033): a temp dir with an empty `sessions/`,

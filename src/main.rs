@@ -101,7 +101,7 @@ enum Cmd {
     /// Full content of a record; marks it seen
     Show {
         id: String,
-        /// claude|codex|kimi: the framed Markdown block (plain = today's output)
+        /// claude|codex|kimi: the Markdown message table (plain = today's output)
         #[arg(long)]
         format: Option<String>,
     },

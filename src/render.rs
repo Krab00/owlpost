@@ -1,8 +1,10 @@
-//! Markdown rendering of peer messages for `--format claude|codex|kimi` (OWL-032, §9): the
-//! framed block `owl show <id> --format claude` prints, the answers table
-//! `owl inbox --format claude` prints, and the per-peer colour markers persisted in
-//! `$OWLPOST_HOME/markers.json`. The CLI renders, the model pastes — no template lives in
-//! prose. Free of CLI-only types so the daemon can write the same block into a wake file.
+//! Markdown rendering of peer messages for `--format claude|codex|kimi` (OWL-032, OWL-035,
+//! §9): the one-column message table `owl show <id> --format claude` prints, the answers
+//! table `owl inbox --format claude` prints, and the per-peer colour markers persisted in
+//! `$OWLPOST_HOME/markers.json`. A table is the only Markdown Claude Code highlights as a
+//! box, so every message from a peer is one — our own drafts stay a plain code block. The
+//! CLI renders, the model pastes — no template lives in prose. Free of CLI-only types so the
+//! daemon can write the same table into a wake file.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -13,9 +15,6 @@ use crate::answer::StoredDraft;
 use crate::contacts::{ContactBook, key_standing};
 use crate::envelope::{self, Body, Payload};
 use crate::spool::{Dir, Record, Spool};
-
-/// The top and bottom line of a framed message: exactly 16 × 🟧.
-pub const FRAME: &str = "🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧";
 
 /// Per-peer markers, assigned in order of first appearance, then repeating.
 pub const MARKERS: [&str; 6] = ["🟦", "🟩", "🟨", "🟪", "🟧", "🟥"];
@@ -37,19 +36,26 @@ pub fn older_line(n: usize) -> String {
 pub const LANGUAGE_NOTE: &str =
     "note: the draft is in a different language than the question — pick Edit";
 
-/// A ```` ```text ```` block around `text`, verbatim. The fence is one backtick longer than
-/// the longest backtick run inside the text (three at least), so a text containing three
-/// backticks is fenced with four. Trailing line breaks are dropped.
-pub fn text_block(text: &str) -> String {
-    let longest = text.split(|c| c != '`').map(str::len).max().unwrap_or(0);
-    let fence = "`".repeat(longest.max(2) + 1);
-    let body = text.trim_end_matches(['\r', '\n']);
-    format!("{fence}text\n{body}\n{fence}")
+/// The separator under the header of the one-column message table.
+pub const TABLE_RULE: &str = "|---|";
+
+/// The row that introduces the asker's snippet inside the message table (OWL-034).
+pub const CONTEXT_ROW_TEXT: &str = "**context:**";
+
+/// One line of a message as one table row: `| <line> |` with `|` escaped as `\|` and a
+/// trailing `\r` (a CRLF text) dropped; an empty line becomes `|  |`. Leading and inner
+/// whitespace is kept, and a ```` ``` ```` line is just a row — the table never fences.
+pub fn table_line(line: &str) -> String {
+    format!("| {} |", line.trim_end_matches('\r').replace('|', "\\|"))
 }
 
-/// [`FRAME`], `header`, the text block, [`FRAME`].
-pub fn frame(header: &str, text: &str) -> String {
-    format!("{FRAME}\n{header}\n{}\n{FRAME}", text_block(text))
+/// `text` as body rows, one per `\n`-separated line; trailing line breaks are dropped, so a
+/// text ending in a newline gets no extra empty row. Empty text is the single row `|  |`.
+pub fn text_rows(text: &str) -> Vec<String> {
+    text.trim_end_matches(['\r', '\n'])
+        .split('\n')
+        .map(table_line)
+        .collect()
 }
 
 /// The line under the header of a question that continues a thread (OWL-034).
@@ -57,32 +63,31 @@ pub fn follow_up_line(context_id: &str) -> String {
     format!("↩ follow-up in thread {}", short_id(context_id))
 }
 
-/// `context:` and the asker's snippet in its own text block (OWL-034).
-pub fn context_block(context: &str) -> String {
-    format!("context:\n{}", text_block(context))
-}
-
-/// [`frame`] for a question: the [`follow_up_line`] under the header when `thread` is
-/// given, the [`context_block`] after the question when `context` is given.
-pub fn frame_question(
+/// The one-column message table: the header row, [`TABLE_RULE`], the `🔑 <standing>` row when
+/// `standing` is given (OWL-036: a `consent` record says how its signing key got into the
+/// contact book, before anything the peer wrote), the [`follow_up_line`] when `thread` is
+/// given, one row per line of `text`, and — when `context` is given — [`CONTEXT_ROW_TEXT`]
+/// plus one row per snippet line after the body.
+pub fn message_table(
     header: &str,
-    question: &str,
+    text: &str,
+    standing: Option<&str>,
     thread: Option<&str>,
     context: Option<&str>,
 ) -> String {
-    let mut out = format!("{FRAME}\n{header}\n");
+    let mut rows = vec![table_line(header), TABLE_RULE.to_string()];
+    if let Some(standing) = standing {
+        rows.push(table_line(&format!("🔑 {standing}")));
+    }
     if let Some(cid) = thread {
-        out.push_str(&follow_up_line(cid));
-        out.push('\n');
+        rows.push(table_line(&follow_up_line(cid)));
     }
-    out.push_str(&text_block(question));
+    rows.extend(text_rows(text));
     if let Some(ctx) = context {
-        out.push('\n');
-        out.push_str(&context_block(ctx));
+        rows.push(table_line(CONTEXT_ROW_TEXT));
+        rows.extend(text_rows(ctx));
     }
-    out.push('\n');
-    out.push_str(FRAME);
-    out
+    rows.join("\n")
 }
 
 /// `🦉 **<name>** · HH:MM · <project or "-"> · <path or "whole repository">`; with a
@@ -110,9 +115,15 @@ pub fn local_hh_mm(rfc3339: &str) -> String {
     )
 }
 
-/// `draft:` and the draft in a plain text block — drafts are ours, never framed.
+/// `draft:` and the draft in a plain ```` ```text ```` block — a draft is our own text, so
+/// it never becomes a table; a table always means "from a peer". The fence is one backtick
+/// longer than the longest backtick run inside the text (three at least), so a draft
+/// containing three backticks is fenced with four; trailing line breaks are dropped.
 pub fn draft_block(text: &str) -> String {
-    format!("draft:\n{}", text_block(text))
+    let longest = text.split(|c| c != '`').map(str::len).max().unwrap_or(0);
+    let fence = "`".repeat(longest.max(2) + 1);
+    let body = text.trim_end_matches(['\r', '\n']);
+    format!("draft:\n{fence}text\n{body}\n{fence}")
 }
 
 // ponytail: Polish/English stopwords only — swap for a real detector when a third language
@@ -320,11 +331,11 @@ pub fn peer_name(book: &ContactBook, fp: &str) -> String {
 }
 
 /// The `--format claude` block for one record — what `owl show <id> --format claude` prints
-/// and what the daemon writes into a session's wake file (OWL-033): a question in its frame
-/// (the fingerprint in the header and the `🔑` key-standing line under it on a `consent`
-/// record), a drafted one followed by
-/// [`draft_block`], `harness: <name>` and the [`language_note`]; an answer framed the same
-/// way, project and path taken from the question it replies to.
+/// and what the daemon puts in a session's wake file (OWL-033): a question as its
+/// [`message_table`] (on a `consent` record the fingerprint in the header and the `🔑`
+/// key-standing row under the rule, OWL-036), a drafted one followed by [`draft_block`],
+/// `harness: <name>` and the [`language_note`]; an answer as the same table, project and
+/// path taken from the question it replies to.
 pub fn record_block(
     spool: &Spool,
     book: &ContactBook,
@@ -342,18 +353,22 @@ pub fn record_block(
             question,
             context,
         } => {
-            let mut head = header(&name, fingerprint, &hh_mm, project, path.as_deref());
-            // OWL-035: a consent record says how we know the signing key, right under the header.
-            if let Some(fp) = fingerprint {
-                head.push_str(&format!("\n🔑 {}", key_standing(book, fp).wording(fp)));
-            }
+            let head = header(&name, fingerprint, &hh_mm, project, path.as_deref());
+            // OWL-036: a consent record says how we know the signing key, in the first body row.
+            let standing = fingerprint.map(|fp| key_standing(book, fp).wording(fp));
             // The follow-up line only when this thread has an earlier exchange of ours in
             // `done/` (never trusting the payload's word for it).
             let thread = payload
                 .context_id
                 .as_deref()
                 .filter(|cid| crate::answer::thread_has_earlier(spool, cid, &payload.id));
-            let mut out = frame_question(&head, question, thread, context.as_deref());
+            let mut out = message_table(
+                &head,
+                question,
+                standing.as_deref(),
+                thread,
+                context.as_deref(),
+            );
             if let Some(d) = draft {
                 out.push('\n');
                 out.push_str(&draft_block(&d.text));
@@ -374,7 +389,13 @@ pub fn record_block(
                 Some(Body::Question { project, path, .. }) => (project.as_str(), path.as_deref()),
                 _ => ("-", None),
             };
-            frame(&header(&name, fingerprint, &hh_mm, project, path), answer)
+            message_table(
+                &header(&name, fingerprint, &hh_mm, project, path),
+                answer,
+                None,
+                None,
+                None,
+            )
         }
     }
 }
@@ -403,17 +424,17 @@ mod tests {
         }
     }
 
+    /// OWL-035 AC1: the header row, the rule and one row per message line — no frame and no
+    /// fence anywhere.
     #[test]
-    fn frame_is_sixteen_icons_header_and_fence() {
-        assert_eq!(FRAME.chars().count(), 16);
-        assert!(FRAME.chars().all(|c| c == '🟧'));
+    fn message_table_is_header_rule_and_one_row_per_line() {
         let h = header("Ana", None, "09:08", "github.com/x/y", None);
         assert_eq!(h, "🦉 **Ana** · 09:08 · github.com/x/y · whole repository");
-        let f = frame(&h, "Jaki masz ostatni commit?");
         assert_eq!(
-            f,
-            format!("{FRAME}\n{h}\n```text\nJaki masz ostatni commit?\n```\n{FRAME}")
+            message_table(&h, "Jaki masz ostatni commit?", None, None, None),
+            format!("| {h} |\n|---|\n| Jaki masz ostatni commit? |")
         );
+        assert_eq!(TABLE_RULE, "|---|");
         assert_eq!(
             header("Ana", Some("owl:abc"), "09:08", "p", Some("src/a.rs")),
             "🦉 **Ana** (owl:abc) · 09:08 · p · src/a.rs"
@@ -422,22 +443,98 @@ mod tests {
             header("Ana", None, "09:08", "", None),
             "🦉 **Ana** · 09:08 · - · whole repository"
         );
+        let t = message_table(&h, "a\n\nb", None, None, None);
+        assert_eq!(t, format!("| {h} |\n|---|\n| a |\n|  |\n| b |"));
+        assert!(!t.contains('🟧') && !t.contains("```"));
     }
 
+    /// OWL-035 AC1: escaping and line splitting — a pipe, a ``` line, a whitespace-only
+    /// line, a trailing newline, CRLF and multi-byte text.
     #[test]
-    fn fence_grows_past_backticks_in_the_text() {
-        assert_eq!(text_block("plain"), "```text\nplain\n```");
+    fn table_rows_escape_pipes_and_keep_every_line() {
+        assert_eq!(table_line("a|b"), "| a\\|b |");
+        assert_eq!(table_line("a|b|c"), "| a\\|b\\|c |");
+        assert_eq!(table_line(""), "|  |");
+        assert_eq!(table_line("   "), "|     |", "whitespace is kept");
+        assert_eq!(table_line("```"), "| ``` |", "a fence line is just a row");
+        assert_eq!(table_line("x\r"), "| x |", "a CRLF line drops the \\r");
+        assert_eq!(text_rows("one\ntwo"), ["| one |", "| two |"]);
+        assert_eq!(text_rows("one\r\ntwo"), ["| one |", "| two |"]);
+        assert_eq!(text_rows("one\n"), ["| one |"], "no extra empty row");
+        assert_eq!(text_rows("one\n\n\n"), ["| one |"]);
+        assert_eq!(text_rows(""), ["|  |"]);
+        assert_eq!(text_rows("\n\nmid\n"), ["|  |", "|  |", "| mid |"]);
+        assert_eq!(text_rows("Zażółć\ngęślą"), ["| Zażółć |", "| gęślą |"]);
+    }
+
+    /// OWL-035 AC2: the follow-up line is the first body row, the context rows come after
+    /// the body; neither appears when not given.
+    #[test]
+    fn follow_up_row_is_first_and_context_rows_are_last() {
+        let h = "🦉 **Ana** · 09:08 · p · src/a.rs";
+        let cid = "0192aaaa-bbbb-7ccc-8ddd-000000000042";
+        assert_eq!(follow_up_line(cid), "↩ follow-up in thread 00000042");
+        assert_eq!(CONTEXT_ROW_TEXT, "**context:**");
         assert_eq!(
-            text_block("has ``` inside"),
-            "````text\nhas ``` inside\n````"
+            message_table(h, "q1\nq2", None, Some(cid), Some("ctx|1\nctx2")),
+            format!(
+                "| {h} |\n|---|\n| ↩ follow-up in thread 00000042 |\n| q1 |\n| q2 |\n\
+                 | **context:** |\n| ctx\\|1 |\n| ctx2 |"
+            )
+        );
+        let bare = message_table(h, "q1", None, None, None);
+        assert!(
+            !bare.contains("follow-up") && !bare.contains("context"),
+            "{bare}"
+        );
+        assert_eq!(bare.lines().count(), 3);
+    }
+
+    /// OWL-036 AC3: the `🔑` standing row sits directly after the rule, before every other
+    /// body row (the follow-up line included) — and only when a standing is given.
+    #[test]
+    fn the_standing_row_is_the_first_body_row() {
+        let h = "🦉 **Ana** (owl:abc) · 09:08 · p · src/a.rs";
+        let cid = "0192aaaa-bbbb-7ccc-8ddd-000000000042";
+        let standing =
+            "known key: contact \"Ana\" — repo peer file (.agents/peers/, reviewed in a PR)";
+        assert_eq!(
+            message_table(h, "q1", Some(standing), Some(cid), Some("ctx")),
+            format!(
+                "| {h} |\n|---|\n| 🔑 {standing} |\n| ↩ follow-up in thread 00000042 |\n\
+                 | q1 |\n| **context:** |\n| ctx |"
+            )
+        );
+        let t = message_table(h, "q1", Some(standing), None, None);
+        assert_eq!(t.lines().nth(2).unwrap(), format!("| 🔑 {standing} |"));
+        assert_eq!(t.matches('🔑').count(), 1, "{t}");
+        assert!(
+            !message_table(h, "q1", None, None, None).contains('🔑'),
+            "no standing, no row"
+        );
+    }
+
+    /// OWL-035: a draft stays a plain code block whose fence grows past backticks in it.
+    #[test]
+    fn draft_block_stays_a_fenced_code_block() {
+        assert_eq!(draft_block("plain"), "draft:\n```text\nplain\n```");
+        assert_eq!(
+            draft_block("has ``` inside"),
+            "draft:\n````text\nhas ``` inside\n````"
         );
         assert_eq!(
-            text_block("has ```` inside"),
-            "`````text\nhas ```` inside\n`````"
+            draft_block("has ```` inside"),
+            "draft:\n`````text\nhas ```` inside\n`````"
         );
-        assert_eq!(text_block("one ` tick"), "```text\none ` tick\n```");
-        assert_eq!(text_block("trailing\n\n"), "```text\ntrailing\n```");
-        assert_eq!(draft_block("d"), "draft:\n```text\nd\n```");
+        assert_eq!(
+            draft_block("one ` tick"),
+            "draft:\n```text\none ` tick\n```"
+        );
+        assert_eq!(
+            draft_block("trailing\n\n"),
+            "draft:\n```text\ntrailing\n```"
+        );
+        assert!(!draft_block("d").contains('|'), "a draft is never a table");
     }
 
     #[test]

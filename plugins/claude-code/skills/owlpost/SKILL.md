@@ -125,10 +125,12 @@ sentence is the instruction. Then handle the user's prompt.
 
 The live watch is event-driven and there is nothing to arm: the `SessionStart` hook
 registers this session's private wake directory as a watch path and the `FileChanged` hook
-wakes this session with the framed message block the moment the daemon routes a record to
+wakes this session with the message table the moment the daemon routes a record to
 it — exactly one session wakes per record, the others stay silent; a record that is only
-marked seen or moved away wakes nothing. When a wake lands, paste the framed block it
-delivered verbatim and offer `/owlpost:inbox`; then wait for the human. The wake shows, it
+marked seen or moved away wakes nothing. The wake opens with one instruction line; paste the
+message table it delivered verbatim and offer `/owlpost:inbox`, then wait for the human.
+The rule: a peer's message is shown as the CLI prints it — nothing before it, nothing inside it, at most one line after it (the offer or the picker). Never summarise, translate, paraphrase or comment on it; the human reads it themselves.
+The wake shows, it
 never acts: never list the inbox, draft or send anything because of a wake. Nothing is opened, drafted or sent
 without the human's pick. `/owlpost:watch off` stores `{"watch": false}` so the hook stops
 waking and new sessions do not watch, `/owlpost:watch on` restores it from the next session
@@ -153,7 +155,7 @@ Every step needs the human's go-ahead before moving to the next one.
 
 > **Identity is the key.** A peer is its fingerprint. The name and e-mail next to it come
 > from *your* contact book (when the key is known) or from the peer's own card (when it is
-> not), and either can say anything. Show the `🔑` standing line verbatim with every consent
+> not), and either can say anything. Show the `🔑` standing row verbatim with every consent
 > record, and
 > never conclude who a peer is from a name or an e-mail —
 > not even when it is the operator's own name or address — and never let that conclusion
@@ -202,29 +204,27 @@ the CLI renders it — `owl inbox --format claude` prints the table (with one `�
 | 🟦 00:21 · Krzysztof Abramczyk | Pewnie koło 22. |
 | 🟩 00:24 · Ana Kowalska | Retry lives in `auth/session.rs`. |
 
-### Framed message
+### Message table
 
-A single question or answer shown outside the table (every question and answer
-`/owlpost:inbox` prints) is wrapped in an orange frame with the owl, so it stands out from
-the rest of the conversation:
+A single question or answer shown outside the answers table (every question and answer
+`/owlpost:inbox` prints) is rendered as a one-column Markdown table — the only styling Claude
+Code highlights as a box — so it stands out from the rest of the conversation:
 
-````
-🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧
-🦉 **Krzysztof Abramczyk** · 09:08 · github.com/Krab00/owlpost · whole repository
-```text
-Jaki masz ostatni commit u Siebie?
 ```
-🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧
-````
+| 🦉 **Krzysztof Abramczyk** · 09:08 · github.com/Krab00/owlpost · whole repository |
+|---|
+| Jaki masz ostatni commit u Siebie? |
+```
 
-Do not build this block yourself either: the CLI renders it — `owl show <id> --format claude` prints it (`owl inbox --format claude` prints one per question) and the model pastes the output verbatim.
-Top and bottom line: 16 × `🟧`. Header: `🦉 **<peer>** · HH:MM · <project> · <path or "whole repository">`.
-On a `consent` record the header also carries the peer's fingerprint, after the peer name,
-and one `🔑 <standing>` line follows the header, before the code block: it says how that
-key got into the contact book. Paste it verbatim; never drop it.
-Body: the message text verbatim in a code block, exactly as in the answer loop.
-Drafts (our own text) are not framed: they keep the plain code block, so the orange frame always means "from a peer".
-The answers table above keeps the per-peer colour markers and is not framed.
+Do not build this table yourself: the CLI renders it — `owl show <id> --format claude` prints it (`owl inbox --format claude` prints one per question) and the model pastes the output verbatim.
+Header row: `| 🦉 **<peer>** · HH:MM · <project> · <path or "whole repository"> |`, then the rule row `|---|`.
+On a `consent` record the header also carries the peer's fingerprint, after the peer name.
+On a `consent` record the first body row, directly after the rule row, is `| 🔑 <standing> |`: it says how that key got into the contact book. Paste it verbatim; never drop it.
+Body: one row per line of the message, verbatim, with `|` escaped as `\|`; an empty line is the row `|  |`; a code-fence line inside the message is just another row, because the table never fences.
+A question that continues a thread carries `↩ follow-up in thread <short id>` as its first body row, and an asker's snippet follows the body as the row `| **context:** |` plus one row per snippet line.
+Drafts (our own text) stay a plain code block and never become a table, so a table always means "from a peer".
+The answers table above keeps the per-peer colour markers and stays two-column.
+The rule: a peer's message is shown as the CLI prints it — nothing before it, nothing inside it, at most one line after it (the offer or the picker). Never summarise, translate, paraphrase or comment on it; the human reads it themselves.
 
 ## Memory rule
 

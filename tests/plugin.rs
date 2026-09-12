@@ -497,7 +497,7 @@ fn hook_script_via_env_i_registers_the_watch_and_wakes_on_add() {
     // A wake file lands in this session's dir (the daemon's `owl route`): `add` exits 2
     // with the file's content on stderr (the script re-adds the trailing newline it strips).
     let file = format!("{wake}/rec-1.md");
-    let body = "🟧🟧\n🦉 **Maciek** · 10:00 · p · src/a.rs\n```text\nwhy?\n```\n🟧🟧\n";
+    let body = "| 🦉 **Maciek** · 10:00 · p · src/a.rs |\n|---|\n| why? |\n";
     std::fs::write(&file, body).unwrap();
     let woke = run_hook_env_i(owl, home.path(), "FileChanged", &file_changed(&file, "add"));
     assert_eq!(woke.status.code(), Some(2), "{:?}", woke.status);
@@ -783,7 +783,7 @@ fn skill_has_frontmatter_and_required_strings() {
         "registers this session's private wake directory as a watch path and the `FileChanged` hook",
         "exactly one session wakes per record, the others stay silent",
         "marked seen or moved away wakes nothing",
-        "paste the framed block it",
+        "paste the\nmessage table it delivered verbatim",
         "offer `/owlpost:inbox`",
         "never list the inbox, draft or send anything because of a wake",
         "`/owlpost:watch off` stores `{\"watch\": false}`",
@@ -1852,21 +1852,23 @@ fn seed_home_for_smoke() {
     println!("expected hook output:\n{CLAUDE_TWO}");
 }
 
-// ---------- OWL-027: owl icon on the counter, orange frame on peer messages ----------
+// ---------- OWL-027/OWL-035: owl icon on the counter, message table for peer messages ----------
 
 /// The counter prefix, verbatim (AC1).
 const ICON: &str = "🦉 ";
-/// The 16 × 🟧 frame line, verbatim (AC2).
-const FRAME_LINE: &str = "🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧";
-const FRAME_HEADER: &str = "🦉 **<peer>** · HH:MM · <project> · <path or \"whole repository\">";
-const DRAFTS_NOT_FRAMED: &str = "Drafts (our own text) are not framed: they keep the plain code block, so the orange frame always means \"from a peer\".";
+/// The rule row of the one-column message table, verbatim (OWL-035 AC5).
+const RULE_ROW: &str = "|---|";
+/// The header row shape the skill documents (OWL-035 AC5).
+const TABLE_HEADER: &str =
+    "Header row: `| 🦉 **<peer>** · HH:MM · <project> · <path or \"whole repository\"> |`";
+const DRAFTS_NOT_A_TABLE: &str = "Drafts (our own text) stay a plain code block and never become a table, so a table always means \"from a peer\".";
 /// OWL-032: the CLI renders the block, the command says to paste it (was "print the framed
 /// message block (see the skill, ...)", which pointed at text the model never had in context).
-const FRAMED_REF: &str = "run `owl show <id> --format claude` and paste its output verbatim";
+const SHOW_REF: &str = "run `owl show <id> --format claude` and paste its output verbatim";
 const TABLE_REF: &str = "Run `owl inbox --format claude` and paste its output verbatim.";
 const OLD_PHRASE: &str = "in a code block with peer name";
-/// What a wake delivers since OWL-033: the framed block, pasted verbatim (`commands/watch.md`).
-const WATCH_EVENT: &str = "paste the framed message block it delivered verbatim";
+/// What a wake delivers since OWL-033: the message table, pasted verbatim (`commands/watch.md`).
+const WATCH_EVENT: &str = "paste the message table it delivered verbatim";
 
 /// `owl inbox --count --format <f>` against `home`, stdout as a string (exit 0).
 fn count(home: &Path, format: &str) -> String {
@@ -1947,65 +1949,58 @@ fn counter_wears_the_owl_icon_records_do_not() {
     assert_eq!(lines[3], "owlpost: run /owlpost:inbox now.");
 }
 
-/// AC2: SKILL.md "Showing messages" has the "Framed message" subsection: the 16 × 🟧 line,
-/// the header shape, the drafts-not-framed sentence and the fingerprint-on-consent rule.
+/// AC2 (OWL-035): SKILL.md "Showing messages" has the "Message table" subsection: the
+/// example table, the header-row shape, the drafts-stay-a-code-block sentence and the
+/// fingerprint-on-consent rule; nothing of the old orange frame is left.
 #[test]
-fn skill_documents_the_framed_message() {
+fn skill_documents_the_message_table() {
     let (_, body) = frontmatter("skills/owlpost/SKILL.md");
     let showing = section(&body, "## Showing messages");
-    let framed = showing
-        .find("\n### Framed message\n")
+    let table = showing
+        .find("\n### Message table\n")
         .map(|i| &showing[i..])
-        .expect("### Framed message under Showing messages");
-    assert_eq!(FRAME_LINE.chars().count(), 16);
+        .expect("### Message table under Showing messages");
+    assert!(
+        !body.contains("### Framed message") && !body.contains("🟧🟧"),
+        "the orange frame is gone from SKILL.md"
+    );
+    // The example is a real one-column table: header row, rule row, one body row.
+    let example: Vec<&str> = table
+        .lines()
+        .skip_while(|l| !l.starts_with("| 🦉 "))
+        .take(3)
+        .collect();
     assert_eq!(
-        framed.lines().filter(|l| *l == FRAME_LINE).count(),
-        2,
-        "top and bottom line, each exactly 16 × 🟧"
+        example[0],
+        "| 🦉 **Krzysztof Abramczyk** · 09:08 · github.com/Krab00/owlpost · whole repository |"
     );
+    assert_eq!(example[1], RULE_ROW);
+    assert_eq!(example[2], "| Jaki masz ostatni commit u Siebie? |");
     assert!(
-        framed
-            .lines()
-            .all(|l| !l.starts_with('🟧') || l == FRAME_LINE),
-        "a 🟧 line is the frame line, nothing shorter or longer"
-    );
-    // The example nests a ```text fence: the outer fence is four backticks so CommonMark
-    // fence parity holds for the rest of the file.
-    let example = format!("````\n{FRAME_LINE}\n");
-    assert!(framed.contains(&example), "outer fence must be ````");
-    let closing = format!("\n{FRAME_LINE}\n````\n");
-    assert!(
-        framed.contains(&closing),
-        "closing outer fence must be ````"
-    );
-    let three = format!("\n```\n{FRAME_LINE}\n🦉");
-    assert!(
-        !framed.contains(&three),
-        "a ``` fence must not open the example"
+        !table.contains("```text"),
+        "the example never fences the message: {table}"
     );
     for needle in [
-        "🦉 **Krzysztof Abramczyk** · 09:08 · github.com/Krab00/owlpost · whole repository",
-        "```text\nJaki masz ostatni commit u Siebie?\n```",
-        "Top and bottom line: 16 × `🟧`.",
-        FRAME_HEADER,
+        TABLE_HEADER,
         "On a `consent` record the header also carries the peer's fingerprint",
-        "Body: the message text verbatim in a code block",
-        "The answers table above keeps the per-peer colour markers and is not framed.",
+        "one row per line of the message, verbatim, with `|` escaped as `\\|`",
+        "an empty line is the row `|  |`",
+        "The answers table above keeps the per-peer colour markers and stays two-column.",
     ] {
-        assert!(framed.contains(needle), "Framed message lacks {needle:?}");
+        assert!(table.contains(needle), "Message table lacks {needle:?}");
     }
     assert!(
-        framed.lines().any(|l| l == DRAFTS_NOT_FRAMED),
-        "Framed message lacks the drafts-not-framed line"
+        table.lines().any(|l| l == DRAFTS_NOT_A_TABLE),
+        "Message table lacks the drafts-stay-a-code-block line"
     );
 }
 
-/// AC3: inbox.md steps 2 and 3 paste the rendered block, step 5 the rendered listing (the
+/// AC3: inbox.md steps 2 and 3 paste the rendered table, step 5 the rendered listing (the
 /// old "in a code block with peer name" phrase is gone from them), step 4 keeps the plain
-/// draft code block; watch.md says a wake delivers the framed block (OWL-033), never the
-/// icon-free counter event.
+/// draft code block; watch.md says a wake delivers the message table (OWL-033/OWL-035),
+/// never the icon-free counter event.
 #[test]
-fn inbox_steps_print_the_framed_block_and_watch_event_has_the_icon() {
+fn inbox_steps_print_the_message_table_and_watch_event_has_the_icon() {
     let (_, body) = frontmatter("commands/inbox.md");
     let step = |n: usize| {
         let start = body
@@ -2017,7 +2012,7 @@ fn inbox_steps_print_the_framed_block_and_watch_event_has_the_icon() {
     };
     for n in [2, 3, 5] {
         let s = step(n);
-        let want = if n == 5 { TABLE_REF } else { FRAMED_REF };
+        let want = if n == 5 { TABLE_REF } else { SHOW_REF };
         assert!(
             s.to_lowercase().contains(&want.to_lowercase()),
             "inbox.md step {n} lacks {want:?}"
@@ -2027,7 +2022,7 @@ fn inbox_steps_print_the_framed_block_and_watch_event_has_the_icon() {
             "inbox.md step {n} still says {OLD_PHRASE:?}"
         );
     }
-    assert!(step(3).contains(FRAMED_REF));
+    assert!(step(3).contains(SHOW_REF));
     assert!(step(2).contains("Run `owl show <id> --format claude` and paste its output verbatim"));
     assert!(
         step(2).contains("the fingerprint"),
@@ -2035,16 +2030,16 @@ fn inbox_steps_print_the_framed_block_and_watch_event_has_the_icon() {
     );
     let drafts = step(4);
     assert!(
-        !drafts.contains("framed"),
-        "step 4 (drafts) must stay unframed: {drafts}"
+        !drafts.contains("table"),
+        "step 4 (drafts) must stay a plain code block: {drafts}"
     );
     assert!(
         drafts
             .contains("then `draft:` with the draft in a plain code block and `harness: <name>`.")
     );
     assert!(
-        step(5).contains("is not framed"),
-        "answers table stays unframed"
+        step(5).contains("stays two-column"),
+        "the answers table keeps its own shape"
     );
 
     let (_, watch) = frontmatter("commands/watch.md");
@@ -2058,13 +2053,13 @@ fn inbox_steps_print_the_framed_block_and_watch_event_has_the_icon() {
     );
 }
 
-// ---------- OWL-032: the CLI renders the framed block ----------
+// ---------- OWL-032/OWL-035: the CLI renders the message table ----------
 
 /// AC6: end to end through the real binary — one consent question from a contact,
-/// `owl show <id> --format claude`: the first and last lines are 🟧 × 16 and the header
-/// starts with `🦉 **`.
+/// `owl show <id> --format claude`: the header row starts with `| 🦉 **`, row 2 is `|---|`,
+/// row 3 is the OWL-036 `🔑` standing row of that key and the question is one plain row.
 #[test]
-fn show_format_claude_frames_a_consent_question_end_to_end() {
+fn show_format_claude_tables_a_consent_question_end_to_end() {
     let home = home_with(1, false);
     let spool = Spool::new(home.path()).unwrap();
     let (id, _) = spool.list(Dir::Inbox, |_| true).unwrap().remove(0);
@@ -2077,12 +2072,22 @@ fn show_format_claude_frames_a_consent_question_end_to_end() {
     assert_eq!(out.status.code(), Some(0), "{:?}", out.status);
     let stdout = String::from_utf8(out.stdout).unwrap();
     let lines: Vec<&str> = stdout.lines().collect();
-    assert_eq!(lines.first().copied(), Some(FRAME_LINE), "{stdout}");
-    assert_eq!(lines.last().copied(), Some(FRAME_LINE), "{stdout}");
-    assert_eq!(FRAME_LINE.chars().filter(|c| *c == '🟧').count(), 16);
-    assert!(lines[1].starts_with("🦉 **Maciek** (owl:"), "{}", lines[1]);
+    assert_eq!(lines.len(), 4, "{stdout}");
     assert!(
-        stdout.contains("```text\nwhy does session 0 retry?\n```"),
+        lines[0].starts_with("| 🦉 **Maciek** (owl:"),
+        "{}",
+        lines[0]
+    );
+    assert!(lines[0].ends_with(" |"), "{}", lines[0]);
+    assert_eq!(lines[1], RULE_ROW, "{stdout}");
+    assert_eq!(
+        lines[2],
+        "| 🔑 known key: contact \"Maciek\" — added by hand (global book; fingerprint not verified through a PR) |",
+        "the standing row directly after the rule: {stdout}"
+    );
+    assert_eq!(lines[3], "| why does session 0 retry? |", "{stdout}");
+    assert!(
+        !stdout.contains('🟧') && !stdout.contains("```"),
         "{stdout}"
     );
     assert!(
@@ -2219,12 +2224,12 @@ fn plugin_pins_identity_is_the_key() {
     for needle in IDENTITY_RULE {
         on_one_line("SKILL.md consent step", consent_step, needle);
     }
-    // The `🔑` line is part of the framed block the model pastes.
-    let framed = section(&skill, "## Showing messages");
+    // The `🔑` row is part of the message table the model pastes.
+    let table = section(&skill, "## Showing messages");
     on_one_line(
         "SKILL.md",
-        framed,
-        "one `🔑 <standing>` line follows the header, before the code block",
+        table,
+        "the first body row, directly after the rule row, is `| 🔑 <standing> |`",
     );
 
     let (_, inbox) = frontmatter("commands/inbox.md");
@@ -2238,6 +2243,11 @@ fn plugin_pins_identity_is_the_key() {
     ] {
         on_one_line("commands/inbox.md", &inbox, label);
     }
+    on_one_line(
+        "commands/inbox.md",
+        &inbox,
+        "with the `| 🔑 <standing> |` row directly after the rule row",
+    );
 
     let (_, allow) = frontmatter("commands/allow.md");
     on_one_line(

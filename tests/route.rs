@@ -177,7 +177,7 @@ fn age_of(stamp: &str) -> u64 {
 // ---------------------------------------------------------------- AC3: route
 
 /// AC3: S1 (the record's checkout, older heartbeat) beats S2 (elsewhere, newer heartbeat);
-/// the wake file lands under S1 only and holds the framed block; the routing names S1 with
+/// the wake file lands under S1 only and holds the instruction line + the message table; the routing names S1 with
 /// `tried = [S1]`. Routing again skips S1 (tried) and picks S2; a third time nothing is left:
 /// `current = null`, nothing written. Both sides of rule 1 are canonicalised: the marker's cwd
 /// is a symlink to the checkout, and a config mapping through a symlink matches a canonical cwd.
@@ -195,10 +195,22 @@ fn route_prefers_the_affine_session_then_the_newest_heartbeat_and_skips_tried() 
     assert_eq!(h.route(&id).as_deref(), Some("S1"));
     let wake = h.wake("S1", &id);
     let text = std::fs::read_to_string(&wake).unwrap();
-    assert!(text.starts_with("🟧"), "{text}");
-    assert!(text.contains(QUESTION), "{text}");
+    // OWL-035 AC4: the instruction line, a blank line, then the one-column message table.
+    assert_eq!(text.lines().next(), Some(route::WAKE_INSTRUCTION), "{text}");
+    assert_eq!(text.matches(route::WAKE_INSTRUCTION).count(), 1, "{text}");
+    assert_eq!(text.lines().nth(1), Some(""), "{text}");
+    assert!(
+        text.lines().nth(2).unwrap().starts_with("| 🦉 "),
+        "the header row follows the blank line: {text}"
+    );
+    assert_eq!(text.lines().nth(3), Some("|---|"), "{text}");
+    assert!(text.contains(&format!("| {QUESTION} |")), "{text}");
     assert!(text.contains("Maciek"), "{text}");
-    assert!(text.ends_with("🟧\n"), "one trailing newline: {text:?}");
+    assert!(!text.contains('🟧') && !text.contains("```"), "{text}");
+    assert!(
+        text.ends_with(&format!("| {QUESTION} |\n")),
+        "one trailing newline: {text:?}"
+    );
     assert_eq!(h.wake_names("S1"), vec![format!("{id}.md")]);
     assert_eq!(h.wake_names("S2"), Vec::<String>::new(), "nothing under S2");
     assert!(
@@ -945,10 +957,10 @@ fn lease_tick_skips_malformed_records_and_keeps_going() {
     assert!(h.spool().path(Dir::Inbox, bad_json).is_file());
 }
 
-/// OWL-035 AC3: the wake file `owl route` writes for a *held* question carries the same one
-/// `🔑 <standing>` line the two CLI surfaces print, between the header and the code block —
-/// the three surfaces share `render::record_block`, so this pins the bytes. A `pending`
-/// record routed the same way has no `🔑` line.
+/// OWL-036 AC3: the wake file `owl route` writes for a *held* question carries the same one
+/// `| 🔑 <standing> |` row the two CLI surfaces print, directly after the `|---|` rule of the
+/// message table — the three surfaces share `render::record_block`, so this pins the bytes.
+/// A `pending` record routed the same way has no `🔑` row.
 #[test]
 fn the_wake_file_of_a_consent_record_carries_the_key_standing_line() {
     let h = Home::new();
@@ -956,12 +968,16 @@ fn the_wake_file_of_a_consent_record_carries_the_key_standing_line() {
     let held = h.put_in_state("Held one?", "consent");
     assert_eq!(h.route(&held).as_deref(), Some("S1"));
     let text = std::fs::read_to_string(h.wake("S1", &held)).unwrap();
+    // The instruction line and its blank line come first (OWL-035), then the table.
     let lines: Vec<&str> = text.lines().collect();
-    assert!(lines[1].starts_with("🦉 **Maciek** (owl:"), "{text}");
-    assert_eq!(lines[2], common::key_line("Maciek"), "{text}");
-    assert_eq!(lines[3], "```text", "{text}");
+    assert_eq!(lines[0], route::WAKE_INSTRUCTION, "{text}");
+    assert_eq!(lines[1], "", "{text}");
+    assert!(lines[2].starts_with("| 🦉 **Maciek** (owl:"), "{text}");
+    assert_eq!(lines[3], "|---|", "{text}");
+    assert_eq!(lines[4], common::key_line("Maciek"), "{text}");
+    assert_eq!(lines[5], "| Held one? |", "{text}");
     assert_eq!(text.matches('🔑').count(), 1, "{text}");
-    // The negative twin: same peer, same project, already released — no `🔑` line.
+    // The negative twin: same peer, same project, already released — no `🔑` row.
     let pending = h.put("Not held?");
     assert_eq!(h.route(&pending).as_deref(), Some("S1"));
     let text = std::fs::read_to_string(h.wake("S1", &pending)).unwrap();
