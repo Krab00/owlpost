@@ -714,3 +714,107 @@ async fn peer_status_via_forward_is_final() {
     a.running.shutdown();
     b.running.shutdown();
 }
+
+/// OWL-034 AC2, over iroh: `GET /v1/questions/{id}` is served on the iroh listener (a direct
+/// request from the asker's key) and reached through the daemon's forward route — `owl status`
+/// on a home whose contact book holds no `host:port` prints the peer's own words. Another
+/// pinned key asking for the same id, and an unknown id, are `404` there too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn task_route_over_iroh_and_the_forward_route() {
+    let (relay_url, _relay) = relay().await;
+    let checkout = tempfile::tempdir().unwrap();
+    std::fs::write(checkout.path().join("README.md"), "fixture\n").unwrap();
+    let (a_id, b_id, c_id) = (id(1), id(2), id(3));
+    let b = spawn_responder(Some(&relay_url), &a_id, checkout.path()).await;
+    // Cid is pinned on B as well, so the 404 below is about WHOSE question it is, not about
+    // an unknown key (which would be refused at the handshake instead).
+    write_contact(
+        b.home(),
+        &Peer::new(&c_id, "Cid", Some(policy(Mode::Manual, None))),
+    );
+    let a = spawn_asker(Some(&relay_url), &b_id, &[]).await;
+    wait_online(&a).await;
+    wait_online(&b).await;
+    let book = ContactBook::load(a.home(), a.home()).unwrap();
+    assert!(
+        book.resolve("Bea").unwrap().endpoints.is_empty(),
+        "the premise: no host:port for Bea, so everything below travels over iroh"
+    );
+
+    let qid = accepted_id(&ask(a.home()));
+    wait_for("the question in B's inbox", || {
+        state(&b.spool(), Dir::Inbox, &qid).as_deref() == Some("consent")
+    });
+
+    // --- through the forward route: `owl status` from A's home.
+    let out = ok(&owl(a.home()).args(["status"]).output().unwrap());
+    let row = out
+        .lines()
+        .find(|l| l.starts_with(&qid))
+        .unwrap_or_else(|| panic!("no row for {qid} in:\n{out}"));
+    assert!(
+        row.contains("waiting for the owner's consent"),
+        "the peer's own words, fetched over iroh: {row}"
+    );
+
+    // --- straight at B's iroh listener, as A.
+    let a_ep = owl_iroh::endpoint(&a_id, Some(std::slice::from_ref(&relay_url)))
+        .await
+        .unwrap();
+    let reply = request(
+        &a_ep,
+        &b,
+        &relay_url,
+        Method::GET,
+        &format!("/v1/questions/{qid}"),
+        vec![],
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(reply.status, 200);
+    let task: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+    assert_eq!(task["id"], qid);
+    assert_eq!(task["status"]["state"], "TASK_STATE_SUBMITTED");
+    assert_eq!(
+        task["status"]["message"]["parts"][0]["text"],
+        "waiting for the owner's consent"
+    );
+    assert_eq!(task["metadata"]["owlpost"]["from"], fp(&a_id));
+
+    // Cid, pinned but not the asker, gets 404 for the very same id.
+    let c_ep = owl_iroh::endpoint(&c_id, Some(std::slice::from_ref(&relay_url)))
+        .await
+        .unwrap();
+    let reply = request(
+        &c_ep,
+        &b,
+        &relay_url,
+        Method::GET,
+        &format!("/v1/questions/{qid}"),
+        vec![],
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(error_of(&reply), (404, "not found".to_string()));
+
+    // An id nobody asked: 404 for the asker too.
+    let reply = request(
+        &a_ep,
+        &b,
+        &relay_url,
+        Method::GET,
+        "/v1/questions/0191c7a0-0000-7000-8000-0000000000ff",
+        vec![],
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(error_of(&reply), (404, "not found".to_string()));
+
+    a_ep.close().await;
+    c_ep.close().await;
+    a.running.shutdown();
+    b.running.shutdown();
+}

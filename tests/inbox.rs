@@ -3149,3 +3149,166 @@ fn send_releases_the_wake() {
     assert!(h.done(&id).is_some());
     h.assert_released(&id, "send");
 }
+
+// ---------------------------------------------------------------- OWL-034
+
+/// A signed question from `from` to `to` carrying an optional thread id and context.
+fn threaded_question(
+    from: &Identity,
+    to: &Identity,
+    text: &str,
+    context_id: Option<&str>,
+    context: Option<&str>,
+) -> Envelope {
+    let mut p = question(from, to, text);
+    p.context_id = context_id.map(str::to_string);
+    if let Body::Question { context: slot, .. } = &mut p.body {
+        *slot = context.map(str::to_string);
+    }
+    Envelope::sign(&p, from)
+}
+
+/// OWL-034 AC5 (rendering): `owl show <id>` prints the asker's snippet as a `context:`
+/// block after the question, in plain output and in the `--format claude` frame, and only
+/// when the question carries one. The `↩ follow-up in thread <short id>` line appears in
+/// the framed block exactly when `done/` holds an earlier exchange of the same thread —
+/// never on the payload's word alone.
+#[test]
+fn show_prints_the_context_block_and_the_follow_up_line() {
+    let h = Home::new();
+    const CID: &str = "0191c7a0-0000-7000-8000-00000000beef";
+    const SNIPPET: &str = "error[E0499]: cannot borrow `*self` as mutable\n  --> src/x.rs:12:9";
+    let with = h.put_env(
+        &threaded_question(
+            &h.maciek,
+            &h.me,
+            "Why does this fail?",
+            Some(CID),
+            Some(SNIPPET),
+        ),
+        "consent",
+    );
+    // The negative twin differs only in the context: same peer, same thread, same state.
+    let without = h.put_env(
+        &threaded_question(&h.maciek, &h.me, "And why here?", Some(CID), None),
+        "consent",
+    );
+
+    // --- plain: `context:` follows the question, each on its own line.
+    let out = h.ok(&["show", &with]);
+    let q_at = out.find("question:\n").expect("question line");
+    let c_at = out
+        .find("context:\n")
+        .unwrap_or_else(|| panic!("no context block in:\n{out}"));
+    assert!(q_at < c_at, "context comes after the question:\n{out}");
+    assert!(out.contains(&format!("context:\n{SNIPPET}\n")), "{out}");
+    let plain_without = h.ok(&["show", &without]);
+    assert!(
+        !plain_without.contains("context:"),
+        "no context block without a context:\n{plain_without}"
+    );
+
+    // --- framed: the snippet sits in its own ```text block titled `context:`.
+    let framed = h.ok(&["show", &with, "--format", "claude"]);
+    assert!(
+        framed.contains(&format!("context:\n```text\n{SNIPPET}\n```")),
+        "{framed}"
+    );
+    let framed_without = h.ok(&["show", &without, "--format", "claude"]);
+    assert!(!framed_without.contains("context:"), "{framed_without}");
+
+    // --- the follow-up line needs an earlier exchange of OUR OWN in `done/`.
+    let follow = format!("↩ follow-up in thread {}", &CID[CID.len() - 8..]);
+    assert!(
+        !framed.contains(&follow),
+        "no earlier exchange yet, so no follow-up line:\n{framed}"
+    );
+    // An earlier exchange of the SAME thread, finished.
+    h.put_done(
+        &threaded_question(&h.maciek, &h.me, "The first question", Some(CID), None),
+        "answered",
+    );
+    let framed = h.ok(&["show", &with, "--format", "claude"]);
+    assert!(framed.contains(&follow), "{framed}");
+    // It sits on the line right under the header, above the question's text block.
+    let lines: Vec<&str> = framed.lines().collect();
+    let at = lines
+        .iter()
+        .position(|l| *l == follow)
+        .expect("follow line");
+    assert!(
+        lines[at - 1].starts_with("🦉 "),
+        "under the header: {framed}"
+    );
+    assert_eq!(
+        lines[at + 1],
+        "```text",
+        "above the question block: {framed}"
+    );
+
+    // A `done/` exchange of a DIFFERENT thread does not produce the line: a third record
+    // whose only difference is its thread id.
+    let other = Home::new();
+    const OTHER_CID: &str = "0191c7a0-0000-7000-8000-0000000000aa";
+    let q = other.put_env(
+        &threaded_question(
+            &other.maciek,
+            &other.me,
+            "Why does this fail?",
+            Some(CID),
+            None,
+        ),
+        "consent",
+    );
+    other.put_done(
+        &threaded_question(&other.maciek, &other.me, "Unrelated", Some(OTHER_CID), None),
+        "answered",
+    );
+    let framed = other.ok(&["show", &q, "--format", "claude"]);
+    assert!(
+        !framed.contains("↩ follow-up in thread"),
+        "another thread's record must not count:\n{framed}"
+    );
+
+    // A question with NO thread id at all never gets the line either.
+    let bare = other.put_env(
+        &threaded_question(&other.maciek, &other.me, "No thread", None, None),
+        "consent",
+    );
+    let framed = other.ok(&["show", &bare, "--format", "claude"]);
+    assert!(!framed.contains("↩ follow-up in thread"), "{framed}");
+}
+
+/// OWL-034: the same framed block through `owl inbox --format claude` (the listing, not the
+/// counter) — the follow-up line and the context block travel with it.
+#[test]
+fn inbox_listing_frames_the_thread_and_the_context() {
+    let h = Home::new();
+    const CID: &str = "0191c7a0-0000-7000-8000-00000000cafe";
+    const SNIPPET: &str = "fn main() { todo!() }";
+    h.put_done(
+        &threaded_question(&h.maciek, &h.me, "The first question", Some(CID), None),
+        "answered",
+    );
+    h.put_env(
+        &threaded_question(
+            &h.maciek,
+            &h.me,
+            "And the second?",
+            Some(CID),
+            Some(SNIPPET),
+        ),
+        "pending",
+    );
+    let out = h.ok(&["inbox", "--format", "claude"]);
+    let follow = format!("↩ follow-up in thread {}", &CID[CID.len() - 8..]);
+    assert!(out.contains(&follow), "{out}");
+    assert!(
+        out.contains(&format!("context:\n```text\n{SNIPPET}\n```")),
+        "{out}"
+    );
+    assert!(
+        out.find(&follow) < out.find("And the second?"),
+        "the line precedes the question text:\n{out}"
+    );
+}
