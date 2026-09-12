@@ -63,7 +63,12 @@ pub struct AskArgs {
 /// `done/` question we sent, or an answer we received (`inbox/` or `done/`). Exit 1 for an
 /// unknown id (`no exchange <id>`), an exchange with another peer (`<id> was asked to
 /// <name>, not <peer>`) or one that carries no thread id.
-pub fn thread_of(spool: &Spool, book: &ContactBook, id: &str, contact: &Contact) -> anyhow::Result<String> {
+pub fn thread_of(
+    spool: &Spool,
+    book: &ContactBook,
+    id: &str,
+    contact: &Contact,
+) -> anyhow::Result<String> {
     let found = [Dir::Asks, Dir::Done, Dir::Inbox]
         .into_iter()
         .find_map(|d| spool.get(d, id).ok().flatten())

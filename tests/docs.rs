@@ -921,7 +921,10 @@ fn a2a_docs_pin_card_task_state_thread_and_context() {
         "to the 3 most recent `done/` questions of this machine that share the incoming question's",
         "`rest` ∈ `v1/questions`, `v1/questions/{id}`, `v1/outbox`, `v1/outbox/{id}/ack`",
     ] {
-        assert!(design.contains(needle), "technical-design.md lacks {needle:?}");
+        assert!(
+            design.contains(needle),
+            "technical-design.md lacks {needle:?}"
+        );
     }
     let arch = repo_file("docs/architecture.md");
     for needle in [
@@ -941,11 +944,22 @@ fn a2a_docs_pin_card_task_state_thread_and_context() {
     ] {
         assert!(guide.contains(needle), "guide.md lacks {needle:?}");
     }
-    assert!(!guide.contains("not implemented yet"), "owl card exists now");
+    assert!(
+        !guide.contains("not implemented yet"),
+        "owl card exists now"
+    );
     let concept = repo_file("docs/concept.md");
     assert!(concept.contains("- **A2A for people, not an A2A server** (2026-09-12)"));
-    assert!(concept.contains("We do not become an A2A server for stock clients: no JSON-RPC binding"));
+    assert!(
+        concept.contains("We do not become an A2A server for stock clients: no JSON-RPC binding")
+    );
     let readme = readme();
-    assert!(readme.contains("While you wait, `owl status` tells you where each question stands in the peer's words"));
-    assert!(readme.contains("`owl ask --reply-to <id>` continues a thread and `--context <file>` attaches"));
+    assert!(readme.contains(
+        "While you wait, `owl status` tells you where each question stands in the peer's words"
+    ));
+    assert!(
+        readme.contains(
+            "`owl ask --reply-to <id>` continues a thread and `--context <file>` attaches"
+        )
+    );
 }

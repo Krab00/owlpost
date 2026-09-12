@@ -2100,28 +2100,70 @@ fn ask_documents_reply_to_and_context_and_status_wraps_owl_status() {
         fm_value(&fm, "argument-hint"),
         Some("\"<peer> [path] <question...>\"")
     );
-    assert!(ask.contains("`--reply-to <id>` continues an earlier exchange with that peer"), "{ask}");
+    assert!(
+        ask.contains("`--reply-to <id>` continues an earlier exchange with that peer"),
+        "{ask}"
+    );
     assert!(ask.contains("`--context <path>`"), "{ask}");
-    assert!(ask.contains("attaches that file (a diff, an error, an excerpt; at most 8192 bytes)"), "{ask}");
-    assert!(ask.contains("append `--reply-to <id>` and `--context <path>` when given"), "{ask}");
+    assert!(
+        ask.contains("attaches that file (a diff, an error, an excerpt; at most 8192 bytes)"),
+        "{ask}"
+    );
+    assert!(
+        ask.contains("append `--reply-to <id>` and `--context <path>` when given"),
+        "{ask}"
+    );
     assert!(ask.contains("`accepted <id> — <state>`"), "{ask}");
     let (fm, status) = frontmatter("commands/status.md");
     assert_eq!(fm_value(&fm, "allowed-tools"), Some("Bash(owl status:*)"));
     assert_eq!(fm_value(&fm, "argument-hint"), Some("\"[<id>]\""));
     assert!(status.contains("Run `owl status $ARGUMENTS`"), "{status}");
-    assert!(status.contains("`ID  PEER  PATH  STATE  SINCE`"), "{status}");
-    assert!(status.contains("`waiting for the\nowner's consent`") || status.contains("waiting for the"), "{status}");
-    assert!(status.contains("Exit code 4 means\nthere are no open questions") || status.contains("Exit code 4"), "{status}");
+    assert!(
+        status.contains("`ID  PEER  PATH  STATE  SINCE`"),
+        "{status}"
+    );
+    assert!(
+        status.contains("`waiting for the\nowner's consent`") || status.contains("waiting for the"),
+        "{status}"
+    );
+    assert!(
+        status.contains("Exit code 4 means\nthere are no open questions")
+            || status.contains("Exit code 4"),
+        "{status}"
+    );
     assert!(command_names().contains(&"status".to_string()));
     assert!(help_subcommands(&[]).contains(&"status".to_string()));
     let (_, skill) = frontmatter("skills/owlpost/SKILL.md");
-    assert!(mentions_command(&skill, "status"), "SKILL.md lacks /owlpost:status");
-    assert!(skill.contains("owl ask <peer> --reply-to <id> \"<question>\""), "{skill}");
-    assert!(skill.contains("owl ask <peer> --context <file> \"<question>\""), "{skill}");
+    assert!(
+        mentions_command(&skill, "status"),
+        "SKILL.md lacks /owlpost:status"
+    );
+    assert!(
+        skill.contains("owl ask <peer> --reply-to <id> \"<question>\""),
+        "{skill}"
+    );
+    assert!(
+        skill.contains("owl ask <peer> --context <file> \"<question>\""),
+        "{skill}"
+    );
     assert!(skill.contains("owl status [<id>]"), "{skill}");
-    assert!(skill.contains("Follow up with `--reply-to <id>`"), "{skill}");
-    assert!(skill.contains("with `--context <file>` (or `--context -` from stdin)"), "{skill}");
+    assert!(
+        skill.contains("Follow up with `--reply-to <id>`"),
+        "{skill}"
+    );
+    assert!(
+        skill.contains("with `--context <file>` (or `--context -` from stdin)"),
+        "{skill}"
+    );
     let readme = read("README.md");
-    assert!(readme.contains("| `/owlpost:status [id]` | `commands/status.md` | `owl status`"), "{readme}");
-    assert!(readme.contains("`--reply-to <id>` continues a thread, `--context <path>` attaches a snippet"), "{readme}");
+    assert!(
+        readme.contains("| `/owlpost:status [id]` | `commands/status.md` | `owl status`"),
+        "{readme}"
+    );
+    assert!(
+        readme.contains(
+            "`--reply-to <id>` continues a thread, `--context <path>` attaches a snippet"
+        ),
+        "{readme}"
+    );
 }

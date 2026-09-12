@@ -334,9 +334,7 @@ pub fn card_json(state: &AppState) -> Value {
     } else {
         state.config.name.clone()
     };
-    let interface = |url: String| {
-        json!({ "url": url, "protocolBinding": PROTOCOL_BINDING, "protocolVersion": "1" })
-    };
+    let interface = |url: String| json!({ "url": url, "protocolBinding": PROTOCOL_BINDING, "protocolVersion": "1" });
     let mut interfaces = vec![interface(format!("https://{host}/"))];
     // The iroh endpoint id is the identity key, so the interface names the pubkey.
     let relay = state.iroh.get().map(|ep| {
@@ -1211,7 +1209,10 @@ mod tests {
             ident["fingerprint"],
             identity::fingerprint(&id.verifying_key())
         );
-        assert_eq!(ident["pubkey"], identity::pubkey_string(&id.verifying_key()));
+        assert_eq!(
+            ident["pubkey"],
+            identity::pubkey_string(&id.verifying_key())
+        );
         assert_eq!(ident["relay"], Value::Null);
         let repo = extension_params(&card, EXT_REPO_QUESTION).unwrap();
         assert_eq!(repo["projects"], json!(["github.com/x/y"]));
@@ -1237,7 +1238,10 @@ mod tests {
         assert_eq!(card["defaultOutputModes"], json!(["text/plain"]));
         assert_eq!(card["skills"][0]["id"], "ask-about-repo");
         assert_eq!(card["skills"][0]["name"], "Ask about my code");
-        assert_eq!(card["skills"][0]["tags"], json!(["code", "repository", "q&a"]));
+        assert_eq!(
+            card["skills"][0]["tags"],
+            json!(["code", "repository", "q&a"])
+        );
         assert_eq!(card["skills"].as_array().unwrap().len(), 1);
         assert_eq!(card["version"], env!("CARGO_PKG_VERSION"));
         for gone in ["url", "protocolVersion", "owlpost", "iroh"] {
@@ -1336,7 +1340,11 @@ mod tests {
             "auto_error only matters while pending"
         );
         for s in ["unacked", "acked", "expired", "answered"] {
-            assert_eq!(a2a_state(s, false), (TASK_STATE_COMPLETED, "answered"), "{s}");
+            assert_eq!(
+                a2a_state(s, false),
+                (TASK_STATE_COMPLETED, "answered"),
+                "{s}"
+            );
         }
         for s in ["denied", "rejected"] {
             assert_eq!(

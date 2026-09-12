@@ -223,21 +223,22 @@ pub const THREAD_HISTORY_MAX: usize = 3;
 /// question records other than `except`, the [`THREAD_HISTORY_MAX`] most recent, oldest
 /// first (OWL-034). A question whose answer record cannot be found is left out.
 pub fn thread_history(spool: &Spool, context_id: &str, except: &str) -> Vec<(String, String)> {
-    let mut pairs: Vec<(String, String, String, String)> = thread_records(spool, Dir::Done, context_id, except)
-        .into_iter()
-        .filter_map(|(id, rec, payload)| {
-            let (_, _, question) = question_body(&id, &payload).ok()?;
-            let answer_id = rec.meta.get("answer_id").and_then(Value::as_str)?;
-            let answer = [Dir::Outbox, Dir::Done]
-                .into_iter()
-                .find_map(|d| spool.get(d, answer_id).ok().flatten())
-                .and_then(|a| match payload_of(answer_id, &a).ok()?.body {
-                    Body::Answer { answer, .. } => Some(answer),
-                    Body::Question { .. } => None,
-                })?;
-            Some((rec.received_at.clone(), id, question.to_string(), answer))
-        })
-        .collect();
+    let mut pairs: Vec<(String, String, String, String)> =
+        thread_records(spool, Dir::Done, context_id, except)
+            .into_iter()
+            .filter_map(|(id, rec, payload)| {
+                let (_, _, question) = question_body(&id, &payload).ok()?;
+                let answer_id = rec.meta.get("answer_id").and_then(Value::as_str)?;
+                let answer = [Dir::Outbox, Dir::Done]
+                    .into_iter()
+                    .find_map(|d| spool.get(d, answer_id).ok().flatten())
+                    .and_then(|a| match payload_of(answer_id, &a).ok()?.body {
+                        Body::Answer { answer, .. } => Some(answer),
+                        Body::Question { .. } => None,
+                    })?;
+                Some((rec.received_at.clone(), id, question.to_string(), answer))
+            })
+            .collect();
     // Chronological: `received_at` first, the (time-ordered UUIDv7) id as the tiebreak.
     pairs.sort();
     let skip = pairs.len().saturating_sub(THREAD_HISTORY_MAX);

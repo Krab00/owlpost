@@ -188,7 +188,12 @@ fn handle_event(state: &AppState, ev: DaemonEvent) {
         }
         DaemonEvent::Declined(d) => {
             tracing::info!(id = %d.id, peer = %d.peer, "question declined");
-            notify::notify(&state.config, Kind::Declined, &peer_name(state, &d.peer), "-");
+            notify::notify(
+                &state.config,
+                Kind::Declined,
+                &peer_name(state, &d.peer),
+                "-",
+            );
         }
     }
 }

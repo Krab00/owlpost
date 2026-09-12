@@ -65,9 +65,9 @@ pub fn run(home: &Path, id: Option<&str>, json: bool) -> anyhow::Result<()> {
                 }
             },
         };
-        tasks.push(task.unwrap_or_else(
-            || json!({ "id": ask.id, "peer": ask.peer, "error": state }),
-        ));
+        tasks.push(
+            task.unwrap_or_else(|| json!({ "id": ask.id, "peer": ask.peer, "error": state })),
+        );
         rows.push(vec![
             ask.id.clone(),
             name,

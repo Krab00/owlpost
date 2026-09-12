@@ -58,7 +58,11 @@ pub fn run(home: &Path, peer: Option<&str>) -> anyhow::Result<()> {
 }
 
 /// The daemon's card when it is running, else one built in this process (no iroh interface).
-fn own_card(home: &Path, cfg: Config, identity: owlpost::identity::Identity) -> anyhow::Result<Value> {
+fn own_card(
+    home: &Path,
+    cfg: Config,
+    identity: owlpost::identity::Identity,
+) -> anyhow::Result<Value> {
     if let Some(addr) = daemon::local_addr(home)
         && let Ok(card) = super::doctor::fetch_card(daemon::connect_addr(addr), Some(&identity))
     {
