@@ -295,6 +295,7 @@ impl Home {
                 project,
                 path,
                 question,
+                ..
             } => envelope::question_hash(project, path.as_deref(), question),
             Body::Answer { .. } => String::new(),
         };
@@ -885,6 +886,7 @@ fn draft_send_moves_records() {
             project,
             path,
             question,
+            ..
         } => envelope::question_hash(project, path.as_deref(), question),
         Body::Answer { .. } => unreachable!(),
     };
@@ -2155,10 +2157,27 @@ fn edit_after_failed_send_is_refused_because_the_answer_is_spooled() {
     assert!(log.exists());
 }
 
-// ---------- OWL-032: `--format claude` renders the framed block and the answers table ----------
+// ---------- OWL-032/OWL-035: `--format claude` renders the message table and the answers table ----------
 
-/// The 16 × 🟧 frame line, verbatim.
-const FRAME: &str = "🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧";
+/// The rule row under the header of the one-column message table (OWL-035), verbatim.
+const RULE: &str = "|---|";
+
+/// One body row of the message table: `| <line> |` with `|` escaped as `\|`, so an empty
+/// line is `|  |`.
+fn row(line: &str) -> String {
+    format!("| {} |", line.replace('|', "\\|"))
+}
+
+/// The whole `--format claude` block of one message: the header row, [`RULE`], one row per
+/// `\n`-separated line of `text`, each line closed by a newline.
+fn table(header: &str, text: &str) -> String {
+    let mut out = format!("| {header} |\n{RULE}\n");
+    for line in text.split('\n') {
+        out.push_str(&row(line));
+        out.push('\n');
+    }
+    out
+}
 /// A fixed `received_at`: 23:08 UTC, 08:08 in `Etc/GMT-9` (UTC+9).
 const RECEIVED: &str = "2026-09-06T23:08:11Z";
 const NOTE: &str = "note: the draft is in a different language than the question — pick Edit";
@@ -2217,33 +2236,38 @@ fn short(id: &str) -> String {
     id.chars().skip(id.chars().count() - 8).collect()
 }
 
-/// AC1: the framed block of a pending question — 16 × 🟧, the header with the peer name,
-/// the local `HH:MM` of `received_at`, project and path (or `whole repository`), the
-/// ```text fence with the question byte-identical; a consent record carries the fingerprint;
-/// three backticks inside are fenced with four; `--format plain` and no `--format` are
-/// byte-identical to each other and to today's output.
+/// AC1: the one-column message table of a pending question — the header row with the peer
+/// name, the local `HH:MM` of `received_at`, project and path (or `whole repository`), the
+/// `|---|` rule and one row per line of the question; a `consent` record carries the
+/// fingerprint. A ``` line is a plain row, `|` is escaped, an empty and a whitespace-only
+/// line keep their shape, a trailing newline adds no row and a CRLF text drops the `\r`;
+/// no 🟧 and no fence anywhere. `--format plain` and no `--format` are byte-identical to
+/// each other and to today's output.
 #[test]
-fn show_format_claude_prints_the_framed_block() {
+fn show_format_claude_prints_the_message_table() {
     let h = Home::new();
     let text = "Why is the refresh token rotated on every read?";
     let a = h.put(&h.maciek, text, "pending");
     h.set_received(&a, Dir::Inbox, RECEIVED);
-    let expected = format!(
-        "{FRAME}\n🦉 **Maciek** · 23:08 · {PROJECT} · {PATH}\n```text\n{text}\n```\n{FRAME}\n"
-    );
+    let head = format!("🦉 **Maciek** · 23:08 · {PROJECT} · {PATH}");
+    let expected = format!("| {head} |\n{RULE}\n| {text} |\n");
     assert_eq!(
         h.ok_tz("UTC", &["show", &a, "--format", "claude"]),
         expected
     );
+    assert_eq!(expected, table(&head, text));
     let lines: Vec<&str> = expected.lines().collect();
-    assert_eq!(lines[0], FRAME);
-    assert_eq!(lines[lines.len() - 1], FRAME);
-    assert_eq!(FRAME.chars().count(), 16);
+    assert_eq!(lines.len(), 3, "{expected}");
+    assert_eq!(lines[1], "|---|");
+    assert!(
+        !expected.contains('🟧') && !expected.contains("```"),
+        "{expected}"
+    );
     // Local time, not UTC: Etc/GMT-9 is UTC+9.
     let tokyo = h.ok_tz("Etc/GMT-9", &["show", &a, "--format", "claude"]);
     assert_eq!(
-        tokyo.lines().nth(1).unwrap(),
-        format!("🦉 **Maciek** · 08:08 · {PROJECT} · {PATH}")
+        tokyo.lines().next().unwrap(),
+        format!("| 🦉 **Maciek** · 08:08 · {PROJECT} · {PATH} |")
     );
     // codex and kimi print the same Markdown.
     assert_eq!(h.ok_tz("UTC", &["show", &a, "--format", "codex"]), expected);
@@ -2270,42 +2294,80 @@ fn show_format_claude_prints_the_framed_block() {
     h.set_received(&w, Dir::Inbox, RECEIVED);
     assert_eq!(
         h.ok_tz("UTC", &["show", &w, "--format", "claude"]),
-        format!(
-            "{FRAME}\n🦉 **Ana** · 23:08 · {PROJECT} · whole repository\n```text\nWhole repo?\n```\n{FRAME}\n"
-        )
+        format!("| 🦉 **Ana** · 23:08 · {PROJECT} · whole repository |\n{RULE}\n| Whole repo? |\n")
     );
 
-    // A consent record: the fingerprint right after the bold name.
+    // A consent record: the fingerprint right after the bold name, inside the header row.
     let c = h.put(&h.ana, "Held?", "consent");
     h.set_received(&c, Dir::Inbox, RECEIVED);
     let out = h.ok_tz("UTC", &["show", &c, "--format", "claude"]);
     assert_eq!(
-        out.lines().nth(1).unwrap(),
-        format!("🦉 **Ana** ({}) · 23:08 · {PROJECT} · {PATH}", fp(&h.ana))
+        out.lines().next().unwrap(),
+        format!(
+            "| 🦉 **Ana** ({}) · 23:08 · {PROJECT} · {PATH} |",
+            fp(&h.ana)
+        )
     );
     assert!(fp(&h.ana).starts_with("owl:"));
     assert!(out.contains("** (owl:"), "{out}");
     assert!(h.inbox(&c).unwrap().seen, "show marks seen");
 
-    // Three backticks inside: a four-backtick fence, both ends.
+    // Three backticks inside: plain rows, never a fence.
     let ticks = "Is this ```rust\nfn x() {}\n``` right?";
     let t = h.put(&h.maciek, ticks, "pending");
     h.set_received(&t, Dir::Inbox, RECEIVED);
     assert_eq!(
         h.ok_tz("UTC", &["show", &t, "--format", "claude"]),
-        format!(
-            "{FRAME}\n🦉 **Maciek** · 23:08 · {PROJECT} · {PATH}\n````text\n{ticks}\n````\n{FRAME}\n"
-        )
+        format!("| {head} |\n{RULE}\n| Is this ```rust |\n| fn x() {{}} |\n| ``` right? |\n")
     );
 
-    // `show all`: blocks separated by one blank line.
-    let all = h.ok_tz("UTC", &["show", "all", "--format", "claude"]);
+    // A pipe, an empty line, a whitespace-only line, multi-byte text and a trailing newline.
+    let tricky = "a|b\n\n   \nZażółć gęślą jaźń\n";
+    let x = h.put(&h.maciek, tricky, "pending");
+    h.set_received(&x, Dir::Inbox, RECEIVED);
     assert_eq!(
-        all.matches(&format!("{FRAME}\n\n{FRAME}")).count(),
-        3,
-        "{all}"
+        h.ok_tz("UTC", &["show", &x, "--format", "claude"]),
+        format!("| {head} |\n{RULE}\n| a\\|b |\n|  |\n|     |\n| Zażółć gęślą jaźń |\n"),
+        "escaping, the empty row, kept whitespace and no row for the trailing newline"
     );
-    assert_eq!(all.lines().filter(|l| *l == FRAME).count(), 8);
+
+    // CRLF: the `\r` goes, the rows are the same as with `\n`.
+    let crlf = h.put(&h.maciek, "crlf\r\nsecond", "pending");
+    h.set_received(&crlf, Dir::Inbox, RECEIVED);
+    assert_eq!(
+        h.ok_tz("UTC", &["show", &crlf, "--format", "claude"]),
+        format!("| {head} |\n{RULE}\n| crlf |\n| second |\n")
+    );
+
+    // A `|` in the peer-controlled project and path is escaped in the HEADER row too, so a
+    // hostile path cannot break the header into columns.
+    let piped = Envelope::sign(
+        &Payload::question(
+            &fp(&h.ana),
+            &fp(&h.me),
+            "github.com/a|b/repo",
+            Some("src/a|b.rs"),
+            "pipes?",
+        ),
+        &h.ana,
+    );
+    let p = h.put_env(&piped, "pending");
+    h.set_received(&p, Dir::Inbox, RECEIVED);
+    assert_eq!(
+        h.ok_tz("UTC", &["show", &p, "--format", "claude"]),
+        format!(
+            "| 🦉 **Ana** · 23:08 · github.com/a\\|b/repo · src/a\\|b.rs |\n{RULE}\n| pipes? |\n"
+        ),
+        "the header row escapes `|` in the project and the path"
+    );
+
+    // `show all`: one table per record, separated by one blank line.
+    let all = h.ok_tz("UTC", &["show", "all", "--format", "claude"]);
+    let heads = all.lines().filter(|l| l.starts_with("| 🦉 ")).count();
+    assert_eq!(heads, 7, "one header row per record: {all}");
+    assert_eq!(all.lines().filter(|l| *l == RULE).count(), heads);
+    assert_eq!(all.matches("\n\n| 🦉 ").count(), heads - 1, "{all}");
+    assert!(!all.contains('🟧'), "{all}");
 }
 
 /// AC1 + AC4: a drafted record prints the frame, then `draft:`, the draft in a plain
@@ -2320,7 +2382,8 @@ fn show_format_claude_prints_the_draft_and_the_language_note() {
     let en_d = "The last commit is abc123 and it is fine.";
     let block = |q: &str, d: &str| {
         format!(
-            "{FRAME}\n🦉 **Maciek** · 23:08 · {PROJECT} · {PATH}\n```text\n{q}\n```\n{FRAME}\ndraft:\n```text\n{d}\n```\nharness: fake\n"
+            "{}draft:\n```text\n{d}\n```\nharness: fake\n",
+            table(&format!("🦉 **Maciek** · 23:08 · {PROJECT} · {PATH}"), q)
         )
     };
     for (q, d, note) in [
@@ -2339,8 +2402,16 @@ fn show_format_claude_prints_the_draft_and_the_language_note() {
             block(q, d)
         };
         assert_eq!(out, want, "question {q:?} draft {d:?}");
-        // The draft is never framed: exactly two frame lines, both around the question.
-        assert_eq!(out.lines().filter(|l| *l == FRAME).count(), 2);
+        // The draft is never a table: exactly one header row and one rule row, both the
+        // question's; the draft keeps its plain fence.
+        assert_eq!(out.lines().filter(|l| *l == RULE).count(), 1);
+        assert_eq!(out.lines().filter(|l| l.starts_with("| 🦉 ")).count(), 1);
+        assert_eq!(
+            out.matches("```text").count(),
+            1,
+            "only the draft is fenced"
+        );
+        assert!(!out.contains('🟧'), "{out}");
     }
     // The plain output of a drafted record is unchanged.
     let id = h.put(&h.maciek, pl_q, "pending");
@@ -2350,20 +2421,18 @@ fn show_format_claude_prints_the_draft_and_the_language_note() {
         plain.contains("draft (ok via fake, redactions: 0, "),
         "{plain}"
     );
-    assert!(!plain.contains(NOTE) && !plain.contains(FRAME), "{plain}");
+    assert!(!plain.contains(NOTE) && !plain.contains(RULE), "{plain}");
 }
 
-/// An answer record is framed the same way, project and path taken from the question it
-/// replies to (in `done/`).
+/// An answer record is one message table the same way, project and path taken from the
+/// question it replies to (in `done/`).
 #[test]
-fn show_format_claude_frames_an_answer() {
+fn show_format_claude_tables_an_answer() {
     let h = Home::new();
     let (aid, _) = h.put_answer(&h.ana, "asked earlier?", "Because of X.", RECEIVED);
     assert_eq!(
         h.ok_tz("UTC", &["show", &aid, "--format", "claude"]),
-        format!(
-            "{FRAME}\n🦉 **Ana** · 23:08 · {PROJECT} · {PATH}\n```text\nBecause of X.\n```\n{FRAME}\n"
-        )
+        format!("| 🦉 **Ana** · 23:08 · {PROJECT} · {PATH} |\n{RULE}\n| Because of X. |\n")
     );
     // The question may still be an open ask (`asks/`) or a question received here
     // (`inbox/`): each arm yields its own path in the header and its first line in the
@@ -2389,9 +2458,7 @@ fn show_format_claude_frames_an_answer() {
     h.set_received(&from_ask, Dir::Inbox, RECEIVED);
     assert_eq!(
         h.ok_tz("UTC", &["show", &from_ask, "--format", "claude"]),
-        format!(
-            "{FRAME}\n🦉 **Ana** · 23:08 · {PROJECT} · src/asks.rs\n```text\nFrom ask.\n```\n{FRAME}\n"
-        )
+        format!("| 🦉 **Ana** · 23:08 · {PROJECT} · src/asks.rs |\n{RULE}\n| From ask. |\n")
     );
     let received = Payload::question(
         &fp(&h.ana),
@@ -2410,9 +2477,7 @@ fn show_format_claude_frames_an_answer() {
     h.set_received(&from_inbox, Dir::Inbox, RECEIVED);
     assert_eq!(
         h.ok_tz("UTC", &["show", &from_inbox, "--format", "claude"]),
-        format!(
-            "{FRAME}\n🦉 **Ana** · 23:08 · {PROJECT} · src/inbox.rs\n```text\nFrom inbox.\n```\n{FRAME}\n"
-        )
+        format!("| 🦉 **Ana** · 23:08 · {PROJECT} · src/inbox.rs |\n{RULE}\n| From inbox. |\n")
     );
     // The listing's `↳` lines resolve the same three arms; the three answers are older than
     // 24 h (RECEIVED), so bring them into the window first.
@@ -2442,9 +2507,7 @@ fn show_format_claude_frames_an_answer() {
     h.set_received(&orphan, Dir::Inbox, RECEIVED);
     assert_eq!(
         h.ok_tz("UTC", &["show", &orphan, "--format", "claude"]),
-        format!(
-            "{FRAME}\n🦉 **Ana** · 23:08 · - · whole repository\n```text\nOrphan.\n```\n{FRAME}\n"
-        )
+        format!("| 🦉 **Ana** · 23:08 · - · whole repository |\n{RULE}\n| Orphan. |\n")
     );
 }
 
@@ -2639,11 +2702,11 @@ fn inbox_format_claude_prints_the_answers_table() {
     );
 }
 
-/// AC3: a consent question, a pending question and one answer: the two framed blocks
-/// (consent first), then the `↳` line and the table, one blank line between sections and
-/// nothing else.
+/// AC3: a consent question, a pending question and one answer: one message table per
+/// question (consent first), then the `↳` line and the answers table, one blank line
+/// between sections and nothing else. Drafts keep their plain code block.
 #[test]
-fn inbox_format_claude_prints_blocks_then_table_and_nothing_else() {
+fn inbox_format_claude_prints_tables_then_answers_and_nothing_else() {
     let h = Home::new();
     let p = h.put(&h.maciek, "Pending one?", "pending");
     h.set_received(&p, Dir::Inbox, RECEIVED);
@@ -2652,7 +2715,7 @@ fn inbox_format_claude_prints_blocks_then_table_and_nothing_else() {
     let t = envelope::now_unix() - 90;
     let (_, qid) = h.put_answer(&h.maciek, "asked?", "yes|no", &envelope::unix_to_rfc3339(t));
     // A drafted question (Polish question, English draft) in the listing: the same block
-    // `owl show` prints — the frame, `draft:`, `harness:` and the language note.
+    // `owl show` prints — the table, `draft:`, `harness:` and the language note.
     let pl_q = "Jaki masz ostatni commit u siebie i czy to jest ok?";
     let en_d = "The last commit is abc123 and it is fine.";
     let d = h.put(&h.maciek, pl_q, "pending");
@@ -2663,19 +2726,26 @@ fn inbox_format_claude_prints_blocks_then_table_and_nothing_else() {
     assert_eq!(
         out,
         format!(
-            "{FRAME}\n🦉 **Ana** ({}) · 23:08 · {PROJECT} · {PATH}\n```text\nHeld one?\n```\n{FRAME}\n\n\
-             {FRAME}\n🦉 **Maciek** · 23:08 · {PROJECT} · {PATH}\n```text\nPending one?\n```\n{FRAME}\n\n\
-             {FRAME}\n🦉 **Maciek** · 23:08 · {PROJECT} · {PATH}\n```text\n{pl_q}\n```\n{FRAME}\n\
-             draft:\n```text\n{en_d}\n```\nharness: fake\n{NOTE}\n\n\
+            "{}\n{}\n{}draft:\n```text\n{en_d}\n```\nharness: fake\n{NOTE}\n\n\
              🟦 ↳ {} \"asked?\"\n| 🟦 {} · Maciek | yes\\|no |\n|---|---|\n",
-            fp(&h.ana),
+            table(
+                &format!("🦉 **Ana** ({}) · 23:08 · {PROJECT} · {PATH}", fp(&h.ana)),
+                "Held one?"
+            ),
+            table(
+                &format!("🦉 **Maciek** · 23:08 · {PROJECT} · {PATH}"),
+                "Pending one?"
+            ),
+            table(&format!("🦉 **Maciek** · 23:08 · {PROJECT} · {PATH}"), pl_q),
             short(&qid),
             utc_hh_mm(t)
         )
     );
+    assert!(!out.contains('🟧'), "{out}");
+    assert_eq!(out.lines().filter(|l| *l == RULE).count(), 3, "{out}");
     assert!(h.path().join("markers.json").exists());
     assert!(h.inbox(&p).unwrap().seen && h.inbox(&c).unwrap().seen);
-    // Only questions: the blocks, no table; an empty inbox: nothing.
+    // Only questions: the tables, no answers table; an empty inbox: nothing.
     let e = Home::new();
     assert_eq!(e.ok(&["inbox", "--format", "claude"]), "");
     let q = e.put(&e.maciek, "Only?", "pending");
@@ -2684,12 +2754,12 @@ fn inbox_format_claude_prints_blocks_then_table_and_nothing_else() {
     let json_out = e.ok(&["inbox", "--json", "--format", "claude"]);
     let listed: Value = serde_json::from_str(&json_out).unwrap();
     assert_eq!(listed.as_array().unwrap().len(), 1);
-    assert!(!json_out.contains(FRAME) && !json_out.contains("|---|---|"));
+    assert!(!json_out.contains(RULE) && !json_out.contains("|---|---|"));
     assert!(!e.path().join("markers.json").exists());
     let only = e.ok_tz("UTC", &["inbox", "--format", "claude"]);
-    assert!(
-        only.starts_with(FRAME) && only.ends_with(&format!("{FRAME}\n")),
-        "{only}"
+    assert_eq!(
+        only,
+        format!("| 🦉 **Maciek** · 23:08 · {PROJECT} · {PATH} |\n{RULE}\n| Only? |\n")
     );
     assert!(!only.contains("|---|---|"));
 }
@@ -2970,8 +3040,9 @@ fn file_changed_prints_the_wake_file_byte_for_byte() {
     let id = h.put(&h.maciek, "Why is the refresh token rotated?", "pending");
     h.routed_to("S1", &id);
     let file = h.wake_file("S1", &id);
-    // The routed file is `owl show <id> --format claude`, one trailing newline; a hand-written
-    // one with a `\r\n`, a blank line and two trailing newlines round-trips just the same.
+    // The routed file is the wake instruction line, a blank line and `owl show <id>
+    // --format claude` byte for byte (OWL-035); a hand-written one with a `\r\n`, a blank
+    // line and two trailing newlines round-trips just the same.
     let shown = h.ok(&["show", &id, "--format", "claude"]);
     // `show` marked it seen and released it: undo the flag (the count below must stay 1)
     // and route it again.
@@ -2981,7 +3052,43 @@ fn file_changed_prints_the_wake_file_byte_for_byte() {
     spool.put(Dir::Inbox, &id, &rec).unwrap();
     h.routed_to("S1", &id);
     let bytes = std::fs::read(&file).unwrap();
-    assert_eq!(bytes, shown.as_bytes(), "the wake file is the show block");
+    // OWL-035 AC4: the instruction line, a blank line, then the `show` output byte for byte.
+    let content = String::from_utf8(bytes.clone()).unwrap();
+    let head = format!("{}\n\n", owlpost::route::WAKE_INSTRUCTION);
+    assert_eq!(content, format!("{head}{shown}"), "wake file");
+    assert_eq!(
+        content.lines().next(),
+        Some(owlpost::route::WAKE_INSTRUCTION),
+        "the instruction is the FIRST line"
+    );
+    assert_eq!(
+        content.matches(owlpost::route::WAKE_INSTRUCTION).count(),
+        1,
+        "exactly once"
+    );
+    assert_eq!(content.lines().nth(1), Some(""), "then a blank line");
+    assert_eq!(
+        &content[head.len()..],
+        shown,
+        "byte-identical show output after the blank line"
+    );
+    assert!(
+        !shown.contains(owlpost::route::WAKE_INSTRUCTION)
+            && !shown.contains("Show the table below"),
+        "`owl show --format claude` never prints the instruction line: {shown}"
+    );
+    assert!(
+        owlpost::route::WAKE_INSTRUCTION.starts_with("Show the table below to the user")
+            && owlpost::route::WAKE_INSTRUCTION
+                .ends_with("Do not answer, draft, summarise or comment."),
+        "{}",
+        owlpost::route::WAKE_INSTRUCTION
+    );
+    // The wording is a contract with the model: pin it word for word, not just its ends.
+    assert_eq!(
+        owlpost::route::WAKE_INSTRUCTION,
+        "Show the table below to the user exactly as it is — nothing before it, nothing inside it, one line after it offering /owlpost:inbox. Do not answer, draft, summarise or comment.",
+    );
     let input = |sid: &str, event: &str, path: &Path| {
         json!({"session_id": sid, "transcript_path": "/t", "cwd": "/c",
             "hook_event_name": "FileChanged", "file_path": path, "event": event})
@@ -3146,4 +3253,321 @@ fn send_releases_the_wake() {
     h.ok(&["send", &id]);
     assert!(h.done(&id).is_some());
     h.assert_released(&id, "send");
+}
+
+// ---------------------------------------------------------------- OWL-034
+
+/// A signed question from `from` to `to` carrying an optional thread id and context.
+fn threaded_question(
+    from: &Identity,
+    to: &Identity,
+    text: &str,
+    context_id: Option<&str>,
+    context: Option<&str>,
+) -> Envelope {
+    let mut p = question(from, to, text);
+    p.context_id = context_id.map(str::to_string);
+    if let Body::Question { context: slot, .. } = &mut p.body {
+        *slot = context.map(str::to_string);
+    }
+    Envelope::sign(&p, from)
+}
+
+/// OWL-034 AC5 + OWL-035 AC2 (rendering): `owl show <id>` prints the asker's snippet as a
+/// `context:` block after the question in plain output, and as the `| **context:** |` row
+/// plus one row per snippet line inside the `--format claude` message table, only when the
+/// question carries one. The `↩ follow-up in thread <short id>` row is the FIRST body row
+/// and appears exactly when `done/` holds an earlier exchange of the same thread — never on
+/// the payload's word alone.
+#[test]
+fn show_prints_the_context_block_and_the_follow_up_line() {
+    let h = Home::new();
+    const CID: &str = "0191c7a0-0000-7000-8000-00000000beef";
+    const SNIPPET: &str = "error[E0499]: cannot borrow `*self` as mutable\n  --> src/x.rs:12:9";
+    let with = h.put_env(
+        &threaded_question(
+            &h.maciek,
+            &h.me,
+            "Why does this fail?",
+            Some(CID),
+            Some(SNIPPET),
+        ),
+        "consent",
+    );
+    // The negative twin differs only in the context: same peer, same thread, same state.
+    let without = h.put_env(
+        &threaded_question(&h.maciek, &h.me, "And why here?", Some(CID), None),
+        "consent",
+    );
+
+    // --- plain: `context:` follows the question, each on its own line.
+    let out = h.ok(&["show", &with]);
+    let q_at = out.find("question:\n").expect("question line");
+    let c_at = out
+        .find("context:\n")
+        .unwrap_or_else(|| panic!("no context block in:\n{out}"));
+    assert!(q_at < c_at, "context comes after the question:\n{out}");
+    assert!(out.contains(&format!("context:\n{SNIPPET}\n")), "{out}");
+    let plain_without = h.ok(&["show", &without]);
+    assert!(
+        !plain_without.contains("context:"),
+        "no context block without a context:\n{plain_without}"
+    );
+
+    // --- the table: `| **context:** |` then one row per snippet line, after the body.
+    let rendered = h.ok(&["show", &with, "--format", "claude"]);
+    let ctx_rows = SNIPPET
+        .split('\n')
+        .fold("| **context:** |\n".to_string(), |mut acc, line| {
+            acc.push_str(&format!("| {line} |\n"));
+            acc
+        });
+    assert_eq!(ctx_rows.lines().count(), 3, "{ctx_rows}");
+    assert!(rendered.ends_with(&ctx_rows), "{rendered}");
+    assert!(
+        rendered.find("| Why does this fail? |") < rendered.find("| **context:** |"),
+        "the context rows follow the body: {rendered}"
+    );
+    assert!(
+        !rendered.contains("```"),
+        "no fence in the table: {rendered}"
+    );
+    let without_ctx = h.ok(&["show", &without, "--format", "claude"]);
+    assert!(!without_ctx.contains("context"), "{without_ctx}");
+    assert_eq!(without_ctx.lines().count(), 3, "{without_ctx}");
+
+    // --- the follow-up line needs an earlier exchange of OUR OWN in `done/`.
+    let follow = format!("| ↩ follow-up in thread {} |", &CID[CID.len() - 8..]);
+    assert!(
+        !rendered.contains(&follow),
+        "no earlier exchange yet, so no follow-up row:\n{rendered}"
+    );
+    // An earlier exchange of the SAME thread, finished.
+    h.put_done(
+        &threaded_question(&h.maciek, &h.me, "The first question", Some(CID), None),
+        "answered",
+    );
+    let rendered = h.ok(&["show", &with, "--format", "claude"]);
+    assert!(rendered.contains(&follow), "{rendered}");
+    // It is the FIRST body row: header row, `|---|`, the follow-up row, then the question.
+    let lines: Vec<&str> = rendered.lines().collect();
+    assert!(lines[0].starts_with("| 🦉 "), "{rendered}");
+    assert_eq!(lines[1], "|---|", "{rendered}");
+    assert_eq!(lines[2], follow, "the first body row: {rendered}");
+    assert_eq!(
+        lines[3], "| Why does this fail? |",
+        "the question follows it: {rendered}"
+    );
+
+    // A `done/` exchange of a DIFFERENT thread does not produce the line: a third record
+    // whose only difference is its thread id.
+    let other = Home::new();
+    const OTHER_CID: &str = "0191c7a0-0000-7000-8000-0000000000aa";
+    let q = other.put_env(
+        &threaded_question(
+            &other.maciek,
+            &other.me,
+            "Why does this fail?",
+            Some(CID),
+            None,
+        ),
+        "consent",
+    );
+    other.put_done(
+        &threaded_question(&other.maciek, &other.me, "Unrelated", Some(OTHER_CID), None),
+        "answered",
+    );
+    let rendered = other.ok(&["show", &q, "--format", "claude"]);
+    assert!(
+        !rendered.contains("↩ follow-up in thread"),
+        "another thread's record must not count:\n{rendered}"
+    );
+
+    // A question with NO thread id at all never gets the line either.
+    let bare = other.put_env(
+        &threaded_question(&other.maciek, &other.me, "No thread", None, None),
+        "consent",
+    );
+    let rendered = other.ok(&["show", &bare, "--format", "claude"]);
+    assert!(!rendered.contains("↩ follow-up in thread"), "{rendered}");
+}
+
+/// OWL-034 + OWL-035 AC2: the same message table through `owl inbox --format claude` (the
+/// listing, not the counter) — the follow-up row and the context rows travel with it.
+#[test]
+fn inbox_listing_tables_the_thread_and_the_context() {
+    let h = Home::new();
+    const CID: &str = "0191c7a0-0000-7000-8000-00000000cafe";
+    const SNIPPET: &str = "fn main() { todo!() }";
+    h.put_done(
+        &threaded_question(&h.maciek, &h.me, "The first question", Some(CID), None),
+        "answered",
+    );
+    h.put_env(
+        &threaded_question(
+            &h.maciek,
+            &h.me,
+            "And the second?",
+            Some(CID),
+            Some(SNIPPET),
+        ),
+        "pending",
+    );
+    let out = h.ok(&["inbox", "--format", "claude"]);
+    let follow = format!("| ↩ follow-up in thread {} |", &CID[CID.len() - 8..]);
+    assert!(out.contains(&follow), "{out}");
+    assert!(
+        out.contains(&format!("| **context:** |\n| {SNIPPET} |\n")),
+        "{out}"
+    );
+    assert!(
+        out.find(&follow) < out.find("And the second?"),
+        "the row precedes the question text:\n{out}"
+    );
+    assert!(!out.contains("```") && !out.contains('🟧'), "{out}");
+}
+
+/// The question text every responder-cache row below shares, so they share one
+/// `envelope::question_hash` and differ only in the filtered dimension.
+const CACHE_Q: &str = "Where is the retry policy defined?";
+
+/// Spools `env` as a pending question, then drives the real `owl draft` + `owl send` on it.
+/// Returns `(question id, answer id, the outbox record of the answer)`.
+fn draft_and_send(h: &Home, env: &Envelope) -> (String, String, Record) {
+    let qid = h.put_env(env, "pending");
+    h.ok(&["draft", &qid]);
+    h.ok(&["send", &qid]);
+    let (aid, arec) = h
+        .outbox()
+        .into_iter()
+        .find(|(_, r)| r.meta["question_id"] == qid)
+        .unwrap_or_else(|| panic!("no outbox answer for {qid}"));
+    assert!(h.inbox(&qid).is_none(), "the question left the inbox");
+    assert_eq!(h.done(&qid).unwrap().state, "answered");
+    assert_eq!(arec.state, "unacked");
+    (qid, aid, arec)
+}
+
+/// OWL-034 AC5 (design §3, "never served from **or written to** either cache"): `owl send`
+/// feeds the responder cache only for a question that carries no `context` and continues no
+/// thread this responder already holds. Every row goes through the real `owl draft` +
+/// `owl send`; all four share `CACHE_Q`, `PROJECT` and `PATH`, so they share one
+/// `question_hash` and differ only in the dimension under test. Each row gets its own home,
+/// so a row can never read the cache entry another row wrote.
+#[test]
+fn send_writes_the_responder_cache_only_for_an_unthreaded_question() {
+    const CID: &str = "0191c7a0-0000-7000-8000-0000000000c5";
+    let hash = envelope::question_hash(PROJECT, Some(PATH), CACHE_Q);
+
+    // --- positive twin: no context, no thread id → the cache holds exactly what we sent.
+    let h = Home::new();
+    let (_, _, arec) = draft_and_send(
+        &h,
+        &threaded_question(&h.maciek, &h.me, CACHE_Q, None, None),
+    );
+    let cached = h
+        .spool()
+        .cache_get(&hash)
+        .unwrap()
+        .expect("a plain question feeds the responder cache");
+    assert_eq!(
+        (cached.raw.as_str(), cached.sig.as_str()),
+        (arec.raw.as_str(), arec.sig.as_str())
+    );
+    assert_eq!(cached.meta["hash"], hash);
+
+    // --- a `context` suppresses the write; the answer is still spooled and sent.
+    let h = Home::new();
+    let (_, aid, arec) = draft_and_send(
+        &h,
+        &threaded_question(
+            &h.maciek,
+            &h.me,
+            CACHE_Q,
+            None,
+            Some("fn retry() {\n    backoff(3)\n}"),
+        ),
+    );
+    assert_eq!(arec.meta["hash"], hash, "the shared hash, unwritten");
+    assert_eq!(payload(&arec).id, aid);
+    assert!(
+        h.spool().cache_get(&hash).unwrap().is_none(),
+        "a question with a context must not be written to the responder cache"
+    );
+
+    // --- a `context_id` this responder already holds an exchange for suppresses it too.
+    let h = Home::new();
+    h.put_done(
+        &threaded_question(&h.maciek, &h.me, "The first question", Some(CID), None),
+        "answered",
+    );
+    let (_, _, arec) = draft_and_send(
+        &h,
+        &threaded_question(&h.maciek, &h.me, CACHE_Q, Some(CID), None),
+    );
+    assert_eq!(arec.meta["hash"], hash);
+    assert!(
+        h.spool().cache_get(&hash).unwrap().is_none(),
+        "a follow-up in a known thread must not be written to the responder cache"
+    );
+
+    // --- but a `context_id` alone does not: nothing in `inbox/` or `done/` shares it, so
+    // this question is a plain one and IS cacheable.
+    let h = Home::new();
+    let (_, _, arec) = draft_and_send(
+        &h,
+        &threaded_question(&h.maciek, &h.me, CACHE_Q, Some(CID), None),
+    );
+    let cached = h
+        .spool()
+        .cache_get(&hash)
+        .unwrap()
+        .expect("an unknown thread id alone does not suppress the cache write");
+    assert_eq!(
+        (cached.raw.as_str(), cached.sig.as_str()),
+        (arec.raw.as_str(), arec.sig.as_str())
+    );
+}
+
+/// OWL-034 AC6 through the real responder: the answer `owl send` signs for a question with a
+/// `context_id` carries that same thread id (and `in_reply_to`), and the answer to a question
+/// without one omits the key entirely — not `null`.
+#[test]
+fn sent_answer_copies_the_questions_context_id() {
+    const CID: &str = "0191c7a0-0000-7000-8000-0000000000a6";
+    const TEXT: &str = "Why is the refresh token rotated?";
+
+    let h = Home::new();
+    let (qid, aid, arec) = draft_and_send(
+        &h,
+        &threaded_question(&h.maciek, &h.me, TEXT, Some(CID), None),
+    );
+    let a = payload(&arec);
+    assert_eq!((a.id.as_str(), a.kind), (aid.as_str(), Kind::Answer));
+    assert_eq!(a.context_id.as_deref(), Some(CID));
+    assert_eq!(a.in_reply_to.as_deref(), Some(qid.as_str()));
+    let raw: Value = serde_json::from_str(&arec.raw).unwrap();
+    assert_eq!(raw["context_id"], CID);
+    // The asker can verify it: the thread id travels inside the signed bytes.
+    let env = Envelope {
+        raw: arec.raw.clone(),
+        sig: arec.sig.clone(),
+    };
+    assert_eq!(
+        env.verify(&h.me.verifying_key()).unwrap().context_id,
+        Some(CID.to_string())
+    );
+
+    // The negative twin: same peer, same text, no `context_id`.
+    let h = Home::new();
+    let (qid, _, arec) = draft_and_send(&h, &threaded_question(&h.maciek, &h.me, TEXT, None, None));
+    let a = payload(&arec);
+    assert_eq!(a.context_id, None);
+    assert_eq!(a.in_reply_to.as_deref(), Some(qid.as_str()));
+    let raw: Value = serde_json::from_str(&arec.raw).unwrap();
+    assert!(
+        raw.get("context_id").is_none(),
+        "the key is absent, not null: {}",
+        arec.raw
+    );
 }

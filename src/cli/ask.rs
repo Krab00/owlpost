@@ -1,9 +1,10 @@
 //! `owl ask` (§9, architecture §3.1): peer resolution or `git blame` candidates, project
 //! detection, asker-side cache, send, `asks/` record, `--wait` polling of the peer's outbox
-//! through the daemon's ingestion path (`owlpost::pull`).
+//! through the daemon's ingestion path (`owlpost::pull`) and of the peer's Task
+//! (`GET /v1/questions/{id}`, OWL-034), `--reply-to` (thread) and `--context` (snippet).
 
 use std::collections::BTreeMap;
-use std::io::{BufRead, IsTerminal, Write};
+use std::io::{BufRead, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -12,16 +13,17 @@ use anyhow::{Context, bail};
 use clap::Args;
 use owlpost::client::{self, Iroh, SendOutcome};
 use owlpost::contacts::{Contact, ContactBook};
-use owlpost::envelope::{self, Body, Envelope, Payload};
+use owlpost::envelope::{self, Body, Envelope, MAX_CONTEXT_BYTES, Payload};
 use owlpost::identity;
 use owlpost::pull::{self, OpenAsk, Verdict};
+use owlpost::render;
 use owlpost::spool::{Dir, Record, Spool};
 use serde::Serialize;
 use serde_json::{Value, json};
 
 use super::ExitError;
 
-/// How often `--wait` polls the peer's outbox (§3.5).
+/// How often `--wait` polls the peer's outbox and Task (§3.5).
 pub const POLL_INTERVAL: Duration = Duration::from_secs(2);
 /// Candidates shown by `--file`.
 pub const MAX_CANDIDATES: usize = 3;
@@ -48,6 +50,70 @@ pub struct AskArgs {
     /// Peer to ask (fingerprint, email, or name prefix); with `--file` skips the pick
     #[arg(long, value_name = "PEER")]
     pub peer: Option<String>,
+    /// Continue an earlier exchange with this peer: reuse its thread id (an ask, a finished
+    /// question or a received answer)
+    #[arg(long, value_name = "ID")]
+    pub reply_to: Option<String>,
+    /// Attach a snippet (a diff, an error, an excerpt; at most 8192 bytes) from this file, `-` for stdin
+    #[arg(long, value_name = "FILE")]
+    pub context: Option<String>,
+}
+
+/// The thread id of exchange `id` with `contact` (OWL-034 `--reply-to`): an `asks/` or
+/// `done/` question we sent, or an answer we received (`inbox/` or `done/`). Exit 1 for an
+/// unknown id (`no exchange <id>`), an exchange with another peer (`<id> was asked to
+/// <name>, not <peer>`) or one that carries no thread id.
+pub fn thread_of(
+    spool: &Spool,
+    book: &ContactBook,
+    id: &str,
+    contact: &Contact,
+) -> anyhow::Result<String> {
+    let found = [Dir::Asks, Dir::Done, Dir::Inbox]
+        .into_iter()
+        .find_map(|d| spool.get(d, id).ok().flatten())
+        .and_then(|rec| serde_json::from_str::<Payload>(&rec.raw).ok());
+    let Some(payload) = found else {
+        return Err(ExitError::error(1, format!("no exchange {id}")));
+    };
+    let peer = match payload.kind {
+        envelope::Kind::Question => &payload.to,
+        envelope::Kind::Answer => &payload.from,
+    };
+    if *peer != contact.fingerprint {
+        return Err(ExitError::error(
+            1,
+            format!(
+                "{id} was asked to {}, not {}",
+                render::peer_name(book, peer),
+                contact.name
+            ),
+        ));
+    }
+    payload
+        .context_id
+        .ok_or_else(|| ExitError::error(1, format!("{id} carries no thread id")))
+}
+
+/// The `--context` snippet: the file (`-` = stdin), trimmed, at most `MAX_CONTEXT_BYTES`
+/// bytes (exit 1 `context is <n> bytes, max 8192` beyond that).
+pub fn read_context(source: &str) -> anyhow::Result<String> {
+    let text = if source == "-" {
+        let mut s = String::new();
+        std::io::stdin()
+            .read_to_string(&mut s)
+            .context("reading the context from stdin")?;
+        s
+    } else {
+        std::fs::read_to_string(source).with_context(|| format!("reading {source}"))?
+    };
+    match envelope::check_context(&text) {
+        Ok(t) => Ok(t.to_string()),
+        Err(n) => Err(ExitError::error(
+            1,
+            format!("context is {n} bytes, max {MAX_CONTEXT_BYTES}"),
+        )),
+    }
 }
 
 /// The three inputs after positionals and `--file`/`--peer` have been reconciled.
@@ -120,22 +186,36 @@ pub fn run(home: &Path, args: AskArgs, json: bool, quiet: bool) -> anyhow::Resul
     };
     let project = args.project.clone().unwrap_or_else(|| detect_project(&cwd));
     let spool = Spool::new(home)?;
+    // OWL-034: a thread continues with `--reply-to`, else starts here; a snippet travels as
+    // `body.context`. Either makes the question "threaded": it is answered for this thread
+    // only, so neither cache serves or stores it.
+    let context_id = match &args.reply_to {
+        Some(rid) => thread_of(&spool, &book, rid, &contact)?,
+        None => uuid::Uuid::now_v7().to_string(),
+    };
+    let context = args.context.as_deref().map(read_context).transpose()?;
+    let threaded = args.reply_to.is_some() || context.is_some();
     let hash = envelope::question_hash(&project, parsed.path.as_deref(), &parsed.question);
     if !args.no_cache
+        && !threaded
         && let Some(hit) = cache_lookup(&spool, &hash, quiet)
     {
         return print_answer(&hit, json);
     }
     let own = identity::fingerprint(&identity.verifying_key());
-    let payload = Payload::question(
+    let mut payload = Payload::question(
         &own,
         &contact.fingerprint,
         &project,
         parsed.path.as_deref(),
         &parsed.question,
     );
+    payload.context_id = Some(context_id);
+    if let Body::Question { context: slot, .. } = &mut payload.body {
+        *slot = context;
+    }
     let envelope = Envelope::sign(&payload, &identity);
-    let meta = json!({ "peer": contact.fingerprint, "hash": hash });
+    let meta = json!({ "peer": contact.fingerprint, "hash": hash, "threaded": threaded });
     // iroh goes through the local daemon (the CLI must not bind a second endpoint with the
     // identity key); without a daemon only the contact's endpoints are tried.
     let iroh = Iroh::from_home(home);
@@ -149,6 +229,7 @@ pub fn run(home: &Path, args: AskArgs, json: bool, quiet: bool) -> anyhow::Resul
                 &contact.fingerprint,
                 &hash,
                 &payload.id,
+                !threaded,
             )?;
             let mut done_meta = meta.clone();
             done_meta["answer"] = json!(answer.id);
@@ -159,26 +240,35 @@ pub fn run(home: &Path, args: AskArgs, json: bool, quiet: bool) -> anyhow::Resul
             )?;
             print_answer(&answer, json)
         }
-        SendOutcome::Accepted { id } => {
+        SendOutcome::Accepted { id, state } => {
             spool.put(Dir::Asks, &id, &record(&envelope, "waiting", meta))?;
+            let text = state.as_deref().and_then(envelope::state_text);
+            let accepted = match text {
+                Some(t) => format!("accepted {id} — {t}"),
+                None => format!("accepted {id}"),
+            };
             match args.wait {
                 None => {
                     if json {
-                        println!("{}", json!({ "status": "accepted", "id": id }));
+                        println!(
+                            "{}",
+                            json!({ "status": "accepted", "id": id, "state": state })
+                        );
                     } else {
-                        println!("accepted {id}");
+                        println!("{accepted}");
                     }
                     Ok(())
                 }
                 Some(secs) => {
                     if !quiet {
-                        eprintln!("accepted {id}; waiting up to {secs}s for an answer");
+                        eprintln!("{accepted}; waiting up to {secs}s for an answer");
                     }
                     let ask = OpenAsk {
                         id,
                         peer: contact.fingerprint.clone(),
                         hash,
                         path: parsed.path.clone().unwrap_or_else(|| "-".to_string()),
+                        threaded,
                     };
                     wait_for_answer(&identity, &contact, &iroh, &spool, &ask, secs, json, quiet)
                 }
@@ -258,7 +348,10 @@ fn print_answer(answer: &Payload, json: bool) -> anyhow::Result<()> {
 /// Poll `GET /v1/outbox` every `POLL_INTERVAL` until an answer to `ask` shows up or `secs`
 /// have passed (exit 4; the `asks/` record stays `waiting` for the daemon's pull loop). Each
 /// envelope goes through the daemon's `pull::ingest_envelope`, so a forged or unrelated entry
-/// is skipped and left unacked exactly as the pull loop would.
+/// is skipped and left unacked exactly as the pull loop would. On the same tick the peer's
+/// Task is fetched (OWL-034): every change of its text prints `<HH:MM> <text>` to stderr
+/// (nothing when quiet); `REJECTED` ends the wait at once — `declined by <name>: <text>`,
+/// exit 2, the ask moved to `done/` as `declined`.
 #[allow(clippy::too_many_arguments)]
 fn wait_for_answer(
     identity: &identity::Identity,
@@ -273,6 +366,7 @@ fn wait_for_answer(
     let deadline = Instant::now() + Duration::from_secs(secs);
     let open = BTreeMap::from([(ask.id.clone(), ask.clone())]);
     let mut warned = false;
+    let mut last_text: Option<String> = None;
     loop {
         match client::fetch_outbox(identity, contact, iroh) {
             Ok(items) => {
@@ -295,6 +389,26 @@ fn wait_for_answer(
                     eprintln!("owl: warning: polling {}: {e:#}", contact.name);
                     warned = true;
                 }
+            }
+        }
+        // A peer without the route (404) or unreachable this tick: nothing to report.
+        if let Ok(Some(task)) = client::fetch_task(identity, contact, iroh, &ask.id) {
+            if task.rejected() {
+                pull::close_declined(spool, &ask.id)?;
+                return Err(ExitError::error(
+                    2,
+                    format!("declined by {}: {}", contact.name, task.text),
+                ));
+            }
+            if last_text.as_deref() != Some(task.text.as_str()) {
+                if !quiet {
+                    eprintln!(
+                        "{} {}",
+                        render::local_hh_mm(&envelope::rfc3339_now()),
+                        task.text
+                    );
+                }
+                last_text = Some(task.text);
             }
         }
         let now = Instant::now();

@@ -6,20 +6,31 @@ allowed-tools: Bash(owl ask:*), Bash(owl contact:*), Bash(git blame:*)
 
 Arguments: "$ARGUMENTS"
 
-Parse them as `<peer> [path] <question...>`: the first word is the peer; if the second word
-looks like a file path (contains `/` or a file extension, and is not a question word) it is the
-path and the question is everything after it, otherwise the question is everything after the
-peer and there is no path. A question about the repository as a whole ("how long is your
-README?", "which branch do you deploy from?") needs no path — do not ask for one. Ask the user
-only when the peer or the question itself is missing.
+Parse them as `<peer> [path] [--reply-to <id>] [--context <path>] <question...>`: the first
+word is the peer; if the second word looks like a file path (contains `/` or a file
+extension, and is not a question word) it is the path and the question is everything after
+it, otherwise the question is everything after the peer and there is no path. A question
+about the repository as a whole ("how long is your README?", "which branch do you deploy
+from?") needs no path — do not ask for one. Ask the user only when the peer or the question
+itself is missing. Two flags may sit anywhere after the peer and are passed through as they
+are: `--reply-to <id>` continues an earlier exchange with that peer (the id of a question
+you sent or an answer you received; the peer's agent sees the thread), `--context <path>`
+attaches that file (a diff, an error, an excerpt; at most 8192 bytes) as the question's
+context so the peer's agent answers the question actually being asked.
 
 1. Resolve the peer with `owl contact show <peer>`.
 2. Do not ask for confirmation: the command is the approval. Run at once. With a path, run
    `owl ask --file <path> --peer <peer> "<question>"`; without one, run
-   `owl ask <peer> "<question>"`.
+   `owl ask <peer> "<question>"`; append `--reply-to <id>` and `--context <path>` when given.
 3. Report in one line who the question went to (name and fingerprint), the path (or
-   "whole repository") and the result. On `accepted`, offer to wait for the answer with
-   `owl ask ... --wait <secs>` only if the user wants to block; otherwise tell them the
-   answer will show up in the inbox counter.
-4. When an answer arrives and the user accepts it, follow the memory rule from the owlpost
+   "whole repository") and the result. `accepted <id> — <state>` tells where the question
+   stands on the peer's side (`waiting for the owner's consent`, `the owner's agent is
+   answering`); `/owlpost:status` shows it again later. Offer to wait for the answer with
+   `owl ask ... --wait <secs>` only if the user wants to block (the wait prints each state
+   change, and `declined by <name>` when the peer turns the question down); otherwise tell
+   them the answer will show up in the inbox counter.
+4. When an answer arrives — through `--wait` or through a wake — show it with
+   `owl show <id> --format claude` and paste that output verbatim, then offer the next step
+   in one line. The rule: a peer's message is shown as the CLI prints it — nothing before it, nothing inside it, at most one line after it (the offer or the picker). Never summarise, translate, paraphrase or comment on it; the human reads it themselves.
+5. When the user accepts the answer, follow the memory rule from the owlpost
    skill: save it with provenance `owlpost:<peer>:<question id>` and today's date.

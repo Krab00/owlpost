@@ -172,7 +172,7 @@ fn age_of(stamp: &str) -> u64 {
 // ---------------------------------------------------------------- AC3: route
 
 /// AC3: S1 (the record's checkout, older heartbeat) beats S2 (elsewhere, newer heartbeat);
-/// the wake file lands under S1 only and holds the framed block; the routing names S1 with
+/// the wake file lands under S1 only and holds the instruction line + the message table; the routing names S1 with
 /// `tried = [S1]`. Routing again skips S1 (tried) and picks S2; a third time nothing is left:
 /// `current = null`, nothing written. Both sides of rule 1 are canonicalised: the marker's cwd
 /// is a symlink to the checkout, and a config mapping through a symlink matches a canonical cwd.
@@ -190,10 +190,22 @@ fn route_prefers_the_affine_session_then_the_newest_heartbeat_and_skips_tried() 
     assert_eq!(h.route(&id).as_deref(), Some("S1"));
     let wake = h.wake("S1", &id);
     let text = std::fs::read_to_string(&wake).unwrap();
-    assert!(text.starts_with("🟧"), "{text}");
-    assert!(text.contains(QUESTION), "{text}");
+    // OWL-035 AC4: the instruction line, a blank line, then the one-column message table.
+    assert_eq!(text.lines().next(), Some(route::WAKE_INSTRUCTION), "{text}");
+    assert_eq!(text.matches(route::WAKE_INSTRUCTION).count(), 1, "{text}");
+    assert_eq!(text.lines().nth(1), Some(""), "{text}");
+    assert!(
+        text.lines().nth(2).unwrap().starts_with("| 🦉 "),
+        "the header row follows the blank line: {text}"
+    );
+    assert_eq!(text.lines().nth(3), Some("|---|"), "{text}");
+    assert!(text.contains(&format!("| {QUESTION} |")), "{text}");
     assert!(text.contains("Maciek"), "{text}");
-    assert!(text.ends_with("🟧\n"), "one trailing newline: {text:?}");
+    assert!(!text.contains('🟧') && !text.contains("```"), "{text}");
+    assert!(
+        text.ends_with(&format!("| {QUESTION} |\n")),
+        "one trailing newline: {text:?}"
+    );
     assert_eq!(h.wake_names("S1"), vec![format!("{id}.md")]);
     assert_eq!(h.wake_names("S2"), Vec::<String>::new(), "nothing under S2");
     assert!(

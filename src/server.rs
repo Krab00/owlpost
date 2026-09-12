@@ -36,15 +36,21 @@ use tower::Layer;
 
 use crate::config::Config;
 use crate::contacts::{ContactBook, Mode, Policy};
-use crate::envelope::{self, Kind, Payload, REPLAY_WINDOW_SECS, SeenIds};
+use crate::envelope::{
+    self, Kind, Payload, REPLAY_WINDOW_SECS, SeenIds, TASK_STATE_REJECTED, a2a_state,
+};
 use crate::identity::{self, Identity};
 use crate::spool::{Dir, Record, Spool};
 
 pub const SIGNATURE_HEADER: &str = "x-owl-signature";
-/// A2A protocol version the card claims to speak.
-pub const A2A_PROTOCOL_VERSION: &str = "0.3.0";
 /// Largest request body accepted (a question is a few hundred bytes; 413 beyond this).
 pub const MAX_BODY_BYTES: usize = 64 * 1024;
+/// The card's custom A2A protocol binding: our routes are not the A2A routes.
+pub const PROTOCOL_BINDING: &str = "owlpost-v1";
+/// The three A2A extensions the card declares (OWL-034).
+pub const EXT_IDENTITY: &str = "urn:owlpost:ext:identity:v1";
+pub const EXT_REPO_QUESTION: &str = "urn:owlpost:ext:repo-question:v1";
+pub const EXT_HUMAN_GATE: &str = "urn:owlpost:ext:human-gate:v1";
 
 /// Fingerprint of the client certificate on this connection; `None` = unpinned client.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,11 +79,22 @@ pub struct AnswerIngested {
     pub path: String,
 }
 
+/// Emitted when the pull loop found a peer's Task `REJECTED` and closed the ask as
+/// `done/declined` (OWL-034); the daemon turns it into a "declined by <peer>" notification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Declined {
+    /// Id of the declined ask record.
+    pub id: String,
+    /// Fingerprint of the declining peer.
+    pub peer: String,
+}
+
 /// Everything the request handlers (and the pull loop) report to the daemon loop.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DaemonEvent {
     Question(Spooled),
     Answer(AnswerIngested),
+    Declined(Declined),
 }
 
 pub struct AppState {
@@ -176,12 +193,14 @@ impl Bucket {
     }
 }
 
-/// JSON error body `{"error": msg}` with a status (and `Retry-After` for 429).
+/// JSON error body `{"error": msg}` with a status (and `Retry-After` for 429; a `state`
+/// key on the `403 unavailable` body, OWL-034).
 #[derive(Debug, PartialEq, Eq)]
 pub struct ApiError {
     pub status: StatusCode,
     pub error: String,
     pub retry_after: Option<u64>,
+    pub state: Option<&'static str>,
 }
 
 impl ApiError {
@@ -190,13 +209,17 @@ impl ApiError {
             status,
             error: error.into(),
             retry_after: None,
+            state: None,
         }
     }
     fn bad_request(error: impl Into<String>) -> ApiError {
         ApiError::new(StatusCode::BAD_REQUEST, error)
     }
     fn unavailable() -> ApiError {
-        ApiError::new(StatusCode::FORBIDDEN, "unavailable")
+        ApiError {
+            state: Some(TASK_STATE_REJECTED),
+            ..ApiError::new(StatusCode::FORBIDDEN, "unavailable")
+        }
     }
     fn not_found() -> ApiError {
         ApiError::new(StatusCode::NOT_FOUND, "not found")
@@ -210,7 +233,11 @@ impl ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let mut resp = (self.status, Json(json!({ "error": self.error }))).into_response();
+        let mut body = json!({ "error": self.error });
+        if let Some(state) = self.state {
+            body["state"] = json!(state);
+        }
+        let mut resp = (self.status, Json(body)).into_response();
         if let Some(secs) = self.retry_after
             && let Ok(v) = HeaderValue::from_str(&secs.to_string())
         {
@@ -228,6 +255,7 @@ fn peer_routes() -> Router<Arc<AppState>> {
         .route("/.well-known/agent-card.json", get(card))
         .route("/.well-known/agent.json", get(card))
         .route("/v1/questions", post(post_question))
+        .route("/v1/questions/{id}", get(get_task))
         .route("/v1/outbox", get(get_outbox))
         .route("/v1/outbox/{id}/ack", post(ack_outbox))
 }
@@ -287,9 +315,13 @@ pub fn may_read_cache(mode: Option<Mode>) -> bool {
     matches!(mode, Some(Mode::Manual) | Some(Mode::Auto))
 }
 
-/// A2A-shaped agent card (§7). Served to pinned and unpinned clients alike.
+/// The A2A 1.0 `AgentCard` (§7, OWL-034). Served to pinned and unpinned clients alike. The
+/// `https` interface is always listed; the `owl-iroh://<key>` one only inside the daemon
+/// (iroh endpoint bound). Identity, repository-question and human-gate rules travel as
+/// extensions; `owl doctor` reads the fingerprint and relay from the identity extension.
 pub fn card_json(state: &AppState) -> Value {
     let pk = state.identity.verifying_key();
+    let pubkey = identity::pubkey_string(&pk);
     let host = state
         .config
         .endpoints
@@ -302,30 +334,95 @@ pub fn card_json(state: &AppState) -> Value {
     } else {
         state.config.name.clone()
     };
-    // The iroh endpoint id is the identity key, so `iroh.id` repeats `owlpost.pubkey`.
-    let iroh = state.iroh.get().map(|ep| {
-        json!({
-            "id": identity::pubkey_string(&pk),
-            "relay": crate::iroh::home_relay(ep),
-        })
+    let interface = |url: String| json!({ "url": url, "protocolBinding": PROTOCOL_BINDING, "protocolVersion": "1" });
+    let mut interfaces = vec![interface(format!("https://{host}/"))];
+    // The iroh endpoint id is the identity key, so the interface names the pubkey.
+    let relay = state.iroh.get().map(|ep| {
+        interfaces.push(interface(format!(
+            "owl-iroh://{}",
+            pubkey.strip_prefix("ed25519:").unwrap_or(&pubkey)
+        )));
+        crate::iroh::home_relay(ep)
     });
+    let provider_url = state
+        .config
+        .emails
+        .first()
+        .filter(|e| !e.is_empty())
+        .map_or(String::new(), |e| format!("mailto:{e}"));
     json!({
         "name": name,
-        "description": format!("owlpost agent of {name}: answers questions about their code"),
-        "url": format!("https://{host}/"),
+        "description": format!(
+            "owlpost agent of {name}: answers questions about their code; {name} approves every answer before it leaves their machine"
+        ),
         "version": env!("CARGO_PKG_VERSION"),
-        "protocolVersion": A2A_PROTOCOL_VERSION,
-        "capabilities": { "streaming": false, "pushNotifications": false },
-        "skills": [],
-        "owlpost": {
-            "fingerprint": identity::fingerprint(&pk),
-            "pubkey": identity::pubkey_string(&pk),
-            "protocol": 1,
-            "responds": state.config.responder.enabled,
-            "harness": state.config.responder.harness,
+        "provider": { "organization": name, "url": provider_url },
+        "supportedInterfaces": interfaces,
+        "capabilities": {
+            "streaming": false,
+            "pushNotifications": false,
+            "extendedAgentCard": false,
+            "extensions": [
+                {
+                    "uri": EXT_IDENTITY,
+                    "required": true,
+                    "description": "one ed25519 key per person; every message body is signed (X-Owl-Signature) and the transport is pinned to this key",
+                    "params": {
+                        "fingerprint": identity::fingerprint(&pk),
+                        "pubkey": pubkey,
+                        "relay": relay.flatten(),
+                    }
+                },
+                {
+                    "uri": EXT_REPO_QUESTION,
+                    "required": true,
+                    "description": "a question names a repository (project) and optionally one file; an optional context snippet (≤ 8 KiB) and a thread id (context_id) may accompany it",
+                    "params": { "projects": state.config.projects.keys().collect::<Vec<_>>() }
+                },
+                {
+                    "uri": EXT_HUMAN_GATE,
+                    "required": true,
+                    "description": "a human approves every answer: SUBMITTED = waiting for consent, WORKING = drafting or under review; expect human-scale latency",
+                    "params": {
+                        "responds": state.config.responder.enabled,
+                        "harness": state.config.responder.harness,
+                    }
+                }
+            ]
         },
-        "iroh": iroh,
+        "securitySchemes": {
+            "owl-mtls": {
+                "mtlsSecurityScheme": {
+                    "description": "TLS 1.3 client certificate (or iroh QUIC identity) whose public key is the peer's ed25519 key, pinned in the owner's contact book; unknown keys are refused at handshake"
+                }
+            }
+        },
+        "securityRequirements": [ { "schemes": { "owl-mtls": { "list": [] } } } ],
+        "defaultInputModes": ["text/plain"],
+        "defaultOutputModes": ["text/plain"],
+        "skills": [
+            {
+                "id": "ask-about-repo",
+                "name": "Ask about my code",
+                "description": "Answers a question about one file or the whole repository from the owner's checkout and notes, read-only",
+                "tags": ["code", "repository", "q&a"],
+                "examples": ["Why is the refresh token rotated on every read?"],
+                "inputModes": ["text/plain"],
+                "outputModes": ["text/plain"]
+            }
+        ]
     })
+}
+
+/// The `params` of the card extension `uri`, if the card declares it (OWL-034): what
+/// `owl doctor` reads the fingerprint and relay from.
+pub fn extension_params<'a>(card: &'a Value, uri: &str) -> Option<&'a Value> {
+    card.get("capabilities")?
+        .get("extensions")?
+        .as_array()?
+        .iter()
+        .find(|e| e.get("uri").and_then(Value::as_str) == Some(uri))?
+        .get("params")
 }
 
 async fn card(State(state): State<Arc<AppState>>) -> Json<Value> {
@@ -388,6 +485,13 @@ fn validate_question(value: &Value, caller: &str, me: &str) -> ApiResult<Payload
         str_field(body, "question").map_err(|_| ApiError::bad_request("missing body.question"))?;
     if question.trim().is_empty() {
         return Err(ApiError::bad_request("body.question is empty"));
+    }
+    // OWL-034: the asker's snippet is bounded in bytes after trimming; a non-string is a
+    // schema error below.
+    if let Some(Value::String(c)) = body.get("context")
+        && envelope::check_context(c).is_err()
+    {
+        return Err(ApiError::bad_request("context too long"));
     }
     serde_json::from_value(value.clone())
         .map_err(|e| ApiError::bad_request(format!("bad schema: {e}")))
@@ -461,19 +565,33 @@ async fn post_question(
     if !state.config.responder.enabled || policy.as_ref().is_some_and(|p| p.mode == Mode::Never) {
         return Err(ApiError::unavailable());
     }
-    let (project, path, question) = match &payload.body {
+    let (project, path, question, context) = match &payload.body {
         envelope::Body::Question {
             project,
             path,
             question,
-        } => (project.as_str(), path.as_deref(), question.as_str()),
+            context,
+        } => (
+            project.as_str(),
+            path.as_deref(),
+            question.as_str(),
+            context.as_deref(),
+        ),
         envelope::Body::Answer { .. } => {
             return Err(ApiError::bad_request("type must be question"));
         }
     };
     let hash = envelope::question_hash(project, path, question);
     let mode = policy.as_ref().map(|p| p.mode);
+    // OWL-034: a question with a context snippet, or one continuing a thread this daemon
+    // already holds, is never served from the cache (nor written to it, see `answer::send`).
+    let threaded = context.is_some()
+        || payload
+            .context_id
+            .as_deref()
+            .is_some_and(|cid| crate::answer::thread_known(&state.spool, cid, &payload.id));
     if may_read_cache(mode)
+        && !threaded
         && let Some(cached) = state.spool.cache_get(&hash).map_err(ApiError::storage)?
     {
         remember(&state, &payload.id, now)?;
@@ -511,9 +629,10 @@ async fn post_question(
             auto,
         },
     );
+    let (a2a, _) = a2a_state(record_state, false);
     Ok((
         StatusCode::ACCEPTED,
-        Json(json!({ "status": "accepted", "id": payload.id })),
+        Json(json!({ "status": "accepted", "id": payload.id, "state": a2a })),
     )
         .into_response())
 }
@@ -543,10 +662,11 @@ pub fn on_question_spooled(state: &AppState, event: Spooled) {
     }
 }
 
-/// Answer ingestion hook for the pull loop (OWL-008): the daemon notifies "answer from <peer>".
-pub fn on_answer_ingested(state: &AppState, event: AnswerIngested) {
+/// Pull-loop hook (OWL-008, OWL-034): an ingested answer ("answer from <peer>") or a declined
+/// ask ("declined by <peer>") forwarded to the daemon loop.
+pub fn on_pull_event(state: &AppState, event: DaemonEvent) {
     if let Some(tx) = &state.on_spooled {
-        let _ = tx.send(DaemonEvent::Answer(event));
+        let _ = tx.send(event);
     }
 }
 
@@ -623,17 +743,161 @@ async fn ack_outbox(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// The three peer paths the forward route replays (`v1/questions`, `v1/outbox`,
-/// `v1/outbox/{id}/ack`); anything else is `404`.
+/// A record id as it may appear in a path: non-empty, alphanumerics and `-` only.
+fn valid_id(id: &str) -> bool {
+    !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+}
+
+/// The A2A `Task` JSON for a question (OWL-034): `id`, `contextId` (when the question
+/// carries one), `status {state, timestamp, message}` and `metadata.owlpost`.
+pub fn task_json(
+    id: &str,
+    context_id: Option<&str>,
+    state: &str,
+    text: &str,
+    timestamp: &str,
+    owlpost: Value,
+) -> Value {
+    let mut v = json!({
+        "id": id,
+        "status": {
+            "state": state,
+            "timestamp": timestamp,
+            "message": {
+                "messageId": format!("{id}-status"),
+                "role": "ROLE_AGENT",
+                "parts": [ { "text": text } ],
+            },
+        },
+        "metadata": { "owlpost": owlpost },
+    });
+    if let Some(cid) = context_id {
+        v["contextId"] = json!(cid);
+    }
+    v
+}
+
+/// `metadata.owlpost` of a Task: who asked whom about what.
+fn task_meta(payload: &Payload) -> Value {
+    let (project, path) = match &payload.body {
+        envelope::Body::Question { project, path, .. } => (Some(project.as_str()), path.as_deref()),
+        envelope::Body::Answer { .. } => (None, None),
+    };
+    json!({ "from": payload.from, "to": payload.to, "project": project, "path": path })
+}
+
+/// The Task of question `id` asked by `caller`, looked up in `inbox/` (by id), `outbox/`
+/// (an answer whose `in_reply_to` is the id, addressed to the caller) and `done/` (by id);
+/// `None` when no such record of the caller's exists. A corrupt record counts as absent.
+fn find_task(spool: &Spool, caller: &str, id: &str) -> anyhow::Result<Option<Value>> {
+    let parse = |rec: &Record| serde_json::from_str::<Payload>(&rec.raw).ok();
+    if let Some(rec) = spool.get(Dir::Inbox, id).unwrap_or_default()
+        && let Some(q) = parse(&rec)
+        && q.kind == Kind::Question
+        && q.from == caller
+    {
+        let (state, text) = a2a_state(&rec.state, crate::answer::auto_error(&rec).is_some());
+        return Ok(Some(task_json(
+            id,
+            q.context_id.as_deref(),
+            state,
+            text,
+            &rec.received_at,
+            task_meta(&q),
+        )));
+    }
+    for (_, rec) in spool.list_lenient(Dir::Outbox)? {
+        if let Some(a) = parse(&rec)
+            && a.kind == Kind::Answer
+            && a.in_reply_to.as_deref() == Some(id)
+            && a.to == caller
+        {
+            let (state, text) = a2a_state(&rec.state, false);
+            // Project and path come from the finished question when it is still around.
+            let meta = spool
+                .get(Dir::Done, id)
+                .unwrap_or_default()
+                .and_then(|q| parse(&q))
+                .map_or_else(
+                    || json!({ "from": a.to, "to": a.from, "project": null, "path": null }),
+                    |q| task_meta(&q),
+                );
+            return Ok(Some(task_json(
+                id,
+                a.context_id.as_deref(),
+                state,
+                text,
+                &rec.received_at,
+                meta,
+            )));
+        }
+    }
+    if let Some(rec) = spool.get(Dir::Done, id).unwrap_or_default()
+        && let Some(q) = parse(&rec)
+        && q.kind == Kind::Question
+        && q.from == caller
+    {
+        let (state, text) = a2a_state(&rec.state, false);
+        let at = rec
+            .meta
+            .get("done_at")
+            .and_then(Value::as_str)
+            .unwrap_or(&rec.received_at)
+            .to_string();
+        return Ok(Some(task_json(
+            id,
+            q.context_id.as_deref(),
+            state,
+            text,
+            &at,
+            task_meta(&q),
+        )));
+    }
+    Ok(None)
+}
+
+/// `GET /v1/questions/{id}` (OWL-034) — the A2A `Task` of a question whose `from` is the
+/// caller; `404 not found` for another caller's question, an unknown id or a malformed one.
+/// A caller this daemon does not answer (policy `never`, responder disabled) gets a
+/// `REJECTED` / `unavailable` Task for any id it has no record of. Not rate limited.
+async fn get_task(
+    State(state): State<Arc<AppState>>,
+    Extension(peer): Extension<PeerId>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let caller = require_peer(&peer)?;
+    if !valid_id(&id) {
+        return Err(ApiError::not_found());
+    }
+    if let Some(task) = find_task(&state.spool, caller, &id).map_err(ApiError::storage)? {
+        return Ok(Json(task));
+    }
+    let book = state.contacts().map_err(ApiError::storage)?;
+    let never = policy_of(&book, caller).is_some_and(|p| p.mode == Mode::Never);
+    if !state.config.responder.enabled || never {
+        let (s, text) = a2a_state("", false);
+        return Ok(Json(task_json(
+            &id,
+            None,
+            s,
+            text,
+            &envelope::rfc3339_now(),
+            json!({ "from": caller, "to": state.fingerprint(), "project": null, "path": null }),
+        )));
+    }
+    Err(ApiError::not_found())
+}
+
+/// The peer paths the forward route replays (`v1/questions`, `v1/questions/{id}`,
+/// `v1/outbox`, `v1/outbox/{id}/ack`); anything else is `404`.
 pub fn forwardable(rest: &str) -> bool {
     match rest {
         "v1/questions" | "v1/outbox" => true,
         _ => rest
             .strip_prefix("v1/outbox/")
             .and_then(|r| r.strip_suffix("/ack"))
-            .is_some_and(|id| {
-                !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
-            }),
+            .or_else(|| rest.strip_prefix("v1/questions/"))
+            .is_some_and(valid_id),
     }
 }
 
@@ -901,6 +1165,7 @@ mod tests {
         assert!(err_of(v).starts_with("bad schema: "));
     }
 
+    /// OWL-034 AC1: the A2A 1.0 card shape outside the daemon (no iroh endpoint bound).
     #[test]
     fn card_uses_endpoint_then_bound_addr_then_listen() {
         let home = tempfile::tempdir().unwrap();
@@ -910,6 +1175,8 @@ mod tests {
             ..Default::default()
         };
         cfg.responder.enabled = false;
+        cfg.projects
+            .insert("github.com/x/y".into(), "/tmp/y".into());
         let state = AppState::new(
             home.path().to_path_buf(),
             home.path().to_path_buf(),
@@ -919,29 +1186,76 @@ mod tests {
         )
         .unwrap();
         let card = card_json(&state);
-        assert_eq!(card["url"], "https://127.0.0.1:0/");
-        assert_eq!(card["name"], "owlpost");
-        assert_eq!(card["owlpost"]["responds"], false);
-        assert_eq!(card["owlpost"]["protocol"], 1);
-        assert_eq!(card["owlpost"]["harness"], "claude");
+        let https = &card["supportedInterfaces"][0];
+        assert_eq!(https["url"], "https://127.0.0.1:0/");
+        assert_eq!(https["protocolBinding"], PROTOCOL_BINDING);
+        assert_eq!(https["protocolVersion"], "1");
         assert_eq!(
-            card["owlpost"]["fingerprint"],
+            card["supportedInterfaces"].as_array().unwrap().len(),
+            1,
+            "no iroh interface outside the daemon"
+        );
+        assert_eq!(card["name"], "owlpost");
+        assert_eq!(card["provider"]["organization"], "owlpost");
+        assert_eq!(card["provider"]["url"], "", "no e-mail configured");
+        assert!(
+            card["description"]
+                .as_str()
+                .unwrap()
+                .contains("owlpost approves every answer")
+        );
+        let ident = extension_params(&card, EXT_IDENTITY).unwrap();
+        assert_eq!(
+            ident["fingerprint"],
             identity::fingerprint(&id.verifying_key())
         );
         assert_eq!(
-            card["owlpost"]["pubkey"],
+            ident["pubkey"],
             identity::pubkey_string(&id.verifying_key())
         );
-        assert_eq!(card["protocolVersion"], A2A_PROTOCOL_VERSION);
+        assert_eq!(ident["relay"], Value::Null);
+        let repo = extension_params(&card, EXT_REPO_QUESTION).unwrap();
+        assert_eq!(repo["projects"], json!(["github.com/x/y"]));
+        let gate = extension_params(&card, EXT_HUMAN_GATE).unwrap();
+        assert_eq!(gate["responds"], false);
+        assert_eq!(gate["harness"], "claude");
+        for e in card["capabilities"]["extensions"].as_array().unwrap() {
+            assert_eq!(e["required"], true, "{e}");
+            assert!(e["description"].is_string(), "{e}");
+        }
+        assert_eq!(extension_params(&card, "urn:owlpost:ext:nope:v1"), None);
         assert_eq!(card["capabilities"]["streaming"], false);
         assert_eq!(card["capabilities"]["pushNotifications"], false);
-        assert_eq!(card["skills"], json!([]));
+        assert_eq!(card["capabilities"]["extendedAgentCard"], false);
+        assert!(
+            card["securitySchemes"]["owl-mtls"]["mtlsSecurityScheme"]["description"].is_string()
+        );
+        assert_eq!(
+            card["securityRequirements"],
+            json!([{ "schemes": { "owl-mtls": { "list": [] } } }])
+        );
+        assert_eq!(card["defaultInputModes"], json!(["text/plain"]));
+        assert_eq!(card["defaultOutputModes"], json!(["text/plain"]));
+        assert_eq!(card["skills"][0]["id"], "ask-about-repo");
+        assert_eq!(card["skills"][0]["name"], "Ask about my code");
+        assert_eq!(
+            card["skills"][0]["tags"],
+            json!(["code", "repository", "q&a"])
+        );
+        assert_eq!(card["skills"].as_array().unwrap().len(), 1);
         assert_eq!(card["version"], env!("CARGO_PKG_VERSION"));
-        assert_eq!(card["iroh"], Value::Null, "no endpoint outside the daemon");
+        for gone in ["url", "protocolVersion", "owlpost", "iroh"] {
+            assert!(card.get(gone).is_none(), "top-level {gone} must be gone");
+        }
         state.bound.set("127.0.0.1:4321".parse().unwrap()).unwrap();
-        assert_eq!(card_json(&state)["url"], "https://127.0.0.1:4321/");
+        assert_eq!(
+            card_json(&state)["supportedInterfaces"][0]["url"],
+            "https://127.0.0.1:4321/"
+        );
         cfg.endpoints = vec!["b.example.org:7411".into()];
         cfg.name = "Bea".into();
+        cfg.emails = vec!["bea@example.org".into(), "b2@example.org".into()];
+        cfg.responder.harness = "codex".into();
         let state = AppState::new(
             home.path().to_path_buf(),
             home.path().to_path_buf(),
@@ -951,9 +1265,138 @@ mod tests {
         )
         .unwrap();
         let card = card_json(&state);
-        assert_eq!(card["url"], "https://b.example.org:7411/");
+        assert_eq!(
+            card["supportedInterfaces"][0]["url"],
+            "https://b.example.org:7411/"
+        );
         assert_eq!(card["name"], "Bea");
-        assert_eq!(card["owlpost"]["responds"], false);
+        assert_eq!(card["provider"]["organization"], "Bea");
+        assert_eq!(card["provider"]["url"], "mailto:bea@example.org");
+        assert_eq!(
+            card["description"],
+            "owlpost agent of Bea: answers questions about their code; Bea approves every answer before it leaves their machine"
+        );
+        let gate = extension_params(&card, EXT_HUMAN_GATE).unwrap();
+        assert_eq!(gate["responds"], false);
+        assert_eq!(gate["harness"], "codex");
+    }
+
+    /// OWL-034: the Task JSON shape and every row of the state table through `a2a_state`.
+    #[test]
+    fn task_json_shape_and_state_table() {
+        let t = task_json(
+            "q-1",
+            Some("c-1"),
+            "TASK_STATE_WORKING",
+            "the owner is reviewing the answer",
+            "2026-09-12T10:00:00Z",
+            json!({ "from": "owl:a", "to": "owl:b", "project": "p", "path": null }),
+        );
+        assert_eq!(
+            t,
+            json!({
+                "id": "q-1",
+                "contextId": "c-1",
+                "status": {
+                    "state": "TASK_STATE_WORKING",
+                    "timestamp": "2026-09-12T10:00:00Z",
+                    "message": {
+                        "messageId": "q-1-status",
+                        "role": "ROLE_AGENT",
+                        "parts": [ { "text": "the owner is reviewing the answer" } ],
+                    },
+                },
+                "metadata": { "owlpost": { "from": "owl:a", "to": "owl:b", "project": "p", "path": null } },
+            })
+        );
+        let no_thread = task_json("q-2", None, "TASK_STATE_SUBMITTED", "t", "ts", json!({}));
+        assert!(no_thread.get("contextId").is_none());
+        assert_eq!(no_thread["status"]["message"]["messageId"], "q-2-status");
+        use crate::envelope::{
+            TASK_STATE_COMPLETED, TASK_STATE_REJECTED, TASK_STATE_SUBMITTED, TASK_STATE_WORKING,
+        };
+        assert_eq!(
+            a2a_state("consent", false),
+            (TASK_STATE_SUBMITTED, "waiting for the owner's consent")
+        );
+        assert_eq!(
+            a2a_state("pending", false),
+            (TASK_STATE_WORKING, "the owner's agent is answering")
+        );
+        assert_eq!(
+            a2a_state("pending", true),
+            (
+                TASK_STATE_WORKING,
+                "the owner's agent could not answer; waiting for the owner"
+            )
+        );
+        assert_eq!(
+            a2a_state("drafted", false),
+            (TASK_STATE_WORKING, "the owner is reviewing the answer")
+        );
+        assert_eq!(
+            a2a_state("drafted", true),
+            (TASK_STATE_WORKING, "the owner is reviewing the answer"),
+            "auto_error only matters while pending"
+        );
+        for s in ["unacked", "acked", "expired", "answered"] {
+            assert_eq!(
+                a2a_state(s, false),
+                (TASK_STATE_COMPLETED, "answered"),
+                "{s}"
+            );
+        }
+        for s in ["denied", "rejected"] {
+            assert_eq!(
+                a2a_state(s, false),
+                (TASK_STATE_REJECTED, "the owner declined"),
+                "{s}"
+            );
+        }
+        for s in ["", "waiting", "declined", "seen", "CONSENT"] {
+            assert_eq!(
+                a2a_state(s, false),
+                (TASK_STATE_REJECTED, "unavailable"),
+                "{s:?}"
+            );
+        }
+        assert_eq!(
+            crate::envelope::state_text(TASK_STATE_SUBMITTED),
+            Some("waiting for the owner's consent")
+        );
+        assert_eq!(
+            crate::envelope::state_text(TASK_STATE_WORKING),
+            Some("the owner's agent is answering")
+        );
+        assert_eq!(
+            crate::envelope::state_text(TASK_STATE_COMPLETED),
+            Some("answered")
+        );
+        assert_eq!(
+            crate::envelope::state_text(TASK_STATE_REJECTED),
+            Some("the owner declined")
+        );
+        assert_eq!(crate::envelope::state_text("TASK_STATE_CANCELED"), None);
+        // The 403 body carries the REJECTED state; a plain error does not.
+        let resp = ApiError::unavailable().into_response();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let body = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(axum::body::to_bytes(resp.into_body(), usize::MAX))
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&body).unwrap(),
+            json!({ "error": "unavailable", "state": "TASK_STATE_REJECTED" })
+        );
+        let resp = ApiError::not_found().into_response();
+        let body = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(axum::body::to_bytes(resp.into_body(), usize::MAX))
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&body).unwrap(),
+            json!({ "error": "not found" })
+        );
     }
 
     /// The forward route's own refusals, without any network: owner check first, then the
@@ -1029,9 +1472,10 @@ mod tests {
             .await,
             (403, "owner only".into())
         );
-        // Owner, but not one of the three peer paths.
+        // Owner, but not one of the peer paths.
         for bad in [
-            "v1/questions/x",
+            "v1/questions/",
+            "v1/questions/x/y",
             ".well-known/agent-card.json",
             "v1/outbox/a/ack/",
         ] {
@@ -1110,18 +1554,26 @@ mod tests {
     }
 
     #[test]
-    fn forwardable_is_exactly_the_three_peer_paths() {
+    fn forwardable_is_exactly_the_four_peer_paths() {
         assert!(forwardable("v1/questions"));
         assert!(forwardable("v1/outbox"));
         assert!(forwardable(
             "v1/outbox/0191c7a0-0000-7000-8000-000000000000/ack"
         ));
         assert!(forwardable("v1/outbox/abc/ack"));
+        // OWL-034: the Task route is forwarded too.
+        assert!(forwardable(
+            "v1/questions/0191c7a0-0000-7000-8000-000000000000"
+        ));
+        assert!(forwardable("v1/questions/x"));
         for bad in [
             "",
             "v1",
             "v1/questions/",
-            "v1/questions/x",
+            "v1/questions/x/y",
+            "v1/questions/x/",
+            "v1/questions/../x",
+            "v1/questions/a b",
             "v1/outbox/",
             "v1/outbox/abc",
             "v1/outbox//ack",

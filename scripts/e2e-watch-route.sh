@@ -1,7 +1,7 @@
 #!/bin/sh
 # e2e-watch-route.sh — proof on the real Claude Code harness that exactly one session wakes
 # per record (OWL-033, design §8, §12): two idle sessions in two directories, one of them the
-# configured checkout of the test project; `owl route <id>` writes the record's framed block
+# configured checkout of the test project; `owl route <id>` writes the record's message table
 # into that session's private wake directory ($OWLPOST_HOME/sessions/<session_id>/wake, the
 # SessionStart hook registered it as a watch path) and only that session's FileChanged hook
 # (asyncRewake) exits 2 and gets a new model turn — the other session stays silent.
@@ -22,7 +22,7 @@
 # ready`), waits for both first `"type":"result"` events, drops one unseen question record
 # about github.com/e2e/repo into $OWLPOST_HOME/spool/inbox/ and runs `owl route <id>`. Within
 # 60 s stream A must carry a `system` `hook_response` event with `"hook_event":"FileChanged"`,
-# `"exit_code":2` and the 🦉 framed block (the question text verbatim), followed by a second
+# `"exit_code":2` and the `| 🦉` header row of the message table (the question text verbatim), followed by a second
 # `"type":"assistant"` event; stream B must carry no FileChanged hook_response and no second
 # assistant event, checked 10 s after A woke. No second user message is ever sent. Prints
 # `PASS` or `FAIL <reason>`, exits non-zero on FAIL (2 = precondition); each `claude` run is
@@ -161,10 +161,10 @@ case $routed in
     ;;
 esac
 
-# The FileChanged hook_response (exit 2, the framed block) after `result_line` in `stream`,
+# The FileChanged hook_response (exit 2, the message table) after `result_line` in `stream`,
 # as the line number relative to the tail; empty when absent.
 wake_line() {
-    tail -n "+$(($2 + 1))" "$1" | grep -n -F '"hook_response"' | grep -F '"hook_event":"FileChanged"' | grep -F '"exit_code":2' | grep -F 'does the watch wake?' | head -n 1 | cut -d: -f1
+    tail -n "+$(($2 + 1))" "$1" | grep -n -F '"hook_response"' | grep -F '"hook_event":"FileChanged"' | grep -F '"exit_code":2' | grep -F '| 🦉' | grep -F 'does the watch wake?' | head -n 1 | cut -d: -f1
 }
 # Assistant events after line `$2` (relative to the tail after `$3`) in `stream`.
 assistant_after() {
@@ -190,7 +190,7 @@ while [ $waited -lt 60 ]; do
 done
 woke_after=$(( $(date +%s) - dropped_at ))
 if [ -z "$hook_a" ]; then
-    reason="A: no FileChanged hook_response with exit_code 2 and the framed block within ${waited}s of the route"
+    reason="A: no FileChanged hook_response with exit_code 2 and the message table within ${waited}s of the route"
 elif [ "${assistant_a:-0}" -eq 0 ]; then
     reason="A: FileChanged hook_response seen but no assistant event followed within ${waited}s"
 else

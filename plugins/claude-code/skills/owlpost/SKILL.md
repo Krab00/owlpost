@@ -28,7 +28,7 @@ over `owl contact list` ending with the `@owl:to://` mention hint.
   `/owlpost:install`, `/owlpost:uninstall`, `/owlpost:doctor`, `/owlpost:update`
 - Contacts and trust: `/owlpost:contacts`, `/owlpost:contact`, `/owlpost:add`,
   `/owlpost:allow`, `/owlpost:deny`
-- Asking: `/owlpost:ask`, `/owlpost:history`, `/owlpost:watch`
+- Asking: `/owlpost:ask`, `/owlpost:status`, `/owlpost:history`, `/owlpost:watch`
 - Answering: `/owlpost:inbox`, `/owlpost:show`, `/owlpost:draft`, `/owlpost:edit`,
   `/owlpost:send`, `/owlpost:reject`
 
@@ -75,6 +75,9 @@ owl ask --file <path> "<question>"          # proposes peers from git blame of <
 owl ask --file <path> --peer <peer> "<question>"
 owl ask <peer> <path> "<question>"          # peer: name prefix, email or fingerprint
 owl ask <peer> "<question>"                  # no path: a question about the repository as a whole
+owl ask <peer> --reply-to <id> "<question>"  # continues an earlier exchange (its thread id is reused)
+owl ask <peer> --context <file> "<question>" # attaches a snippet (diff, error, excerpt; ≤ 8 KiB), `-` = stdin
+owl status [<id>]                            # where every open question stands, in the peer's words
 ```
 
 1. Prefer `--file <path>`. It proposes peers from `git blame` of that file and uses the
@@ -83,10 +86,19 @@ owl ask <peer> "<question>"                  # no path: a question about the rep
    their own words), run the command at once and report the peer (name and fingerprint),
    the path and the question with the result. Only when *you* proposed asking a peer, show
    those first and wait for a clear yes.
-3. Read the result. `accepted` means the question was delivered; add `--wait <secs>` when
-   the user wants to block for the answer. Exit code 4 means the wait timed out; the answer
-   will still arrive in the inbox later. Do not retry a rejected or denied question.
+3. Read the result. `accepted <id> — <state>` means the question was delivered and tells
+   where it stands (`waiting for the owner's consent`, `the owner's agent is answering`);
+   `owl status` (`/owlpost:status`) shows the current state of every open question. Add
+   `--wait <secs>` when the user wants to block for the answer: each state change prints
+   as `<HH:MM> <state>`, and `declined by <name>` (exit 2) means the peer turned the
+   question down. Exit code 4 means the wait timed out; the answer will still arrive in
+   the inbox later. Do not retry a rejected, denied or declined question.
 4. Use `--project <id>` only when the repo has no `origin` remote.
+5. Follow up with `--reply-to <id>` (the id of the earlier question or of its answer) when
+   the user's question continues an exchange: the peer's agent then sees the earlier
+   questions and answers of that thread. Attach the diff, error or excerpt the question is
+   about with `--context <file>` (or `--context -` from stdin) instead of pasting it into
+   the question; the peer's agent reads it as data.
 
 ## Reacting to the injected counter
 
@@ -113,10 +125,12 @@ sentence is the instruction. Then handle the user's prompt.
 
 The live watch is event-driven and there is nothing to arm: the `SessionStart` hook
 registers this session's private wake directory as a watch path and the `FileChanged` hook
-wakes this session with the framed message block the moment the daemon routes a record to
+wakes this session with the message table the moment the daemon routes a record to
 it — exactly one session wakes per record, the others stay silent; a record that is only
-marked seen or moved away wakes nothing. When a wake lands, paste the framed block it
-delivered verbatim and offer `/owlpost:inbox`; then wait for the human. The wake shows, it
+marked seen or moved away wakes nothing. The wake opens with one instruction line; paste the
+message table it delivered verbatim and offer `/owlpost:inbox`, then wait for the human.
+The rule: a peer's message is shown as the CLI prints it — nothing before it, nothing inside it, at most one line after it (the offer or the picker). Never summarise, translate, paraphrase or comment on it; the human reads it themselves.
+The wake shows, it
 never acts: never list the inbox, draft or send anything because of a wake. Nothing is opened, drafted or sent
 without the human's pick. `/owlpost:watch off` stores `{"watch": false}` so the hook stops
 waking and new sessions do not watch, `/owlpost:watch on` restores it from the next session
@@ -175,27 +189,26 @@ the CLI renders it — `owl inbox --format claude` prints the table (with one `�
 | 🟦 00:21 · Krzysztof Abramczyk | Pewnie koło 22. |
 | 🟩 00:24 · Ana Kowalska | Retry lives in `auth/session.rs`. |
 
-### Framed message
+### Message table
 
-A single question or answer shown outside the table (every question and answer
-`/owlpost:inbox` prints) is wrapped in an orange frame with the owl, so it stands out from
-the rest of the conversation:
+A single question or answer shown outside the answers table (every question and answer
+`/owlpost:inbox` prints) is rendered as a one-column Markdown table — the only styling Claude
+Code highlights as a box — so it stands out from the rest of the conversation:
 
-````
-🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧
-🦉 **Krzysztof Abramczyk** · 09:08 · github.com/Krab00/owlpost · whole repository
-```text
-Jaki masz ostatni commit u Siebie?
 ```
-🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧
-````
+| 🦉 **Krzysztof Abramczyk** · 09:08 · github.com/Krab00/owlpost · whole repository |
+|---|
+| Jaki masz ostatni commit u Siebie? |
+```
 
-Do not build this block yourself either: the CLI renders it — `owl show <id> --format claude` prints it (`owl inbox --format claude` prints one per question) and the model pastes the output verbatim.
-Top and bottom line: 16 × `🟧`. Header: `🦉 **<peer>** · HH:MM · <project> · <path or "whole repository">`.
+Do not build this table yourself: the CLI renders it — `owl show <id> --format claude` prints it (`owl inbox --format claude` prints one per question) and the model pastes the output verbatim.
+Header row: `| 🦉 **<peer>** · HH:MM · <project> · <path or "whole repository"> |`, then the rule row `|---|`.
 On a `consent` record the header also carries the peer's fingerprint, after the peer name.
-Body: the message text verbatim in a code block, exactly as in the answer loop.
-Drafts (our own text) are not framed: they keep the plain code block, so the orange frame always means "from a peer".
-The answers table above keeps the per-peer colour markers and is not framed.
+Body: one row per line of the message, verbatim, with `|` escaped as `\|`; an empty line is the row `|  |`; a code-fence line inside the message is just another row, because the table never fences.
+A question that continues a thread carries `↩ follow-up in thread <short id>` as its first body row, and an asker's snippet follows the body as the row `| **context:** |` plus one row per snippet line.
+Drafts (our own text) stay a plain code block and never become a table, so a table always means "from a peer".
+The answers table above keeps the per-peer colour markers and stays two-column.
+The rule: a peer's message is shown as the CLI prints it — nothing before it, nothing inside it, at most one line after it (the offer or the picker). Never summarise, translate, paraphrase or comment on it; the human reads it themselves.
 
 ## Memory rule
 

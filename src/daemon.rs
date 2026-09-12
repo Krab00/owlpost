@@ -186,6 +186,15 @@ fn handle_event(state: &AppState, ev: DaemonEvent) {
                 &a.path,
             );
         }
+        DaemonEvent::Declined(d) => {
+            tracing::info!(id = %d.id, peer = %d.peer, "question declined");
+            notify::notify(
+                &state.config,
+                Kind::Declined,
+                &peer_name(state, &d.peer),
+                "-",
+            );
+        }
     }
 }
 
@@ -380,12 +389,16 @@ mod tests {
             id.verifying_key().as_bytes()
         );
         let card = crate::server::card_json(&running.state);
+        let pubkey = identity::pubkey_string(&id.verifying_key());
+        // OWL-034: the bound endpoint shows as the `owl-iroh://<key>` interface (the key
+        // without its `ed25519:` prefix), the relay (none here) in the identity extension.
         assert_eq!(
-            card["iroh"]["id"],
-            identity::pubkey_string(&id.verifying_key())
+            card["supportedInterfaces"][1]["url"],
+            format!("owl-iroh://{}", pubkey.strip_prefix("ed25519:").unwrap())
         );
-        assert_eq!(card["iroh"]["id"], card["owlpost"]["pubkey"]);
-        assert_eq!(card["iroh"]["relay"], serde_json::Value::Null);
+        let params = crate::server::extension_params(&card, crate::server::EXT_IDENTITY).unwrap();
+        assert_eq!(params["pubkey"], pubkey);
+        assert_eq!(params["relay"], serde_json::Value::Null);
         // A different seed is a different id: the equality above is not vacuous.
         assert_ne!(
             running.iroh().id().as_bytes(),
