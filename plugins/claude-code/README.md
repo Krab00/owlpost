@@ -31,7 +31,8 @@ patterns of the next steps a file runs itself); `tests/plugin.rs` pins the rule.
 | `/owlpost:add <peer json\|file> [--local]` | `commands/add.md` | `owl add` — add a peer file |
 | `/owlpost:allow <peer> [--once\|--always]` | `commands/allow.md` | `owl allow` — release held questions, set policy (confirms first) |
 | `/owlpost:deny <peer>` | `commands/deny.md` | `owl deny` — policy never (confirms first) |
-| `/owlpost:ask <peer> [path] <question>` | `commands/ask.md` | `owl ask` — send a question at once; the command is the approval, no confirmation step |
+| `/owlpost:ask <peer> [path] <question>` | `commands/ask.md` | `owl ask` — send a question at once; the command is the approval, no confirmation step; `--reply-to <id>` continues a thread, `--context <path>` attaches a snippet |
+| `/owlpost:status [id]` | `commands/status.md` | `owl status` — where every open question stands, in the peer's words (`waiting for the owner's consent`, …) |
 | `/owlpost:inbox` | `commands/inbox.md` | `owl inbox --json` — walk the records: question verbatim, consent picker (allow once/always, deny), draft / draft & send / reject / skip picker, verbatim draft, send/edit/reject picker |
 | `/owlpost:show <id>` | `commands/show.md` | `owl show` — full record, offer draft/send/reject |
 | `/owlpost:draft <id> [--harness <name>] [--send]` | `commands/draft.md` | `owl draft` — run the responder, show the draft; `--send` then runs `owl send` at once |

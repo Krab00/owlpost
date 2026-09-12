@@ -1167,6 +1167,7 @@ mod tests {
         assert!(err_of(v).starts_with("bad schema: "));
     }
 
+    /// OWL-034 AC1: the A2A 1.0 card shape outside the daemon (no iroh endpoint bound).
     #[test]
     fn card_uses_endpoint_then_bound_addr_then_listen() {
         let home = tempfile::tempdir().unwrap();
@@ -1176,6 +1177,8 @@ mod tests {
             ..Default::default()
         };
         cfg.responder.enabled = false;
+        cfg.projects
+            .insert("github.com/x/y".into(), "/tmp/y".into());
         let state = AppState::new(
             home.path().to_path_buf(),
             home.path().to_path_buf(),
@@ -1185,29 +1188,70 @@ mod tests {
         )
         .unwrap();
         let card = card_json(&state);
-        assert_eq!(card["url"], "https://127.0.0.1:0/");
-        assert_eq!(card["name"], "owlpost");
-        assert_eq!(card["owlpost"]["responds"], false);
-        assert_eq!(card["owlpost"]["protocol"], 1);
-        assert_eq!(card["owlpost"]["harness"], "claude");
+        let https = &card["supportedInterfaces"][0];
+        assert_eq!(https["url"], "https://127.0.0.1:0/");
+        assert_eq!(https["protocolBinding"], PROTOCOL_BINDING);
+        assert_eq!(https["protocolVersion"], "1");
         assert_eq!(
-            card["owlpost"]["fingerprint"],
+            card["supportedInterfaces"].as_array().unwrap().len(),
+            1,
+            "no iroh interface outside the daemon"
+        );
+        assert_eq!(card["name"], "owlpost");
+        assert_eq!(card["provider"]["organization"], "owlpost");
+        assert_eq!(card["provider"]["url"], "", "no e-mail configured");
+        assert!(
+            card["description"]
+                .as_str()
+                .unwrap()
+                .contains("owlpost approves every answer")
+        );
+        let ident = extension_params(&card, EXT_IDENTITY).unwrap();
+        assert_eq!(
+            ident["fingerprint"],
             identity::fingerprint(&id.verifying_key())
         );
-        assert_eq!(
-            card["owlpost"]["pubkey"],
-            identity::pubkey_string(&id.verifying_key())
-        );
-        assert_eq!(card["protocolVersion"], A2A_PROTOCOL_VERSION);
+        assert_eq!(ident["pubkey"], identity::pubkey_string(&id.verifying_key()));
+        assert_eq!(ident["relay"], Value::Null);
+        let repo = extension_params(&card, EXT_REPO_QUESTION).unwrap();
+        assert_eq!(repo["projects"], json!(["github.com/x/y"]));
+        let gate = extension_params(&card, EXT_HUMAN_GATE).unwrap();
+        assert_eq!(gate["responds"], false);
+        assert_eq!(gate["harness"], "claude");
+        for e in card["capabilities"]["extensions"].as_array().unwrap() {
+            assert_eq!(e["required"], true, "{e}");
+            assert!(e["description"].is_string(), "{e}");
+        }
+        assert_eq!(extension_params(&card, "urn:owlpost:ext:nope:v1"), None);
         assert_eq!(card["capabilities"]["streaming"], false);
         assert_eq!(card["capabilities"]["pushNotifications"], false);
-        assert_eq!(card["skills"], json!([]));
+        assert_eq!(card["capabilities"]["extendedAgentCard"], false);
+        assert!(
+            card["securitySchemes"]["owl-mtls"]["mtlsSecurityScheme"]["description"].is_string()
+        );
+        assert_eq!(
+            card["securityRequirements"],
+            json!([{ "schemes": { "owl-mtls": { "list": [] } } }])
+        );
+        assert_eq!(card["defaultInputModes"], json!(["text/plain"]));
+        assert_eq!(card["defaultOutputModes"], json!(["text/plain"]));
+        assert_eq!(card["skills"][0]["id"], "ask-about-repo");
+        assert_eq!(card["skills"][0]["name"], "Ask about my code");
+        assert_eq!(card["skills"][0]["tags"], json!(["code", "repository", "q&a"]));
+        assert_eq!(card["skills"].as_array().unwrap().len(), 1);
         assert_eq!(card["version"], env!("CARGO_PKG_VERSION"));
-        assert_eq!(card["iroh"], Value::Null, "no endpoint outside the daemon");
+        for gone in ["url", "protocolVersion", "owlpost", "iroh"] {
+            assert!(card.get(gone).is_none(), "top-level {gone} must be gone");
+        }
         state.bound.set("127.0.0.1:4321".parse().unwrap()).unwrap();
-        assert_eq!(card_json(&state)["url"], "https://127.0.0.1:4321/");
+        assert_eq!(
+            card_json(&state)["supportedInterfaces"][0]["url"],
+            "https://127.0.0.1:4321/"
+        );
         cfg.endpoints = vec!["b.example.org:7411".into()];
         cfg.name = "Bea".into();
+        cfg.emails = vec!["bea@example.org".into(), "b2@example.org".into()];
+        cfg.responder.harness = "codex".into();
         let state = AppState::new(
             home.path().to_path_buf(),
             home.path().to_path_buf(),
@@ -1217,9 +1261,134 @@ mod tests {
         )
         .unwrap();
         let card = card_json(&state);
-        assert_eq!(card["url"], "https://b.example.org:7411/");
+        assert_eq!(
+            card["supportedInterfaces"][0]["url"],
+            "https://b.example.org:7411/"
+        );
         assert_eq!(card["name"], "Bea");
-        assert_eq!(card["owlpost"]["responds"], false);
+        assert_eq!(card["provider"]["organization"], "Bea");
+        assert_eq!(card["provider"]["url"], "mailto:bea@example.org");
+        assert_eq!(
+            card["description"],
+            "owlpost agent of Bea: answers questions about their code; Bea approves every answer before it leaves their machine"
+        );
+        let gate = extension_params(&card, EXT_HUMAN_GATE).unwrap();
+        assert_eq!(gate["responds"], false);
+        assert_eq!(gate["harness"], "codex");
+    }
+
+    /// OWL-034: the Task JSON shape and every row of the state table through `a2a_state`.
+    #[test]
+    fn task_json_shape_and_state_table() {
+        let t = task_json(
+            "q-1",
+            Some("c-1"),
+            "TASK_STATE_WORKING",
+            "the owner is reviewing the answer",
+            "2026-09-12T10:00:00Z",
+            json!({ "from": "owl:a", "to": "owl:b", "project": "p", "path": null }),
+        );
+        assert_eq!(
+            t,
+            json!({
+                "id": "q-1",
+                "contextId": "c-1",
+                "status": {
+                    "state": "TASK_STATE_WORKING",
+                    "timestamp": "2026-09-12T10:00:00Z",
+                    "message": {
+                        "messageId": "q-1-status",
+                        "role": "ROLE_AGENT",
+                        "parts": [ { "text": "the owner is reviewing the answer" } ],
+                    },
+                },
+                "metadata": { "owlpost": { "from": "owl:a", "to": "owl:b", "project": "p", "path": null } },
+            })
+        );
+        let no_thread = task_json("q-2", None, "TASK_STATE_SUBMITTED", "t", "ts", json!({}));
+        assert!(no_thread.get("contextId").is_none());
+        assert_eq!(no_thread["status"]["message"]["messageId"], "q-2-status");
+        use crate::envelope::{
+            TASK_STATE_COMPLETED, TASK_STATE_REJECTED, TASK_STATE_SUBMITTED, TASK_STATE_WORKING,
+        };
+        assert_eq!(
+            a2a_state("consent", false),
+            (TASK_STATE_SUBMITTED, "waiting for the owner's consent")
+        );
+        assert_eq!(
+            a2a_state("pending", false),
+            (TASK_STATE_WORKING, "the owner's agent is answering")
+        );
+        assert_eq!(
+            a2a_state("pending", true),
+            (
+                TASK_STATE_WORKING,
+                "the owner's agent could not answer; waiting for the owner"
+            )
+        );
+        assert_eq!(
+            a2a_state("drafted", false),
+            (TASK_STATE_WORKING, "the owner is reviewing the answer")
+        );
+        assert_eq!(
+            a2a_state("drafted", true),
+            (TASK_STATE_WORKING, "the owner is reviewing the answer"),
+            "auto_error only matters while pending"
+        );
+        for s in ["unacked", "acked", "expired", "answered"] {
+            assert_eq!(a2a_state(s, false), (TASK_STATE_COMPLETED, "answered"), "{s}");
+        }
+        for s in ["denied", "rejected"] {
+            assert_eq!(
+                a2a_state(s, false),
+                (TASK_STATE_REJECTED, "the owner declined"),
+                "{s}"
+            );
+        }
+        for s in ["", "waiting", "declined", "seen", "CONSENT"] {
+            assert_eq!(
+                a2a_state(s, false),
+                (TASK_STATE_REJECTED, "unavailable"),
+                "{s:?}"
+            );
+        }
+        assert_eq!(
+            crate::envelope::state_text(TASK_STATE_SUBMITTED),
+            Some("waiting for the owner's consent")
+        );
+        assert_eq!(
+            crate::envelope::state_text(TASK_STATE_WORKING),
+            Some("the owner's agent is answering")
+        );
+        assert_eq!(
+            crate::envelope::state_text(TASK_STATE_COMPLETED),
+            Some("answered")
+        );
+        assert_eq!(
+            crate::envelope::state_text(TASK_STATE_REJECTED),
+            Some("the owner declined")
+        );
+        assert_eq!(crate::envelope::state_text("TASK_STATE_CANCELED"), None);
+        // The 403 body carries the REJECTED state; a plain error does not.
+        let resp = ApiError::unavailable().into_response();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let body = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(axum::body::to_bytes(resp.into_body(), usize::MAX))
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&body).unwrap(),
+            json!({ "error": "unavailable", "state": "TASK_STATE_REJECTED" })
+        );
+        let resp = ApiError::not_found().into_response();
+        let body = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(axum::body::to_bytes(resp.into_body(), usize::MAX))
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&body).unwrap(),
+            json!({ "error": "not found" })
+        );
     }
 
     /// The forward route's own refusals, without any network: owner check first, then the
@@ -1295,9 +1464,10 @@ mod tests {
             .await,
             (403, "owner only".into())
         );
-        // Owner, but not one of the three peer paths.
+        // Owner, but not one of the peer paths.
         for bad in [
-            "v1/questions/x",
+            "v1/questions/",
+            "v1/questions/x/y",
             ".well-known/agent-card.json",
             "v1/outbox/a/ack/",
         ] {
@@ -1376,18 +1546,26 @@ mod tests {
     }
 
     #[test]
-    fn forwardable_is_exactly_the_three_peer_paths() {
+    fn forwardable_is_exactly_the_four_peer_paths() {
         assert!(forwardable("v1/questions"));
         assert!(forwardable("v1/outbox"));
         assert!(forwardable(
             "v1/outbox/0191c7a0-0000-7000-8000-000000000000/ack"
         ));
         assert!(forwardable("v1/outbox/abc/ack"));
+        // OWL-034: the Task route is forwarded too.
+        assert!(forwardable(
+            "v1/questions/0191c7a0-0000-7000-8000-000000000000"
+        ));
+        assert!(forwardable("v1/questions/x"));
         for bad in [
             "",
             "v1",
             "v1/questions/",
-            "v1/questions/x",
+            "v1/questions/x/y",
+            "v1/questions/x/",
+            "v1/questions/../x",
+            "v1/questions/a b",
             "v1/outbox/",
             "v1/outbox/abc",
             "v1/outbox//ack",

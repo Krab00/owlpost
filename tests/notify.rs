@@ -9,7 +9,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use owlpost::contacts::Mode;
-use owlpost::server::{AnswerIngested, Spooled, on_answer_ingested, on_question_spooled};
+use owlpost::server::{
+    AnswerIngested, DaemonEvent, Declined, Spooled, on_pull_event, on_question_spooled,
+};
 use owlpost::spool::{Dir, Record};
 
 use common::{Peer, client, id, policy, post_envelope, signed, spawn_daemon_with};
@@ -94,13 +96,13 @@ async fn daemon_notifies_on_question_and_answer() {
     );
 
     // Answer side: the pull loop (OWL-008) calls the public hook on the daemon's state.
-    on_answer_ingested(
+    on_pull_event(
         &d.running.state,
-        AnswerIngested {
+        DaemonEvent::Answer(AnswerIngested {
             id: "0191c7a0-0000-7000-8000-0000000000aa".into(),
             peer: common::fp(&maciek),
             path: "src/other/file.rs".into(),
-        },
+        }),
     );
     let lines = wait_for_lines(&log, 2);
     assert_eq!(lines.len(), 2, "one line per event: {lines:?}");
@@ -111,13 +113,13 @@ async fn daemon_notifies_on_question_and_answer() {
     }
 
     // An unknown fingerprint falls back to the fingerprint itself as the name.
-    on_answer_ingested(
+    on_pull_event(
         &d.running.state,
-        AnswerIngested {
+        DaemonEvent::Answer(AnswerIngested {
             id: "0191c7a0-0000-7000-8000-0000000000bb".into(),
             peer: "owl:unknownpeer0000".into(),
             path: "x".into(),
-        },
+        }),
     );
     let lines = wait_for_lines(&log, 3);
     assert_eq!(lines[2], "owlpost|answer from owl:unknownpeer0000");
@@ -190,9 +192,21 @@ async fn daemon_notifies_on_question_and_answer() {
     let lines = wait_for_lines(&log, 7);
     assert_eq!(lines[6], "owlpost|Maciek asks about -");
 
+    // OWL-034 AC4: a declined ask (the pull loop found the peer's Task `REJECTED`) is
+    // announced as `declined by <name>`, with no path and no question text.
+    on_pull_event(
+        &d.running.state,
+        DaemonEvent::Declined(Declined {
+            id: "0191c7a0-0000-7000-8000-0000000000dd".into(),
+            peer: common::fp(&maciek),
+        }),
+    );
+    let lines = wait_for_lines(&log, 8);
+    assert_eq!(lines[7], "owlpost|declined by Maciek");
+
     // No further lines appear on their own.
     std::thread::sleep(Duration::from_millis(300));
-    assert_eq!(wait_for_lines(&log, 7).len(), 7);
+    assert_eq!(wait_for_lines(&log, 8).len(), 8);
     d.running.shutdown();
 
     // Same script, same peer, `notify = false`: the daemon spawns nothing for either event.
@@ -209,18 +223,25 @@ async fn daemon_notifies_on_question_and_answer() {
     let env = signed(&maciek, &id(3), question_text);
     let resp = post_envelope(&client(Some(&maciek), &id(3)), &quiet, &env).await;
     assert_eq!(resp.status().as_u16(), 202);
-    on_answer_ingested(
+    on_pull_event(
         &quiet.running.state,
-        AnswerIngested {
+        DaemonEvent::Answer(AnswerIngested {
             id: "0191c7a0-0000-7000-8000-0000000000cc".into(),
             peer: common::fp(&maciek),
             path: "x".into(),
-        },
+        }),
+    );
+    on_pull_event(
+        &quiet.running.state,
+        DaemonEvent::Declined(Declined {
+            id: "0191c7a0-0000-7000-8000-0000000000ee".into(),
+            peer: common::fp(&maciek),
+        }),
     );
     std::thread::sleep(Duration::from_millis(500));
     assert_eq!(
-        wait_for_lines(&log, 7).len(),
-        7,
+        wait_for_lines(&log, 8).len(),
+        8,
         "notify=false must stay silent"
     );
     quiet.running.shutdown();

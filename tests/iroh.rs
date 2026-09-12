@@ -72,6 +72,9 @@ fn accepted_id(out: &Output) -> String {
     line.trim()
         .strip_prefix("accepted ")
         .unwrap_or_else(|| panic!("stdout {line:?}"))
+        .split_whitespace()
+        .next()
+        .unwrap()
         .to_string()
 }
 

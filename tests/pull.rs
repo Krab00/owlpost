@@ -502,7 +502,7 @@ async fn asks_are_grouped_by_responder() {
     assert_eq!(status.peers_probed, 1, "one probe for both asks");
     assert_eq!(status.open_asks, 0);
     assert_eq!(events.len(), 2);
-    assert!(events.iter().all(|e| e.peer == b.fp()));
+    assert!(events.iter().all(|e| matches!(e, owlpost::server::DaemonEvent::Answer(a) if a.peer == b.fp())));
     assert!(spool.list(Dir::Asks, |_| true).unwrap().is_empty());
     for (ans, text) in asks.iter().zip(["first", "second"]) {
         assert_eq!(

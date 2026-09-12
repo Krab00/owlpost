@@ -68,6 +68,7 @@ impl Home {
             project,
             path,
             question,
+            ..
         } = &p.body
         else {
             unreachable!()

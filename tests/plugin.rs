@@ -148,6 +148,7 @@ fn seed(home: &Path, me: &Identity, maciek: &Identity, n: usize, seen: bool) {
             project,
             path,
             question,
+            ..
         } = &p.body
         else {
             unreachable!("signed() builds questions")
@@ -1072,7 +1073,7 @@ fn commands_have_descriptions() {
     // clap change that drops the `Arguments:` section is noticed.
     let with_args: Vec<&str> = [
         "card", "contact", "add", "allow", "deny", "ask", "show", "draft", "edit", "send",
-        "reject", "route",
+        "reject", "route", "status",
     ]
     .to_vec();
     for sub in &subs {

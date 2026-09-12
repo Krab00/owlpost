@@ -139,6 +139,14 @@ from fingerprint verification at add time.
   the "offline = dropped, no queue" rule contradicts A2A's persistent task model. We will adopt
   more of A2A when task delegation between agents becomes a real need — which is explicitly out
   of scope today.
+- **A2A for people, not an A2A server** (2026-09-12): we use A2A's vocabulary where it makes
+  the human experience better and keeps a later full binding cheap — the card is an A2A 1.0
+  `AgentCard` (interfaces, security scheme, one skill, three owlpost extensions), a question's
+  state is exposed as an A2A `Task` (`SUBMITTED` = waiting for the owner's consent,
+  `WORKING` = drafting or under review, `COMPLETED`, `REJECTED`) so the asker sees where it
+  stands, and a thread id (`contextId`) plus a context snippet let a follow-up question carry
+  its history. We do not become an A2A server for stock clients: no JSON-RPC binding, no
+  `ListTasks` or cancel, no unsigned messages from foreign clients, no A2A error catalogue.
 - All messages are also **signed with ed25519** (over the exact bytes sent), independently of
   the transport: an answer sits in an outbox and is fetched later, and answers may in future be
   relayed through peer caches, so authorship must be verifiable without a live connection to the

@@ -64,5 +64,7 @@ person and repository, 6–7 whenever you like.
 
 Incoming messages stand out: the counter line wears an owl (`🦉 owlpost: 1 new answer ...`) and a peer's question or answer is shown in an orange `🟧` frame; your own drafts are not framed.
 
+While you wait, `owl status` tells you where each question stands in the peer's words (`waiting for the owner's consent`, `the owner's agent is answering`); `owl ask --reply-to <id>` continues a thread and `--context <file>` attaches the diff or error the question is about — the card and the task states follow the A2A 1.0 vocabulary, for people rather than for stock A2A clients.
+
 Pilot users: `docs/pilot.md` has the onboarding checklist, the admin fingerprint procedure,
 what to measure and when to stop.

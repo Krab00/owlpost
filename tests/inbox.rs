@@ -295,6 +295,7 @@ impl Home {
                 project,
                 path,
                 question,
+                ..
             } => envelope::question_hash(project, path.as_deref(), question),
             Body::Answer { .. } => String::new(),
         };
@@ -885,6 +886,7 @@ fn draft_send_moves_records() {
             project,
             path,
             question,
+            ..
         } => envelope::question_hash(project, path.as_deref(), question),
         Body::Answer { .. } => unreachable!(),
     };
