@@ -1171,7 +1171,9 @@ mod tests {
         // each of the three wordings of §1.
         assert_eq!(
             consent_prompt(&book("Ana", "local"), &q),
-            prompt("known key: contact \"Ana\" — repo peer file (.agents/peers/, reviewed in a PR)")
+            prompt(
+                "known key: contact \"Ana\" — repo peer file (.agents/peers/, reviewed in a PR)"
+            )
         );
         assert_eq!(
             consent_prompt(&book("Ana", "global"), &q),

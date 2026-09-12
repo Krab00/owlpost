@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use owlpost::contacts::{ContactBook, Mode, Policy, Scope};
+use owlpost::contacts::{ContactBook, KeyStanding, Mode, Policy, Scope, key_standing};
 use owlpost::identity::{Identity, fingerprint, pubkey_string};
 
 fn pk(seed: u8) -> String {
@@ -1457,4 +1457,89 @@ fn list_json_carries_picker_fields_for_both_scopes() {
     assert_eq!(ola["emails"], serde_json::json!(["other@example.org"]));
     assert_eq!(ola["endpoints"], serde_json::json!(["other.example.org:1"]));
     assert_eq!(ola["policy"]["mode"], "auto");
+}
+
+// ---------------------------------------------------------------- OWL-035 AC1: key standing
+
+/// AC1: `key_standing` answers "how did this key get into my book?" for every shape a
+/// fingerprint can have in the merged book, and each of the three §5 wordings is pinned
+/// verbatim. The fixtures take the inconvenient shape on purpose: one key that has a repo
+/// peer file *and* a global overlay, and one key whose only file is a nameless overlay.
+#[test]
+fn key_standing_follows_the_merged_scope_and_pins_the_three_wordings() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let (_root, sub) = fixture_repo(tmp.path());
+    // seed 3: global only. seed 1: repo peer file (Maciek) *and* a global policy overlay,
+    // which §5 merges to `source: "local"`. seed 4: a bare overlay, no name.
+    overlay(&home, 3, "Ola", "manual");
+    overlay(&home, 1, "Wrong Name", "auto");
+    overlay(&home, 4, "", "auto");
+    let book = ContactBook::load(&home, &sub).unwrap();
+
+    assert_eq!(
+        key_standing(&book, &fp(3)),
+        KeyStanding::Contact {
+            name: "Ola".into(),
+            source: "global".into()
+        }
+    );
+    assert_eq!(
+        key_standing(&book, &fp(2)),
+        KeyStanding::Contact {
+            name: "Marek".into(),
+            source: "local".into()
+        },
+        "a repo peer file with no overlay"
+    );
+    assert_eq!(
+        key_standing(&book, &fp(1)),
+        KeyStanding::Contact {
+            name: "Maciek".into(),
+            source: "local".into()
+        },
+        "overlay + repo file for one key: local wins, the repo name wins"
+    );
+    // A key no contact file holds any more: the contact was removed after the question came.
+    assert_eq!(key_standing(&book, &fp(9)), KeyStanding::Unknown);
+    assert_eq!(
+        key_standing(&book, "owl:notafingerprint"),
+        KeyStanding::Unknown
+    );
+    // A bare overlay still counts as a contact, with an empty name.
+    assert_eq!(
+        key_standing(&book, &fp(4)),
+        KeyStanding::Contact {
+            name: String::new(),
+            source: "global".into()
+        }
+    );
+
+    // The `owl inbox --json` values.
+    assert_eq!(key_standing(&book, &fp(3)).as_str(), "contact");
+    assert_eq!(key_standing(&book, &fp(1)).as_str(), "contact");
+    assert_eq!(key_standing(&book, &fp(4)).as_str(), "contact");
+    assert_eq!(key_standing(&book, &fp(9)).as_str(), "unknown");
+
+    // The three wordings, verbatim.
+    assert_eq!(
+        key_standing(&book, &fp(1)).wording(&fp(1)),
+        "known key: contact \"Maciek\" — repo peer file (.agents/peers/, reviewed in a PR)"
+    );
+    assert_eq!(
+        key_standing(&book, &fp(3)).wording(&fp(3)),
+        "known key: contact \"Ola\" — added by hand (global book; fingerprint not verified through a PR)"
+    );
+    assert_eq!(
+        key_standing(&book, &fp(9)).wording(&fp(9)),
+        "unknown key: no longer in your contacts — deny, or re-add the peer file before allowing"
+    );
+    // The nameless overlay shows the fingerprint in place of the name.
+    assert_eq!(
+        key_standing(&book, &fp(4)).wording(&fp(4)),
+        format!(
+            "known key: contact \"{}\" — added by hand (global book; fingerprint not verified through a PR)",
+            fp(4)
+        )
+    );
 }

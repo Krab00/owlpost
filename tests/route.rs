@@ -78,13 +78,18 @@ impl Home {
 
     /// An unseen pending question from Maciek about [`PROJECT`]; returns the id.
     fn put(&self, text: &str) -> String {
+        self.put_in_state(text, "pending")
+    }
+
+    /// [`Self::put`] in an explicit state (`consent` for a held question).
+    fn put_in_state(&self, text: &str, state: &str) -> String {
         let q = Payload::question(&fp(&self.maciek), &fp(&self.me), PROJECT, Some(PATH), text);
         let env = Envelope::sign(&q, &self.maciek);
         let hash = envelope::question_hash(PROJECT, Some(PATH), text);
         let rec = Record {
             raw: env.raw,
             sig: env.sig,
-            state: "pending".into(),
+            state: state.into(),
             seen: false,
             received_at: envelope::rfc3339_now(),
             draft: None,
@@ -938,4 +943,27 @@ fn lease_tick_skips_malformed_records_and_keeps_going() {
     // The broken records are still in the inbox for a human to look at.
     assert!(h.spool().path(Dir::Inbox, bad_raw).is_file());
     assert!(h.spool().path(Dir::Inbox, bad_json).is_file());
+}
+
+/// OWL-035 AC3: the wake file `owl route` writes for a *held* question carries the same one
+/// `🔑 <standing>` line the two CLI surfaces print, between the header and the code block —
+/// the three surfaces share `render::record_block`, so this pins the bytes. A `pending`
+/// record routed the same way has no `🔑` line.
+#[test]
+fn the_wake_file_of_a_consent_record_carries_the_key_standing_line() {
+    let h = Home::new();
+    h.marker("S1", &h.checkout(), 0);
+    let held = h.put_in_state("Held one?", "consent");
+    assert_eq!(h.route(&held).as_deref(), Some("S1"));
+    let text = std::fs::read_to_string(h.wake("S1", &held)).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    assert!(lines[1].starts_with("🦉 **Maciek** (owl:"), "{text}");
+    assert_eq!(lines[2], common::key_line("Maciek"), "{text}");
+    assert_eq!(lines[3], "```text", "{text}");
+    assert_eq!(text.matches('🔑').count(), 1, "{text}");
+    // The negative twin: same peer, same project, already released — no `🔑` line.
+    let pending = h.put("Not held?");
+    assert_eq!(h.route(&pending).as_deref(), Some("S1"));
+    let text = std::fs::read_to_string(h.wake("S1", &pending)).unwrap();
+    assert!(!text.contains('🔑'), "{text}");
 }

@@ -191,7 +191,8 @@ mod tests {
     fn once_and_always_conflict() {
         for source in ["local", "global"] {
             for verified in [false, true] {
-                let e = policy_for(&contact(source), "Ana", opts(true, true, verified)).unwrap_err();
+                let e =
+                    policy_for(&contact(source), "Ana", opts(true, true, verified)).unwrap_err();
                 assert_eq!(crate::cli::exit_code(&e), 1);
                 assert!(e.to_string().contains("mutually exclusive"), "{e}");
             }
@@ -208,11 +209,7 @@ mod tests {
                 for query in ["Ana", "ana", "ana@example.org", "FPF", "owl:notthisone"] {
                     let e = policy_for(&contact(source), query, opts(false, true, verified))
                         .unwrap_err();
-                    assert_eq!(
-                        crate::cli::exit_code(&e),
-                        2,
-                        "{source}/{verified}/{query}"
-                    );
+                    assert_eq!(crate::cli::exit_code(&e), 2, "{source}/{verified}/{query}");
                     let msg = e.to_string();
                     assert_eq!(
                         msg,
@@ -230,7 +227,10 @@ mod tests {
         );
         let e = policy_for(&contact("global"), "FPFP", opts(false, true, false)).unwrap_err();
         assert_eq!(crate::cli::exit_code(&e), 1);
-        assert!(e.to_string().contains("--i-verified-the-fingerprint"), "{e}");
+        assert!(
+            e.to_string().contains("--i-verified-the-fingerprint"),
+            "{e}"
+        );
     }
 
     /// The guard is `--always`-only: a name prefix still works for manual and `--once`.
@@ -242,7 +242,12 @@ mod tests {
                 Some(Mode::Manual)
             );
             assert_eq!(
-                policy_for(&contact(source), "ana@example.org", opts(true, false, false)).unwrap(),
+                policy_for(
+                    &contact(source),
+                    "ana@example.org",
+                    opts(true, false, false)
+                )
+                .unwrap(),
                 None
             );
         }

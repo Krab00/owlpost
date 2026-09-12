@@ -378,6 +378,72 @@ fn allow_writes_manual_and_always_writes_auto() {
     h.fails(&["allow", "Bea", "--always"], "no contact matches");
 }
 
+/// OWL-035 AC4: `--always` resolves only the exact fingerprint. A name prefix and an e-mail
+/// both exit 2 with the §2 message naming the fingerprint they resolved, write no policy and
+/// release nothing; manual and `--once` still take a name or an e-mail and still print the
+/// fingerprint they acted on.
+#[test]
+fn always_needs_the_fingerprint_while_manual_and_once_take_a_name() {
+    let h = Home::new();
+    let ana_fp = fp(&h.ana);
+    let held = h.put(&h.ana, "held?", "consent");
+    let before = std::fs::read(overlay_path(h.path(), &h.ana)).unwrap();
+    let expected = format!(
+        "owl allow --always needs the fingerprint, not a name: verify it out-of-band and pass owl:… (this peer: {ana_fp})"
+    );
+    // Both non-fingerprint shapes the book resolves, with and without the verified flag.
+    for query in ["Ana", "ana", "ana@example.org"] {
+        for extra in [vec![], vec!["--i-verified-the-fingerprint"]] {
+            let mut args = vec!["allow", query, "--always"];
+            args.extend(extra);
+            let (code, out, err) = owl(h.path(), h.cwd(), &args);
+            assert_eq!(code, 2, "{args:?}: {out:?} {err:?}");
+            assert_eq!(out, "", "{args:?} wrote to stdout");
+            assert_eq!(err, format!("owl: {expected}\n"), "{args:?}");
+            // Nothing written, nothing released.
+            assert_eq!(
+                std::fs::read(overlay_path(h.path(), &h.ana)).unwrap(),
+                before,
+                "{args:?}"
+            );
+            assert_eq!(policy_mode(h.path(), h.cwd(), &h.ana), None, "{args:?}");
+            assert_eq!(inbox(h.path(), &held).unwrap().state, "consent", "{args:?}");
+        }
+    }
+    // The fingerprint is the one shape that gets through: a hand-added contact then still
+    // needs `--i-verified-the-fingerprint` (exit 1), and with it the policy is written.
+    let err = h.fails(
+        &["allow", &ana_fp, "--always"],
+        "--i-verified-the-fingerprint",
+    );
+    assert!(!err.contains("needs the fingerprint, not a name"), "{err}");
+    assert_eq!(inbox(h.path(), &held).unwrap().state, "consent");
+    let out = h.ok(&["allow", &ana_fp, "--always", "--i-verified-the-fingerprint"]);
+    assert!(
+        out.contains(&ana_fp) && out.contains("policy auto"),
+        "{out}"
+    );
+    assert_eq!(policy_mode(h.path(), h.cwd(), &h.ana), Some(Mode::Auto));
+    assert_eq!(inbox(h.path(), &held).unwrap().state, "pending");
+
+    // Manual and `--once` by name and by e-mail: still accepted, and they print the
+    // fingerprint they acted on.
+    let h = Home::new();
+    let held = h.put(&h.ana, "held?", "consent");
+    let out = h.ok(&["allow", "ana@example.org", "--once"]);
+    assert!(out.contains(&ana_fp) && out.contains("no policy"), "{out}");
+    assert_eq!(policy_mode(h.path(), h.cwd(), &h.ana), None);
+    assert_eq!(inbox(h.path(), &held).unwrap().state, "pending");
+    let held = h.put(&h.ana, "held again?", "consent");
+    let out = h.ok(&["allow", "Ana"]);
+    assert!(
+        out.contains(&ana_fp) && out.contains("policy manual"),
+        "{out}"
+    );
+    assert_eq!(policy_mode(h.path(), h.cwd(), &h.ana), Some(Mode::Manual));
+    assert_eq!(inbox(h.path(), &held).unwrap().state, "pending");
+}
+
 // ---------------------------------------------------------------- AC3
 
 #[tokio::test]
