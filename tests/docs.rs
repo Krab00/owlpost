@@ -963,3 +963,80 @@ fn a2a_docs_pin_card_task_state_thread_and_context() {
         )
     );
 }
+
+/// The `## <n>. ` section of a Markdown document, up to the next `## ` heading.
+fn doc_section<'a>(body: &'a str, heading: &str) -> &'a str {
+    let start = body
+        .find(&format!("\n{heading}\n"))
+        .unwrap_or_else(|| panic!("no {heading:?} section"));
+    let rest = &body[start + 1..];
+    let end = rest[1..].find("\n## ").map_or(rest.len(), |i| i + 1);
+    &rest[..end]
+}
+
+/// OWL-035 AC6: the design doc says in §5 that the key, not the name, is the identity and
+/// carries the standing table; its §9 `owl allow` row states the `--always` fingerprint rule
+/// (asserted on the table row itself, not on prose elsewhere). The guide shows the `🔑` line
+/// and every `--always` command a reader could copy passes an `owl:` fingerprint.
+#[test]
+fn docs_pin_identity_is_the_key() {
+    let design = repo_file("docs/technical-design.md");
+    let five = doc_section(&design, "## 5. Contacts and policy");
+    assert!(
+        five.lines()
+            .any(|l| l.contains("a name is a label; the key is the identity")),
+        "design §5 lacks the identity sentence"
+    );
+    // The three §5 wordings live in the standing table.
+    for wording in [
+        "known key: contact \"<name>\" — repo peer file (.agents/peers/, reviewed in a PR)",
+        "known key: contact \"<name>\" — added by hand (global book; fingerprint not verified through a PR)",
+        "unknown key: no longer in your contacts — deny, or re-add the peer file before allowing",
+    ] {
+        assert!(
+            five.lines()
+                .any(|l| l.starts_with('|') && l.contains(wording)),
+            "design §5 standing table lacks {wording:?}"
+        );
+    }
+    // §9: the rule sits on the `owl allow` row of the CLI table, nowhere else.
+    let nine = doc_section(&design, "## 9. CLI contract");
+    let row = nine
+        .lines()
+        .find(|l| l.starts_with("| `owl allow <peer>"))
+        .expect("§9 owl allow row");
+    assert!(
+        row.contains("needs the fingerprint, not a name"),
+        "§9 owl allow row lacks the --always rule: {row}"
+    );
+
+    let guide = repo_file("docs/guide.md");
+    let three = doc_section(&guide, "## 3. Ask, receive, consent, answer");
+    assert!(
+        three.lines().any(|l| l.contains("🔑 known key")),
+        "guide §3 lacks the 🔑 standing line"
+    );
+    // Every `--always` command line in the guide — `owl allow …` or `/owlpost:allow …` as a
+    // reader would type it — passes the fingerprint. Prose mentioning `--always`, and the
+    // CLI's own `[--once|--always]` hint with its `<fp>` placeholder, are not commands.
+    let mut checked = 0;
+    for line in guide.lines() {
+        let l = line.trim();
+        let Some(rest) = l
+            .strip_prefix("owl allow ")
+            .or_else(|| l.strip_prefix("/owlpost:allow "))
+        else {
+            continue;
+        };
+        if !l.contains("--always") {
+            continue;
+        }
+        let peer = rest.split_whitespace().next().unwrap_or("");
+        assert!(
+            peer.starts_with("owl:"),
+            "guide: `--always` example takes a name, not a fingerprint: {l}"
+        );
+        checked += 1;
+    }
+    assert_eq!(checked, 2, "both `--always` examples of §3.5 checked");
+}
