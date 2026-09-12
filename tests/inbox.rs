@@ -3312,3 +3312,148 @@ fn inbox_listing_frames_the_thread_and_the_context() {
         "the line precedes the question text:\n{out}"
     );
 }
+
+/// The question text every responder-cache row below shares, so they share one
+/// `envelope::question_hash` and differ only in the filtered dimension.
+const CACHE_Q: &str = "Where is the retry policy defined?";
+
+/// Spools `env` as a pending question, then drives the real `owl draft` + `owl send` on it.
+/// Returns `(question id, answer id, the outbox record of the answer)`.
+fn draft_and_send(h: &Home, env: &Envelope) -> (String, String, Record) {
+    let qid = h.put_env(env, "pending");
+    h.ok(&["draft", &qid]);
+    h.ok(&["send", &qid]);
+    let (aid, arec) = h
+        .outbox()
+        .into_iter()
+        .find(|(_, r)| r.meta["question_id"] == qid)
+        .unwrap_or_else(|| panic!("no outbox answer for {qid}"));
+    assert!(h.inbox(&qid).is_none(), "the question left the inbox");
+    assert_eq!(h.done(&qid).unwrap().state, "answered");
+    assert_eq!(arec.state, "unacked");
+    (qid, aid, arec)
+}
+
+/// OWL-034 AC5 (design §3, "never served from **or written to** either cache"): `owl send`
+/// feeds the responder cache only for a question that carries no `context` and continues no
+/// thread this responder already holds. Every row goes through the real `owl draft` +
+/// `owl send`; all four share `CACHE_Q`, `PROJECT` and `PATH`, so they share one
+/// `question_hash` and differ only in the dimension under test. Each row gets its own home,
+/// so a row can never read the cache entry another row wrote.
+#[test]
+fn send_writes_the_responder_cache_only_for_an_unthreaded_question() {
+    const CID: &str = "0191c7a0-0000-7000-8000-0000000000c5";
+    let hash = envelope::question_hash(PROJECT, Some(PATH), CACHE_Q);
+
+    // --- positive twin: no context, no thread id → the cache holds exactly what we sent.
+    let h = Home::new();
+    let (_, _, arec) = draft_and_send(
+        &h,
+        &threaded_question(&h.maciek, &h.me, CACHE_Q, None, None),
+    );
+    let cached = h
+        .spool()
+        .cache_get(&hash)
+        .unwrap()
+        .expect("a plain question feeds the responder cache");
+    assert_eq!(
+        (cached.raw.as_str(), cached.sig.as_str()),
+        (arec.raw.as_str(), arec.sig.as_str())
+    );
+    assert_eq!(cached.meta["hash"], hash);
+
+    // --- a `context` suppresses the write; the answer is still spooled and sent.
+    let h = Home::new();
+    let (_, aid, arec) = draft_and_send(
+        &h,
+        &threaded_question(
+            &h.maciek,
+            &h.me,
+            CACHE_Q,
+            None,
+            Some("fn retry() {\n    backoff(3)\n}"),
+        ),
+    );
+    assert_eq!(arec.meta["hash"], hash, "the shared hash, unwritten");
+    assert_eq!(payload(&arec).id, aid);
+    assert!(
+        h.spool().cache_get(&hash).unwrap().is_none(),
+        "a question with a context must not be written to the responder cache"
+    );
+
+    // --- a `context_id` this responder already holds an exchange for suppresses it too.
+    let h = Home::new();
+    h.put_done(
+        &threaded_question(&h.maciek, &h.me, "The first question", Some(CID), None),
+        "answered",
+    );
+    let (_, _, arec) = draft_and_send(
+        &h,
+        &threaded_question(&h.maciek, &h.me, CACHE_Q, Some(CID), None),
+    );
+    assert_eq!(arec.meta["hash"], hash);
+    assert!(
+        h.spool().cache_get(&hash).unwrap().is_none(),
+        "a follow-up in a known thread must not be written to the responder cache"
+    );
+
+    // --- but a `context_id` alone does not: nothing in `inbox/` or `done/` shares it, so
+    // this question is a plain one and IS cacheable.
+    let h = Home::new();
+    let (_, _, arec) = draft_and_send(
+        &h,
+        &threaded_question(&h.maciek, &h.me, CACHE_Q, Some(CID), None),
+    );
+    let cached = h
+        .spool()
+        .cache_get(&hash)
+        .unwrap()
+        .expect("an unknown thread id alone does not suppress the cache write");
+    assert_eq!(
+        (cached.raw.as_str(), cached.sig.as_str()),
+        (arec.raw.as_str(), arec.sig.as_str())
+    );
+}
+
+/// OWL-034 AC6 through the real responder: the answer `owl send` signs for a question with a
+/// `context_id` carries that same thread id (and `in_reply_to`), and the answer to a question
+/// without one omits the key entirely — not `null`.
+#[test]
+fn sent_answer_copies_the_questions_context_id() {
+    const CID: &str = "0191c7a0-0000-7000-8000-0000000000a6";
+    const TEXT: &str = "Why is the refresh token rotated?";
+
+    let h = Home::new();
+    let (qid, aid, arec) = draft_and_send(
+        &h,
+        &threaded_question(&h.maciek, &h.me, TEXT, Some(CID), None),
+    );
+    let a = payload(&arec);
+    assert_eq!((a.id.as_str(), a.kind), (aid.as_str(), Kind::Answer));
+    assert_eq!(a.context_id.as_deref(), Some(CID));
+    assert_eq!(a.in_reply_to.as_deref(), Some(qid.as_str()));
+    let raw: Value = serde_json::from_str(&arec.raw).unwrap();
+    assert_eq!(raw["context_id"], CID);
+    // The asker can verify it: the thread id travels inside the signed bytes.
+    let env = Envelope {
+        raw: arec.raw.clone(),
+        sig: arec.sig.clone(),
+    };
+    assert_eq!(
+        env.verify(&h.me.verifying_key()).unwrap().context_id,
+        Some(CID.to_string())
+    );
+
+    // The negative twin: same peer, same text, no `context_id`.
+    let h = Home::new();
+    let (qid, _, arec) = draft_and_send(&h, &threaded_question(&h.maciek, &h.me, TEXT, None, None));
+    let a = payload(&arec);
+    assert_eq!(a.context_id, None);
+    assert_eq!(a.in_reply_to.as_deref(), Some(qid.as_str()));
+    let raw: Value = serde_json::from_str(&arec.raw).unwrap();
+    assert!(
+        raw.get("context_id").is_none(),
+        "the key is absent, not null: {}",
+        arec.raw
+    );
+}

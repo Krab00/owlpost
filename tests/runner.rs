@@ -562,6 +562,20 @@ fn rec(payload: &Payload, received_at: &str, meta: serde_json::Value) -> Record 
 /// One finished exchange: the question in `done/` carrying `meta.answer_id`, its answer in
 /// `outbox/` under that id.
 fn put_exchange(spool: &Spool, qid: &str, at: &str, context_id: &str, q: &str, a: &str) {
+    put_exchange_into(spool, Dir::Outbox, qid, at, context_id, q, a);
+}
+
+/// Same, but the answer record lands in `answer_dir`: `outbox/` while it is still unacked,
+/// `done/` (state `acked`) once the asker acked it — where a finished exchange normally sits.
+fn put_exchange_into(
+    spool: &Spool,
+    answer_dir: Dir,
+    qid: &str,
+    at: &str,
+    context_id: &str,
+    q: &str,
+    a: &str,
+) {
     let qp = question(qid, Some(context_id), q, None);
     let aid = format!("answer-{qid}");
     let mut ap = Payload::answer(&qp, a, "fake", 0, false);
@@ -569,13 +583,11 @@ fn put_exchange(spool: &Spool, qid: &str, at: &str, context_id: &str, q: &str, a
     spool
         .put(Dir::Done, qid, &rec(&qp, at, json!({ "answer_id": aid })))
         .unwrap();
-    spool
-        .put(
-            Dir::Outbox,
-            &aid,
-            &rec(&ap, at, json!({ "question_id": qid })),
-        )
-        .unwrap();
+    let mut arec = rec(&ap, at, json!({ "question_id": qid }));
+    if answer_dir == Dir::Done {
+        arec.state = "acked".into();
+    }
+    spool.put(answer_dir, &aid, &arec).unwrap();
 }
 
 impl Env {
@@ -1013,4 +1025,79 @@ fn build_prompt_with_renders_both_blocks_verbatim() {
     );
     assert!(!empty.contains(EARLIER_LINE), "{empty}");
     assert!(!empty.contains(CTX_LINE), "{empty}");
+}
+
+/// AC7 (M63): the earlier exchange's answer is looked up in `done/` as well as `outbox/`.
+/// Once the asker acked it the answer record has moved to `done/` (state `acked`), which is
+/// the ordinary shape of a finished thread — an `outbox/`-only lookup would lose the pair.
+#[test]
+fn history_finds_an_answer_acked_into_done() {
+    let env = Env::new();
+    let s = env.spool();
+    put_exchange_into(
+        &s,
+        Dir::Done,
+        "acked-1",
+        "2026-09-01T10:00:00Z",
+        "ctx-1",
+        "Acked question?",
+        "Acked answer.",
+    );
+    assert!(
+        s.get(Dir::Outbox, "answer-acked-1").unwrap().is_none(),
+        "the answer lives in done/ only"
+    );
+    assert_eq!(
+        s.get(Dir::Done, "answer-acked-1").unwrap().unwrap().state,
+        "acked"
+    );
+    let p = env.thread_prompt(&question("q-now", Some("ctx-1"), "Now?", None));
+    assert!(
+        p.contains(&format!(
+            "{EARLIER_LINE}\nQ: Acked question?\nA: Acked answer.\n{QUESTION_LINE}\n"
+        )),
+        "{p}"
+    );
+    assert_eq!(q_lines(&p), ["Q: Acked question?"], "{p}");
+}
+
+/// AC7: both arms of the two-directory lookup in one thread — the older exchange acked into
+/// `done/`, the newer one still unacked in `outbox/`. Both pairs appear, oldest first.
+#[test]
+fn history_mixes_done_and_outbox_answers_oldest_first() {
+    let env = Env::new();
+    let s = env.spool();
+    put_exchange_into(
+        &s,
+        Dir::Done,
+        "older",
+        "2026-09-01T10:00:00Z",
+        "ctx-1",
+        "Older question?",
+        "Older answer.",
+    );
+    put_exchange_into(
+        &s,
+        Dir::Outbox,
+        "newer",
+        "2026-09-02T10:00:00Z",
+        "ctx-1",
+        "Newer question?",
+        "Newer answer.",
+    );
+    let p = env.thread_prompt(&question("q-now", Some("ctx-1"), "Now?", None));
+    assert!(
+        p.contains(&format!(
+            "{EARLIER_LINE}\n\
+             Q: Older question?\nA: Older answer.\n\
+             Q: Newer question?\nA: Newer answer.\n\
+             {QUESTION_LINE}\n"
+        )),
+        "{p}"
+    );
+    assert_eq!(
+        q_lines(&p),
+        ["Q: Older question?", "Q: Newer question?"],
+        "{p}"
+    );
 }

@@ -232,6 +232,19 @@ async fn card_is_served_unpinned_and_pinned() {
     }
     b.running.shutdown();
 
+    // OWL-034 AC1: an empty first e-mail is no e-mail — `provider.url` stays `""` rather
+    // than the bare `mailto:` that dropping the `!e.is_empty()` filter would produce. The
+    // second, non-empty address must not rescue it either: only `emails.first()` is read.
+    let b = spawn_daemon_with(6, &[], |cfg| {
+        cfg.name = "Eve".into();
+        cfg.emails = vec![String::new(), "eve@example.org".into()];
+    })
+    .await;
+    let card = card_at(&client(None, &b.id), &b, CARD_PATHS[0]).await;
+    assert_eq!(card["provider"]["url"], "", "empty first e-mail: {card}");
+    assert_eq!(card["provider"]["organization"], "Eve");
+    b.running.shutdown();
+
     // A daemon with no contacts at all still serves the card to unpinned clients.
     let b = spawn_daemon(5, true, &[]).await;
     let card = card_at(&client(None, &b.id), &b, CARD_PATHS[1]).await;
@@ -1732,6 +1745,113 @@ async fn owl_card_prints_the_a2a_card_of_this_machine_and_of_a_peer() {
         err.contains("offline: no endpoint of Dee reachable (no endpoints configured; the card is not served over iroh)"),
         "{err}"
     );
+
+    b.running.shutdown();
+}
+
+/// OWL-034 AC2, the outbox branch of `find_task` (`src/server.rs`): once the answer is in
+/// `outbox/` the Task is still the ASKER's alone — a second pinned contact reading the same
+/// id gets `404`, never the answered state (the OWL-008 rule, on this branch too). And when
+/// the finished question is no longer readable in `done/`, the metadata falls back to the
+/// answer's own fields, read from the asker's point of view: `from` is the asker, `to` is
+/// this machine — not the other way round.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn task_of_an_answered_question_is_only_for_its_asker() {
+    let (cat, ana) = (id(3), id(1));
+    let b = spawn_daemon(
+        2,
+        true,
+        &[
+            Peer::new(&cat, "Cat", Some(policy(Mode::Manual, None))),
+            // Ana is pinned and has a policy, so an id she never asked about is a plain
+            // `404` — not the `never`/disabled `REJECTED` Task, which would mask the check.
+            Peer::new(&ana, "Ana", Some(policy(Mode::Manual, None))),
+        ],
+    )
+    .await;
+    let (cat_cl, ana_cl) = (client(Some(&cat), &b.id), client(Some(&ana), &b.id));
+    let spool = b.spool();
+
+    // Cat asks; the owner drafts and sends: the answer lands in `outbox/` (unacked) and the
+    // question moves to `done/`.
+    let env = threaded(&cat, &b.id, "why here?", "thread-cat", None);
+    let q: Payload = serde_json::from_str(&env.raw).unwrap();
+    let mut rec = record(&env.raw, &env.sig, "drafted");
+    rec.meta = json!({ "peer": fp(&cat), "hash": "h-outbox" });
+    rec.draft = Some(json!({
+        "text": "Because the store is append-only.", "harness": "fake",
+        "redactions": 0, "status": "ok", "drafted_at": "2026-09-12T10:00:00Z"
+    }));
+    spool.put(Dir::Inbox, &q.id, &rec).unwrap();
+    let (code, out, err) = owl_at(b.home(), &["send", &q.id]);
+    assert_eq!(code, Some(0), "{out}{err}");
+    let aid = out.split_whitespace().nth(1).unwrap().to_string();
+    assert!(
+        spool.get(Dir::Outbox, &aid).unwrap().is_some(),
+        "the answer is unacked in outbox/, which is the branch under test"
+    );
+    assert!(spool.get(Dir::Done, &q.id).unwrap().is_some());
+
+    // The asker sees the answered Task, with the question's own project and path.
+    let (status, task) = task_at(&cat_cl, &b, &q.id).await;
+    assert_eq!(status, 200, "{task}");
+    assert_eq!(
+        state_of(&task),
+        ("TASK_STATE_COMPLETED".into(), "answered".into())
+    );
+    assert_eq!(
+        task["metadata"]["owlpost"],
+        json!({ "from": fp(&cat), "to": b.fp(), "project": PROJECT, "path": PATH })
+    );
+
+    // Another pinned contact reading the very same id: 404, not Cat's answered Task.
+    let (status, body) = task_at(&ana_cl, &b, &q.id).await;
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (404, Some("not found")),
+        "the outbox branch is the asker's alone: {body}"
+    );
+    assert!(body.get("status").is_none(), "no Task leaked: {body}");
+
+    // --- the metadata fallback: the finished question is gone from `done/`.
+    std::fs::remove_file(spool.path(Dir::Done, &q.id)).unwrap();
+    assert!(spool.get(Dir::Done, &q.id).unwrap().is_none());
+    let (status, task) = task_at(&cat_cl, &b, &q.id).await;
+    assert_eq!(status, 200, "{task}");
+    assert_eq!(
+        state_of(&task),
+        ("TASK_STATE_COMPLETED".into(), "answered".into()),
+        "the state still comes from the outbox record"
+    );
+    assert_eq!(
+        task["metadata"]["owlpost"]["from"],
+        fp(&cat),
+        "from is the asker, taken from the answer's `to`: {task}"
+    );
+    assert_eq!(
+        task["metadata"]["owlpost"]["to"],
+        b.fp(),
+        "to is this machine, taken from the answer's `from`: {task}"
+    );
+    assert_ne!(
+        task["metadata"]["owlpost"]["from"], task["metadata"]["owlpost"]["to"],
+        "the two are distinct, so a swap is visible"
+    );
+    assert_eq!(task["metadata"]["owlpost"]["project"], Value::Null);
+    assert_eq!(task["metadata"]["owlpost"]["path"], Value::Null);
+    // The caller check still applies on the fallback path.
+    assert_eq!(task_at(&ana_cl, &b, &q.id).await.0, 404);
+
+    // --- the same fallback when the `done/` record is there but unreadable.
+    std::fs::write(spool.path(Dir::Done, &q.id), b"{ not json").unwrap();
+    let (status, task) = task_at(&cat_cl, &b, &q.id).await;
+    assert_eq!(status, 200, "{task}");
+    assert_eq!(
+        task["metadata"]["owlpost"],
+        json!({ "from": fp(&cat), "to": b.fp(), "project": null, "path": null }),
+        "a corrupt done/ record reaches the same fallback: {task}"
+    );
+    assert_eq!(task_at(&ana_cl, &b, &q.id).await.0, 404);
 
     b.running.shutdown();
 }
