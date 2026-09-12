@@ -1567,3 +1567,171 @@ async fn context_is_bounded_and_threaded_questions_bypass_the_cache() {
     assert!(matches!(p.body, Body::Question { context: Some(ref c), .. } if c == "diff"));
     b.running.shutdown();
 }
+
+/// The whole-card assertions AC1 fixes, applied to a card however it was obtained.
+fn assert_a2a_card(card: &Value, name: &str, provider_url: &str, iroh_bound: bool) {
+    assert_eq!(card["name"], name, "{card}");
+    assert_eq!(card["provider"]["organization"], name, "{card}");
+    assert_eq!(card["provider"]["url"], provider_url, "{card}");
+    assert_eq!(card["version"], env!("CARGO_PKG_VERSION"), "{card}");
+    let ifs = card["supportedInterfaces"].as_array().expect("interfaces");
+    assert_eq!(ifs.len(), if iroh_bound { 2 } else { 1 }, "{card}");
+    for i in ifs {
+        assert_eq!(i["protocolBinding"], owlpost::server::PROTOCOL_BINDING);
+        assert_eq!(i["protocolVersion"], "1");
+    }
+    assert!(
+        ifs[0]["url"].as_str().unwrap().starts_with("https://"),
+        "{card}"
+    );
+    assert_eq!(
+        ifs.iter()
+            .any(|i| i["url"].as_str().unwrap().starts_with("owl-iroh://")),
+        iroh_bound,
+        "{card}"
+    );
+    let uris: Vec<&str> = card["capabilities"]["extensions"]
+        .as_array()
+        .expect("extensions")
+        .iter()
+        .map(|e| e["uri"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        uris,
+        vec![
+            owlpost::server::EXT_IDENTITY,
+            owlpost::server::EXT_REPO_QUESTION,
+            owlpost::server::EXT_HUMAN_GATE,
+        ],
+        "{card}"
+    );
+    let ident = ext(card, owlpost::server::EXT_IDENTITY);
+    assert!(ident["fingerprint"].as_str().unwrap().starts_with("owl:"));
+    assert!(ident["pubkey"].as_str().unwrap().starts_with("ed25519:"));
+    assert!(ident.get("relay").is_some(), "relay param present: {card}");
+    assert!(
+        ext(card, owlpost::server::EXT_REPO_QUESTION)["projects"].is_array(),
+        "{card}"
+    );
+    assert!(
+        ext(card, owlpost::server::EXT_HUMAN_GATE)["responds"].is_boolean(),
+        "{card}"
+    );
+    assert_eq!(card["capabilities"]["streaming"], false);
+    assert_eq!(card["capabilities"]["pushNotifications"], false);
+    assert_eq!(card["capabilities"]["extendedAgentCard"], false);
+    assert!(card["securitySchemes"]["owl-mtls"]["mtlsSecurityScheme"]["description"].is_string());
+    assert_eq!(
+        card["securityRequirements"],
+        json!([{ "schemes": { "owl-mtls": { "list": [] } } }]),
+        "{card}"
+    );
+    assert_eq!(card["defaultInputModes"], json!(["text/plain"]));
+    assert_eq!(card["defaultOutputModes"], json!(["text/plain"]));
+    assert_eq!(card["skills"].as_array().unwrap().len(), 1, "{card}");
+    assert_eq!(card["skills"][0]["id"], "ask-about-repo");
+    assert_eq!(card["skills"][0]["inputModes"], json!(["text/plain"]));
+    for gone in ["url", "protocolVersion", "owlpost", "iroh"] {
+        assert!(card.get(gone).is_none(), "top-level {gone} in {card}");
+    }
+}
+
+/// OWL-034 AC1, through the `owl card` command: `owl card` prints this machine's own 1.0
+/// card — from the running daemon when `daemon.addr` names one (that copy carries the
+/// `owl-iroh://` interface), and one built in-process (no iroh interface) when the file is
+/// missing or names a dead port. `owl card <peer>` fetches the peer's card over pinned
+/// mTLS; a peer whose endpoint is dead, and one with no endpoint at all, are exit 2
+/// `offline` with the two different explanations.
+// Multi-thread: `owl_at` blocks the calling thread while the daemon under test must keep
+// serving the CLI's card request.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn owl_card_prints_the_a2a_card_of_this_machine_and_of_a_peer() {
+    let ana = id(1);
+    let b = spawn_daemon_with(2, &[Peer::new(&ana, "Ana", None)], |cfg| {
+        cfg.emails = vec!["bea@example.org".into()];
+        cfg.projects
+            .insert("github.com/company/monorepo".into(), "/tmp/mono".into());
+    })
+    .await;
+
+    // --- `owl card` on the responder's own home, with the daemon's address on disk.
+    std::fs::write(b.home().join("daemon.addr"), format!("{}\n", b.addr)).unwrap();
+    let (code, out, err) = owl_at(b.home(), &["card"]);
+    assert_eq!(code, Some(0), "stderr: {err}");
+    let from_daemon: Value = serde_json::from_str(&out).expect("card is JSON");
+    assert_a2a_card(&from_daemon, "Bea", "mailto:bea@example.org", true);
+    assert_eq!(card_fp(&from_daemon), b.fp());
+    assert_eq!(
+        ext(&from_daemon, owlpost::server::EXT_REPO_QUESTION)["projects"],
+        json!(["github.com/company/monorepo"])
+    );
+
+    // A `daemon.addr` naming a dead port falls back to the card built in this process: same
+    // identity, but no iroh interface (the CLI binds no endpoint) — the fallback arm.
+    let dead = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap()
+    };
+    std::fs::write(b.home().join("daemon.addr"), format!("{dead}\n")).unwrap();
+    let (code, out, err) = owl_at(b.home(), &["card"]);
+    assert_eq!(code, Some(0), "stderr: {err}");
+    let local: Value = serde_json::from_str(&out).unwrap();
+    assert_a2a_card(&local, "Bea", "mailto:bea@example.org", false);
+    assert_eq!(card_fp(&local), b.fp());
+
+    // No `daemon.addr` at all: the same locally built card — the `None` arm.
+    std::fs::remove_file(b.home().join("daemon.addr")).unwrap();
+    let (code, out, err) = owl_at(b.home(), &["card"]);
+    assert_eq!(code, Some(0), "stderr: {err}");
+    assert_eq!(serde_json::from_str::<Value>(&out).unwrap(), local);
+
+    // --- `owl card <peer>` from Ana's home over pinned mTLS.
+    let ana_home = tempfile::tempdir().unwrap();
+    prepare_home(ana_home.path(), &ana, true, &[]);
+    write_contact_full(
+        ana_home.path(),
+        &Peer::new(&b.id, "Bea", None),
+        &[&b.addr.to_string()],
+        &["bea@example.org"],
+    );
+    let (code, out, err) = owl_at(ana_home.path(), &["card", "Bea"]);
+    assert_eq!(code, Some(0), "stderr: {err}");
+    let fetched: Value = serde_json::from_str(&out).unwrap();
+    assert_a2a_card(&fetched, "Bea", "mailto:bea@example.org", true);
+    assert_eq!(card_fp(&fetched), b.fp());
+
+    // A peer with a dead endpoint: exit 2, and the message names the endpoint it tried.
+    let cid = id(3);
+    write_contact_full(
+        ana_home.path(),
+        &Peer::new(&cid, "Cid", None),
+        &[&dead.to_string()],
+        &["cid@example.org"],
+    );
+    let (code, out, err) = owl_at(ana_home.path(), &["card", "Cid"]);
+    assert_eq!(code, Some(2), "stdout: {out}");
+    assert!(
+        err.contains("offline: no endpoint of Cid reachable"),
+        "{err}"
+    );
+    assert!(err.contains(&dead.to_string()), "{err}");
+    assert!(out.is_empty(), "nothing printed on the failure: {out:?}");
+
+    // A peer with no endpoint at all: the same exit 2, the other explanation (the card is
+    // not forwardable over iroh) — the empty-`errors` arm.
+    let dee = id(4);
+    write_contact_full(
+        ana_home.path(),
+        &Peer::new(&dee, "Dee", None),
+        &[],
+        &["dee@example.org"],
+    );
+    let (code, _out, err) = owl_at(ana_home.path(), &["card", "Dee"]);
+    assert_eq!(code, Some(2), "{err}");
+    assert!(
+        err.contains("offline: no endpoint of Dee reachable (no endpoints configured; the card is not served over iroh)"),
+        "{err}"
+    );
+
+    b.running.shutdown();
+}

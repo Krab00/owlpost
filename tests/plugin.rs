@@ -1094,7 +1094,11 @@ fn commands_have_descriptions() {
         fm_value(&fm, "argument-hint"),
         Some("\"<peer> [path] <question...>\"")
     );
-    assert!(ask.contains("`<peer> [path] <question...>`"), "{ask}");
+    // OWL-034 widened the parse line with the two optional flags; `[path]` stays optional.
+    assert!(
+        ask.contains("`<peer> [path] [--reply-to <id>] [--context <path>] <question...>`"),
+        "{ask}"
+    );
     assert!(
         ask.contains("`owl ask <peer> \"<question>\"`"),
         "the no-path invocation: {ask}"
@@ -2122,15 +2126,22 @@ fn ask_documents_reply_to_and_context_and_status_wraps_owl_status() {
         status.contains("`ID  PEER  PATH  STATE  SINCE`"),
         "{status}"
     );
-    assert!(
-        status.contains("`waiting for the\nowner's consent`") || status.contains("waiting for the"),
-        "{status}"
-    );
-    assert!(
-        status.contains("Exit code 4 means\nthere are no open questions")
-            || status.contains("Exit code 4"),
-        "{status}"
-    );
+    // Single-line needles only (OWL-022): each state text sits on one line of status.md, so
+    // the pin cannot be broken by a reflow and cannot pass on a fragment.
+    for state in [
+        "`waiting for the owner's consent`",
+        "`the owner's agent is answering`",
+        "`the owner is reviewing the answer`",
+        "`offline` when the peer cannot be reached",
+        "it moves to history as `declined`",
+        "Exit code 4 means there are no open questions: say that and stop.",
+    ] {
+        assert!(
+            status.contains(state),
+            "status.md lacks {state:?}: {status}"
+        );
+        assert!(!state.contains('\n'), "one-line needle only: {state:?}");
+    }
     assert!(command_names().contains(&"status".to_string()));
     assert!(help_subcommands(&[]).contains(&"status".to_string()));
     let (_, skill) = frontmatter("skills/owlpost/SKILL.md");
