@@ -108,8 +108,10 @@ pub struct VerifiedAnswer {
 pub enum SendOutcome {
     /// `200`: the responder's cached answer (boxed: far larger than the other variants).
     Answer(Box<VerifiedAnswer>),
-    /// `202`: queued on the peer under `id` (always the question id).
-    Accepted { id: String },
+    /// `202`: queued on the peer under `id` (always the question id); `state` is the A2A
+    /// state the body carried (`TASK_STATE_SUBMITTED` / `TASK_STATE_WORKING`, OWL-034),
+    /// `None` from a peer that sends none.
+    Accepted { id: String, state: Option<String> },
     /// `403`: policy `never` or responder disabled.
     Unavailable,
     /// `429`: `Retry-After` seconds when the peer sent the header.
@@ -344,7 +346,14 @@ pub fn send_question(
                     question.id
                 );
             }
-            Ok(SendOutcome::Accepted { id: id.to_string() })
+            let state = body
+                .get("state")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            Ok(SendOutcome::Accepted {
+                id: id.to_string(),
+                state,
+            })
         }
         403 => Ok(SendOutcome::Unavailable),
         429 => Ok(SendOutcome::RateLimited {
@@ -406,6 +415,62 @@ pub fn fetch_outbox(
     let items: Vec<Envelope> =
         serde_json::from_slice(&resp.body).context("outbox body is not [{raw, sig}]")?;
     Ok(items)
+}
+
+/// The asker-facing view of a question's A2A `Task` (OWL-034, `GET /v1/questions/{id}`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Task {
+    /// `status.state`, e.g. `TASK_STATE_WORKING`.
+    pub state: String,
+    /// `status.message.parts[0].text` — the words a person reads; the state name when the
+    /// peer sent no message.
+    pub text: String,
+    /// The Task object as the peer sent it (`owl status --json`).
+    pub value: Value,
+}
+
+impl Task {
+    /// Parses a Task body; `None` when it is not a JSON object with a string `status.state`.
+    pub fn parse(body: &[u8]) -> Option<Task> {
+        let value: Value = serde_json::from_slice(body).ok()?;
+        let state = value.get("status")?.get("state")?.as_str()?.to_string();
+        let text = value
+            .pointer("/status/message/parts/0/text")
+            .and_then(Value::as_str)
+            .map_or_else(|| state.clone(), str::to_string);
+        Some(Task { state, text, value })
+    }
+
+    pub fn rejected(&self) -> bool {
+        self.state == crate::envelope::TASK_STATE_REJECTED
+    }
+}
+
+/// `GET /v1/questions/{id}`: the peer's Task for our question `id`. `Ok(None)` on `404`
+/// (the peer holds no record of it), an error when offline or on any other reply.
+pub fn fetch_task(
+    identity: &Identity,
+    contact: &Contact,
+    iroh: &Iroh,
+    id: &str,
+) -> anyhow::Result<Option<Task>> {
+    let resp = reach(
+        identity,
+        contact,
+        iroh,
+        reqwest::Method::GET,
+        &format!("/v1/questions/{id}"),
+        &[],
+        Vec::new(),
+    )?
+    .map_err(|errors| anyhow::anyhow!("offline: {}", errors.join("; ")))?;
+    match resp.status {
+        200 => Task::parse(&resp.body)
+            .map(Some)
+            .context("task body is not an A2A Task"),
+        404 => Ok(None),
+        status => bail!("{}", error_message(status, &resp.text())),
+    }
 }
 
 /// `POST /v1/outbox/{id}/ack`: `204` → ok; anything else (including offline) → error.

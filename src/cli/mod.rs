@@ -5,6 +5,7 @@
 pub mod add;
 pub mod allow;
 pub mod ask;
+pub mod card;
 pub mod deny;
 pub mod doctor;
 pub mod draft;
@@ -18,6 +19,7 @@ pub mod route;
 pub mod send;
 pub mod setup;
 pub mod show;
+pub mod status;
 pub mod update;
 pub mod watch;
 

@@ -20,6 +20,8 @@ pub enum Kind {
     Answer,
     /// The scheduler answered a question without a human (§3.4 auto).
     AutoAnswered,
+    /// The peer's Task turned `REJECTED`: our question was declined (OWL-034).
+    Declined,
 }
 
 /// The notification text for an event — the only data that ever leaves this module.
@@ -28,6 +30,7 @@ pub fn text(kind: Kind, peer_name: &str, path: &str) -> String {
         Kind::Question => format!("{peer_name} asks about {path}"),
         Kind::Answer => format!("answer from {peer_name}"),
         Kind::AutoAnswered => format!("auto-answered {peer_name} about {path}"),
+        Kind::Declined => format!("declined by {peer_name}"),
     }
 }
 
