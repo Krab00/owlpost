@@ -2205,10 +2205,19 @@ fn plugin_pins_identity_is_the_key() {
         );
     };
     let (_, skill) = frontmatter("skills/owlpost/SKILL.md");
-    // In the skill the rule belongs to the consent step of the answer loop.
+    // In the skill the rule belongs to the `consent` step itself, not merely somewhere in
+    // the answer loop: a model reading step 2 must meet it before it reaches `pending`.
     let answer_loop = section(&skill, "## The answer loop");
+    let at = |needle: &str| {
+        answer_loop
+            .find(needle)
+            .unwrap_or_else(|| panic!("answer loop lacks {needle:?}"))
+    };
+    let consent = at("A record in state `consent`");
+    let pending = at("A `pending` record");
+    let consent_step = &answer_loop[consent..pending];
     for needle in IDENTITY_RULE {
-        on_one_line("SKILL.md", answer_loop, needle);
+        on_one_line("SKILL.md consent step", consent_step, needle);
     }
     // The `🔑` line is part of the framed block the model pastes.
     let framed = section(&skill, "## Showing messages");
