@@ -10,7 +10,7 @@ use std::path::Path;
 use anyhow::Context;
 
 use crate::answer::StoredDraft;
-use crate::contacts::ContactBook;
+use crate::contacts::{ContactBook, key_standing};
 use crate::envelope::{self, Body, Payload};
 use crate::spool::{Dir, Record, Spool};
 
@@ -321,7 +321,8 @@ pub fn peer_name(book: &ContactBook, fp: &str) -> String {
 
 /// The `--format claude` block for one record — what `owl show <id> --format claude` prints
 /// and what the daemon writes into a session's wake file (OWL-033): a question in its frame
-/// (the fingerprint in the header on a `consent` record), a drafted one followed by
+/// (the fingerprint in the header and the `🔑` key-standing line under it on a `consent`
+/// record), a drafted one followed by
 /// [`draft_block`], `harness: <name>` and the [`language_note`]; an answer framed the same
 /// way, project and path taken from the question it replies to.
 pub fn record_block(
@@ -341,7 +342,11 @@ pub fn record_block(
             question,
             context,
         } => {
-            let head = header(&name, fingerprint, &hh_mm, project, path.as_deref());
+            let mut head = header(&name, fingerprint, &hh_mm, project, path.as_deref());
+            // OWL-035: a consent record says how we know the signing key, right under the header.
+            if let Some(fp) = fingerprint {
+                head.push_str(&format!("\n🔑 {}", key_standing(book, fp).wording(fp)));
+            }
             // The follow-up line only when this thread has an earlier exchange of ours in
             // `done/` (never trusting the payload's word for it).
             let thread = payload
