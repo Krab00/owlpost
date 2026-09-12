@@ -4,10 +4,11 @@
 //! * `--once`: release every held `consent` record from that peer to `pending`; no policy
 //!   is written, so the next question is held again.
 //! * default: write policy `manual` to the local overlay, then release.
-//! * `--always`: write policy `auto`, then release. A `global`-source contact (TOFU, key never
-//!   verified out of band) needs `--i-verified-the-fingerprint`; without it nothing is written
-//!   and nothing is released (exit 1). Repo contacts were merged through a reviewed PR and
-//!   need no flag.
+//! * `--always`: write policy `auto`, then release. The peer argument must be the exact
+//!   fingerprint — a name prefix or an e-mail exits 2 (OWL-035: identity is the key, not the
+//!   name). A `global`-source contact (TOFU, key never verified out of band) then also needs
+//!   `--i-verified-the-fingerprint`; without it nothing is written and nothing is released
+//!   (exit 1). Repo contacts were merged through a reviewed PR and need no flag.
 
 use std::path::Path;
 
@@ -15,7 +16,7 @@ use owlpost::contacts::{Contact, Mode, Policy, Scope};
 use owlpost::spool::{Dir, Spool};
 use serde_json::json;
 
-use super::{contact_book, payload_of, print_json, user_error};
+use super::{ExitError, contact_book, payload_of, print_json, user_error};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Opts {
@@ -24,9 +25,15 @@ pub struct Opts {
     pub verified: bool,
 }
 
-/// The policy `owl allow` writes for `opts`, or `None` for `--once`; the flag conflict and the
-/// global-contact guard are user errors that must leave the home untouched.
-pub fn policy_for(contact: &Contact, opts: Opts) -> anyhow::Result<Option<Mode>> {
+/// Exit code of the `--always`-needs-a-fingerprint refusal (a usage error, §9).
+pub const NOT_A_FINGERPRINT_EXIT: u8 = 2;
+
+/// The policy `owl allow` writes for `opts`, or `None` for `--once`; the flag conflict, the
+/// fingerprint guard and the global-contact guard are user errors that must leave the home
+/// untouched. `query` is the peer argument as typed: `--always` accepts only the exact
+/// fingerprint, and that guard runs before the `--i-verified-the-fingerprint` one — a name is
+/// a label, so "go and get the key" is the prerequisite of "did you verify the key".
+pub fn policy_for(contact: &Contact, query: &str, opts: Opts) -> anyhow::Result<Option<Mode>> {
     if opts.once && opts.always {
         return Err(user_error(
             "--once and --always are mutually exclusive: release the held question only (--once) or answer automatically from now on (--always)",
@@ -37,6 +44,16 @@ pub fn policy_for(contact: &Contact, opts: Opts) -> anyhow::Result<Option<Mode>>
     }
     if !opts.always {
         return Ok(Some(Mode::Manual));
+    }
+    if query != contact.fingerprint {
+        return Err(ExitError::error(
+            NOT_A_FINGERPRINT_EXIT,
+            format!(
+                "owl allow --always needs the fingerprint, not a name: verify it out-of-band \
+                 and pass owl:… (this peer: {})",
+                contact.fingerprint
+            ),
+        ));
     }
     if contact.source == "global" && !opts.verified {
         return Err(user_error(format!(
@@ -67,7 +84,7 @@ pub fn run(home: &Path, peer: &str, opts: Opts, json: bool) -> anyhow::Result<()
     let contact = book.resolve(peer).map_err(|e| user_error(e.to_string()))?;
     let fingerprint = contact.fingerprint.clone();
     let name = contact.name.clone();
-    let mode = policy_for(contact, opts)?;
+    let mode = policy_for(contact, peer, opts)?;
     if let Some(mode) = mode {
         book.set_policy(
             home,
@@ -137,7 +154,7 @@ mod tests {
             ("global", true, Some(Mode::Auto)),
             ("global", false, None),
         ] {
-            let got = policy_for(&contact(source), opts(false, true, verified));
+            let got = policy_for(&contact(source), "FPFP", opts(false, true, verified));
             match expect {
                 Some(m) => assert_eq!(got.unwrap(), Some(m), "{source}/{verified}"),
                 None => {
@@ -157,12 +174,12 @@ mod tests {
         for source in ["local", "global"] {
             for verified in [false, true] {
                 assert_eq!(
-                    policy_for(&contact(source), opts(false, false, verified)).unwrap(),
+                    policy_for(&contact(source), "Ana", opts(false, false, verified)).unwrap(),
                     Some(Mode::Manual),
                     "{source}/{verified}"
                 );
                 assert_eq!(
-                    policy_for(&contact(source), opts(true, false, verified)).unwrap(),
+                    policy_for(&contact(source), "Ana", opts(true, false, verified)).unwrap(),
                     None,
                     "{source}/{verified}"
                 );
@@ -174,10 +191,60 @@ mod tests {
     fn once_and_always_conflict() {
         for source in ["local", "global"] {
             for verified in [false, true] {
-                let e = policy_for(&contact(source), opts(true, true, verified)).unwrap_err();
+                let e = policy_for(&contact(source), "Ana", opts(true, true, verified)).unwrap_err();
                 assert_eq!(crate::cli::exit_code(&e), 1);
                 assert!(e.to_string().contains("mutually exclusive"), "{e}");
             }
+        }
+    }
+
+    /// OWL-035 AC4: `--always` by a name prefix or an e-mail is exit 2, whatever the source or
+    /// the verification flag; the message names the resolved fingerprint. The exact
+    /// fingerprint passes this guard and only then meets the `--i-verified` one.
+    #[test]
+    fn always_by_name_or_email_is_exit_two_before_the_verified_guard() {
+        for source in ["local", "global"] {
+            for verified in [false, true] {
+                for query in ["Ana", "ana", "ana@example.org", "FPF", "owl:notthisone"] {
+                    let e = policy_for(&contact(source), query, opts(false, true, verified))
+                        .unwrap_err();
+                    assert_eq!(
+                        crate::cli::exit_code(&e),
+                        2,
+                        "{source}/{verified}/{query}"
+                    );
+                    let msg = e.to_string();
+                    assert_eq!(
+                        msg,
+                        "owl allow --always needs the fingerprint, not a name: verify it \
+                         out-of-band and pass owl:… (this peer: FPFP)",
+                        "{source}/{verified}/{query}"
+                    );
+                }
+            }
+        }
+        // The exact fingerprint is the one argument that gets past the guard.
+        assert_eq!(
+            policy_for(&contact("local"), "FPFP", opts(false, true, false)).unwrap(),
+            Some(Mode::Auto)
+        );
+        let e = policy_for(&contact("global"), "FPFP", opts(false, true, false)).unwrap_err();
+        assert_eq!(crate::cli::exit_code(&e), 1);
+        assert!(e.to_string().contains("--i-verified-the-fingerprint"), "{e}");
+    }
+
+    /// The guard is `--always`-only: a name prefix still works for manual and `--once`.
+    #[test]
+    fn the_fingerprint_guard_is_always_only() {
+        for source in ["local", "global"] {
+            assert_eq!(
+                policy_for(&contact(source), "Ana", opts(false, false, false)).unwrap(),
+                Some(Mode::Manual)
+            );
+            assert_eq!(
+                policy_for(&contact(source), "ana@example.org", opts(true, false, false)).unwrap(),
+                None
+            );
         }
     }
 }

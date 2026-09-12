@@ -285,6 +285,60 @@ impl ContactBook {
     }
 }
 
+/// How a signing key stands in the contact book (§5, OWL-035). A name is a label; the key is
+/// the identity, so every consent presentation says how the key got into the book.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeyStanding {
+    /// The fingerprint is in the merged book; `source` is the merged scope (`local` wins).
+    Contact { name: String, source: String },
+    /// No contact file holds this fingerprint any more (the contact was removed).
+    Unknown,
+}
+
+impl KeyStanding {
+    /// The `owl inbox --json` value.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            KeyStanding::Contact { .. } => "contact",
+            KeyStanding::Unknown => "unknown",
+        }
+    }
+
+    /// The line a human reads. A contact with an empty `name` (a bare policy overlay) shows
+    /// `fp` in place of the name.
+    pub fn wording(&self, fp: &str) -> String {
+        match self {
+            KeyStanding::Contact { name, source } => {
+                let shown = if name.is_empty() { fp } else { name.as_str() };
+                if source == "local" {
+                    format!(
+                        "known key: contact \"{shown}\" — repo peer file (.agents/peers/, reviewed in a PR)"
+                    )
+                } else {
+                    format!(
+                        "known key: contact \"{shown}\" — added by hand (global book; fingerprint not verified through a PR)"
+                    )
+                }
+            }
+            KeyStanding::Unknown => {
+                "unknown key: no longer in your contacts — deny, or re-add the peer file before allowing"
+                    .to_string()
+            }
+        }
+    }
+}
+
+/// The standing of `fp` in the merged `book`.
+pub fn key_standing(book: &ContactBook, fp: &str) -> KeyStanding {
+    book.contacts
+        .iter()
+        .find(|c| c.fingerprint == fp)
+        .map_or(KeyStanding::Unknown, |c| KeyStanding::Contact {
+            name: c.name.clone(),
+            source: c.source.clone(),
+        })
+}
+
 fn now_secs() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

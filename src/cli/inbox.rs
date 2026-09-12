@@ -60,7 +60,7 @@ use std::time::Duration;
 
 use anyhow::{Context, bail};
 use owlpost::answer::auto_error;
-use owlpost::contacts::ContactBook;
+use owlpost::contacts::{ContactBook, key_standing};
 use owlpost::envelope::{self, Body, Kind, Payload};
 use owlpost::render::{self, AnswerRow, Markers};
 use owlpost::route;
@@ -339,7 +339,8 @@ pub fn injection(
     })
 }
 
-/// The §3.2 consent prompt for a held question: who, about which project, and the two commands.
+/// The §3.2 consent prompt for a held question: who, about which project, how the signing
+/// key stands in the contact book (OWL-035), and the two commands.
 pub fn consent_prompt(book: &ContactBook, payload: &Payload) -> String {
     let project = match &payload.body {
         Body::Question { project, .. } => project.as_str(),
@@ -347,8 +348,9 @@ pub fn consent_prompt(book: &ContactBook, payload: &Payload) -> String {
     };
     let fp = &payload.from;
     format!(
-        "{} wants to ask your agent about {project} — owl allow {fp} [--once|--always] / owl deny {fp}",
-        peer_name(book, fp)
+        "{} wants to ask your agent about {project} — {} — owl allow {fp} [--once|--always] / owl deny {fp}",
+        peer_name(book, fp),
+        key_standing(book, fp).wording(fp)
     )
 }
 
@@ -387,6 +389,13 @@ pub fn run(home: &Path, opts: Opts) -> anyhow::Result<()> {
         let error = auto_error(rec);
         if let Some(obj) = row.as_object_mut() {
             obj.insert("auto_error".into(), json!(error));
+            // OWL-035: only a held question asks the human to judge a key.
+            if rec.state == "consent" {
+                obj.insert(
+                    "key_standing".into(),
+                    json!(key_standing(&book, &payload.from).as_str()),
+                );
+            }
         }
         rows.push(row);
         if rec.state == "consent" {
