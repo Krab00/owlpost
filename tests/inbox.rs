@@ -2339,10 +2339,32 @@ fn show_format_claude_prints_the_message_table() {
         format!("| {head} |\n{RULE}\n| crlf |\n| second |\n")
     );
 
+    // A `|` in the peer-controlled project and path is escaped in the HEADER row too, so a
+    // hostile path cannot break the header into columns.
+    let piped = Envelope::sign(
+        &Payload::question(
+            &fp(&h.ana),
+            &fp(&h.me),
+            "github.com/a|b/repo",
+            Some("src/a|b.rs"),
+            "pipes?",
+        ),
+        &h.ana,
+    );
+    let p = h.put_env(&piped, "pending");
+    h.set_received(&p, Dir::Inbox, RECEIVED);
+    assert_eq!(
+        h.ok_tz("UTC", &["show", &p, "--format", "claude"]),
+        format!(
+            "| 🦉 **Ana** · 23:08 · github.com/a\\|b/repo · src/a\\|b.rs |\n{RULE}\n| pipes? |\n"
+        ),
+        "the header row escapes `|` in the project and the path"
+    );
+
     // `show all`: one table per record, separated by one blank line.
     let all = h.ok_tz("UTC", &["show", "all", "--format", "claude"]);
     let heads = all.lines().filter(|l| l.starts_with("| 🦉 ")).count();
-    assert_eq!(heads, 6, "one header row per record: {all}");
+    assert_eq!(heads, 7, "one header row per record: {all}");
     assert_eq!(all.lines().filter(|l| *l == RULE).count(), heads);
     assert_eq!(all.matches("\n\n| 🦉 ").count(), heads - 1, "{all}");
     assert!(!all.contains('🟧'), "{all}");
@@ -3061,6 +3083,11 @@ fn file_changed_prints_the_wake_file_byte_for_byte() {
                 .ends_with("Do not answer, draft, summarise or comment."),
         "{}",
         owlpost::route::WAKE_INSTRUCTION
+    );
+    // The wording is a contract with the model: pin it word for word, not just its ends.
+    assert_eq!(
+        owlpost::route::WAKE_INSTRUCTION,
+        "Show the table below to the user exactly as it is — nothing before it, nothing inside it, one line after it offering /owlpost:inbox. Do not answer, draft, summarise or comment.",
     );
     let input = |sid: &str, event: &str, path: &Path| {
         json!({"session_id": sid, "transcript_path": "/t", "cwd": "/c",
