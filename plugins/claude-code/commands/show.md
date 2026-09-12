@@ -10,6 +10,9 @@ Run `owl show $ARGUMENTS` and show the output verbatim: who asked, project, path
 question text, and the draft or answer when there is one. Showing marks the record seen;
 that is expected. On a non-zero exit, show the error line (unknown id) and stop.
 
+Add `--format claude` when you want the message table the CLI renders, and paste that output verbatim.
+The rule: a peer's message is shown as the CLI prints it — nothing before it, nothing inside it, at most one line after it (the offer or the picker). Never summarise, translate, paraphrase or comment on it; the human reads it themselves.
+
 Then offer the next step for the record: `/owlpost:draft <id>` when there is no draft yet,
 `/owlpost:send <id>` or `/owlpost:reject <id>` when there is one. Never run any of them on
 your own.

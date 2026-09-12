@@ -62,7 +62,7 @@ person and repository, 6–7 whenever you like.
    (`owl inbox`, `owl show <id>`) and in your agent's memory via the harness plugin
    (`plugins/claude-code/README.md`).
 
-Incoming messages stand out: the counter line wears an owl (`🦉 owlpost: 1 new answer ...`) and a peer's question or answer is shown in an orange `🟧` frame; your own drafts are not framed.
+Incoming messages stand out: the counter line wears an owl (`🦉 owlpost: 1 new answer ...`) and a peer's question or answer is shown as a one-column Markdown table headed `| 🦉 <peer> · HH:MM · … |`; your own drafts stay a plain code block, so a table always means "from a peer".
 
 While you wait, `owl status` tells you where each question stands in the peer's words (`waiting for the owner's consent`, `the owner's agent is answering`); `owl ask --reply-to <id>` continues a thread and `--context <file>` attaches the diff or error the question is about — the card and the task states follow the A2A 1.0 vocabulary, for people rather than for stock A2A clients.
 
