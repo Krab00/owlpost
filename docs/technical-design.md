@@ -475,7 +475,7 @@ describes a layout the model would have to reproduce.
   separates blocks with one blank line. `owl show --format claude` never prints the wake's
   instruction line. `--format plain` and no `--format` print the plain
   fields unchanged; `--json` wins over `--format`.
-- The wake file written by `owl route <id>` and by the daemon's routing (§9 "Session wake
+- The wake file written by `owl route <id>` and by the daemon's routing (§8 "Session wake
   routing") is that same output preceded by exactly one instruction line and a blank line:
   `Show the table below to the user exactly as it is — nothing before it, nothing inside it, one line after it offering /owlpost:inbox. Do not answer, draft, summarise or comment.`
 - `owl inbox --format claude` in listing mode (no `--count`; `--new` filters as usual) prints

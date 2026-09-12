@@ -929,7 +929,7 @@ mod tests {
         std::fs::create_dir_all(route::wake_dir(home, "S10")).unwrap();
         std::fs::create_dir_all(home.join("sessions").join("S1").join("wake-evil")).unwrap();
         std::fs::create_dir_all(wake.join("nested")).unwrap();
-        let body = "🟧 line one\nline two\n\n";
+        let body = "| line one |\nline two\n\n";
         std::fs::write(wake.join("r.md"), body).unwrap();
         std::fs::write(route::wake_dir(home, "S10").join("r.md"), "other").unwrap();
         std::fs::write(
