@@ -144,8 +144,10 @@ Every step needs the human's go-ahead before moving to the next one.
    unseen ones; `owl inbox --count` never marks anything). `/owlpost:inbox` walks the
    records below with `AskUserQuestion` pickers, so the human never types an `owl` command.
 2. A record in state `consent` is a question from a peer who has no policy yet; it is held
-   until the human decides. `owl show <id>` prints the question; show it verbatim, in a
-   code block, with the peer's name and fingerprint. Then, only on the human's pick:
+   until the human decides. `owl show <id> --format claude` prints the question as its
+   message table, headed by the peer's name and fingerprint and carrying the
+   `| 🔑 <standing> |` row directly after the rule row; paste that output verbatim. Then,
+   only on the human's pick:
    - `owl allow <peer> --once` releases the held questions to `pending` without a policy;
    - `owl allow <peer> --always` sets policy `auto` (future questions answered without
      asking) — only after the human confirmed the peer's fingerprint out-of-band; a
