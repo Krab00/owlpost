@@ -215,8 +215,11 @@ owl inbox
 ```
 
 Table of ID, FROM, TYPE, STATE, PATH, AGE. Listing marks records seen.
-A held question shows a line under the table:
-`Ania wants to ask your agent about <project> — owl allow <fp> [--once|--always] / owl deny <fp>`.
+A held question shows a line under the table, with the standing of the signing key in it —
+a name is a label, the key is the identity:
+`Ania wants to ask your agent about <project> — 🔑 known key: contact "Ania" — added by hand (global book; fingerprint not verified through a PR) — owl allow <fp> [--once|--always] / owl deny <fp>`.
+The framed block (`owl show <id> --format claude`) carries the same standing as a `🔑` line
+under the header.
 `owl inbox --new` lists only unseen records; `owl inbox --count` prints the unseen count without
 marking anything.
 
@@ -254,17 +257,20 @@ You should see `allowed Ania (owl:xxxxxxxx): policy manual, released 1 held ques
 
 ```
 owl allow ania --once
-owl allow ania --always
+owl allow owl:4nznziuighiumn2w --always
 owl deny ania
 /owlpost:allow ania --once
-/owlpost:allow ania --always
+/owlpost:allow owl:4nznziuighiumn2w --always
 /owlpost:deny ania
 ```
 
 - `--once` releases the held questions and writes no policy; the next question is held again.
-- `--always` sets policy `auto`: future questions are answered without asking. A hand-added
-  (global) contact also needs `--i-verified-the-fingerprint`, which you pass only after checking
-  the fingerprint out of band.
+- `--always` sets policy `auto`: future questions are answered without asking. It takes the
+  fingerprint and nothing else — a name prefix or an e-mail exits 2 with
+  `owl allow --always needs the fingerprint, not a name: verify it out-of-band and pass owl:… (this peer: <fp>)`
+  and changes nothing. A hand-added (global) contact also needs
+  `--i-verified-the-fingerprint`, which you pass only after checking the fingerprint out of
+  band. Manual and `--once` still take a name or an e-mail.
 - `owl deny` sets policy `never`: held questions are denied, new ones get 403.
   You should see `denied Ania (owl:xxxxxxxx): policy never, 1 held question moved to done`.
 

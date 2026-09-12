@@ -187,6 +187,23 @@ book for every repository:
 - Global files merge by key in any filename order: a policy overlay always wins over a
   policy-less file and a contact file supplies name/emails/endpoints to a bare overlay.
 
+### Key standing (OWL-035)
+
+In owlpost a name is a label; the key is the identity. A peer whose key is not in the book is refused at
+the mTLS handshake (§4, §7), so a `consent` record always carries a key that is in it, and the
+only question left for the human is how that key got there. `contacts::key_standing(book, fp)`
+answers it in one line, which every consent presentation shows (`🔑 <standing>`; §9,
+`owl inbox` / `owl show --format claude` / the `owl route` wake file), and `owl inbox --json`
+carries as `key_standing` (`"contact"` / `"unknown"`) on consent rows only.
+
+| standing | when | wording |
+|---|---|---|
+| `Contact { name, source: "local" }` | the fingerprint matches a contact whose merged `source` is `local` (`.agents/peers/`, committed through a reviewed PR) | `known key: contact "<name>" — repo peer file (.agents/peers/, reviewed in a PR)` |
+| `Contact { name, source: "global" }` | the fingerprint matches a contact whose merged `source` is `global` (`owl add` by hand, or a bare policy overlay) | `known key: contact "<name>" — added by hand (global book; fingerprint not verified through a PR)` |
+| `Unknown` | no contact file has this fingerprint any more (the contact was removed after the question arrived) | `unknown key: no longer in your contacts — deny, or re-add the peer file before allowing` |
+
+A contact whose `name` is empty (a bare overlay) shows the fingerprint in place of the name.
+
 ## 6. Envelope
 
 HTTP body = the payload JSON exactly as signed. Signature in header
@@ -364,7 +381,7 @@ unavailable, `3` rate limited, `4` nothing to do (e.g. `watch` timeout).
 | `owl card [<peer>]` | print own card (the running daemon's copy when `daemon.addr` names one, else built from key and config), or fetch and print a peer's card from its first reachable `endpoints` entry (exit 2 `offline` with none; the card is not served over iroh) |
 | `owl contact list [--global\|--local] \| export \| show <peer> \| remove <peer> [--local]` | contact book: list (merged or one scope), own peer file, one contact as JSON, delete a contact's file from one scope |
 | `owl add <peer-file\|json\|-> [--local]` | validate a peer file and write it to the global book (or the repo's `.agents/peers/`); no policy |
-| `owl allow <peer> [--once \| --always] [--i-verified-the-fingerprint]` | set policy `manual` (once = release the held question only) or `auto` |
+| `owl allow <peer> [--once \| --always] [--i-verified-the-fingerprint]` | set policy `manual` (once = release the held question only) or `auto`. `--always` needs the fingerprint, not a name: a name prefix or an e-mail exits 2 with `owl allow --always needs the fingerprint, not a name: verify it out-of-band and pass owl:… (this peer: <fp>)`, writing no policy and releasing nothing (OWL-035). Manual and `--once` still resolve a name prefix or an e-mail |
 | `owl deny <peer>` | policy `never` |
 | `owl ask <peer> [path] "<question>" [--project <id>] [--wait <secs>] [--no-cache] [--reply-to <id>] [--context <file\|->]` | send a question; the path is optional (a repo-level question sends no `body.path`); prints answer (cache/`200`/`--wait`) or `accepted <id> — <state text>` (`waiting for the owner's consent` / `the owner's agent is answering`, from the `202` body's `state`; `--json` adds `"state"`). `--reply-to <id>` continues an exchange: the `context_id` of that `asks/` or `done/` question or received answer is reused (unknown id: exit 1 `no exchange <id>`; another peer's: exit 1 `<id> was asked to <name>, not <peer>`). `--context <file>` (`-` = stdin) sends the trimmed file as `body.context` (over 8192 bytes: exit 1 `context is <n> bytes, max 8192`). A question with `--context` or `--reply-to` skips the asker cache both ways. `--wait <secs>` polls the peer's outbox **and** `GET /v1/questions/{id}` on the same tick; whenever the Task's text changes it prints one line `<HH:MM> <state text>` to stderr (quiet: nothing); a `TASK_STATE_REJECTED` Task ends the wait at once with `declined by <name>: <text>`, exit 2, and the ask moves to `done/` as `declined` |
 | `owl status [<id>]` | for every `asks/` record (or the one id) fetch the peer's Task and print `ID  PEER  PATH  STATE  SINCE` with the state text; a peer that cannot be reached prints `offline`, one without a record `not found`; `--json` prints the Task objects; a `REJECTED` Task moves the ask to `done/declined`. Exit 0 always, exit 4 `no open questions` with nothing open |
