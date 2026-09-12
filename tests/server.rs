@@ -1159,7 +1159,12 @@ async fn incoming_question_wakes_the_affine_live_session() {
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
     let block = std::fs::read_to_string(&wake).unwrap();
-    assert!(block.starts_with("🟧"), "{block}");
+    assert_eq!(
+        block.lines().next(),
+        Some(route::WAKE_INSTRUCTION),
+        "{block}"
+    );
+    assert!(block.contains(&format!("| {text} |")), "{block}");
     assert!(block.contains(text), "{block}");
     assert!(block.contains("Ana"), "{block}");
     assert!(

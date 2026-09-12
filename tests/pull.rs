@@ -664,7 +664,12 @@ async fn pulled_answer_wakes_the_affine_live_session() {
     });
     assert!(took < Duration::from_secs(2), "{took:?}");
     let block = std::fs::read_to_string(&wake).unwrap();
-    assert!(block.starts_with("🟧"), "{block}");
+    assert_eq!(
+        block.lines().next(),
+        Some(route::WAKE_INSTRUCTION),
+        "{block}"
+    );
+    assert!(block.contains(&format!("| {ANSWER} |")), "{block}");
     assert!(block.contains(ANSWER), "{block}");
     assert!(block.contains(common::PATH), "the question's path: {block}");
     assert!(

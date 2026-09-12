@@ -844,7 +844,8 @@ enum Where {
 fn file_changed_prints_the_sessions_wake_file_on_add_only() {
     let h = Home::new();
     let plugin_json = h.path().join("plugin.json");
-    let body = "🟧🟧🟧\r\n🦉 **Maciek** · 10:00 · p · src/a.rs\n```text\nwhy?\n\n```\n🟧🟧🟧\n";
+    let body =
+        "Show the table below\r\n\n| 🦉 **Maciek** · 10:00 · p · src/a.rs |\n|---|\n| why? |\n\n";
     hook_output(&h.hook("SessionStart", Some(STDIN_S))).unwrap();
     hook_output(&h.hook(
         "SessionStart",
