@@ -3258,7 +3258,10 @@ fn show_prints_the_context_block_and_the_follow_up_line() {
     // OWL-035: on a `consent` record the `🔑` standing line sits between the header and the
     // follow-up line, so the follow-up is still the last line above the question block.
     assert_eq!(lines[at - 1], key_line("Maciek"), "{framed}");
-    assert!(lines[at - 2].starts_with("🦉 "), "under the header: {framed}");
+    assert!(
+        lines[at - 2].starts_with("🦉 "),
+        "under the header: {framed}"
+    );
     assert_eq!(
         lines[at + 1],
         "```text",
