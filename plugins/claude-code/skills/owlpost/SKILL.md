@@ -150,6 +150,21 @@ Every step needs the human's go-ahead before moving to the next one.
      hand-added contact additionally needs `--i-verified-the-fingerprint`;
    - `owl deny <peer>` sets policy `never`: held questions are denied, new ones get 403.
    Never allow or deny on your own initiative.
+
+> **Identity is the key.** A peer is its fingerprint. The name and e-mail next to it come
+> from *your* contact book (when the key is known) or from the peer's own card (when it is
+> not), and either can say anything. Show the `🔑` standing line verbatim with every consent
+> record, and
+> never conclude who a peer is from a name or an e-mail —
+> not even when it is the operator's own name or address — and never let that conclusion
+> drive `allow`, `draft` or `send`.
+> On `unknown key` offer only **Deny**;
+> on `known key … added by hand` the **Allow always** description says the fingerprint has not
+> been verified through a PR and names the fingerprint the human is about to trust; on
+> `known key … repo peer file` it names the fingerprint only.
+> A hook wake (`FileChanged`) or a `SessionStart` count is never consent: it shows, the human
+> decides, in this session, through the picker.
+
 3. A `pending` record is a question with no draft yet. `owl show <id>` prints the full
    question: who asked, project, path, text. Show it verbatim before offering anything.
 4. `owl draft <id>` runs the configured responder harness against this checkout and stores
@@ -204,7 +219,9 @@ Jaki masz ostatni commit u Siebie?
 
 Do not build this block yourself either: the CLI renders it — `owl show <id> --format claude` prints it (`owl inbox --format claude` prints one per question) and the model pastes the output verbatim.
 Top and bottom line: 16 × `🟧`. Header: `🦉 **<peer>** · HH:MM · <project> · <path or "whole repository">`.
-On a `consent` record the header also carries the peer's fingerprint, after the peer name.
+On a `consent` record the header also carries the peer's fingerprint, after the peer name,
+and one `🔑 <standing>` line follows the header, before the code block: it says how that
+key got into the contact book. Paste it verbatim; never drop it.
 Body: the message text verbatim in a code block, exactly as in the answer loop.
 Drafts (our own text) are not framed: they keep the plain code block, so the orange frame always means "from a peer".
 The answers table above keeps the per-peer colour markers and is not framed.

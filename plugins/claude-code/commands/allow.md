@@ -12,8 +12,12 @@ Allowing changes who may ask this machine questions, so it needs one confirmatio
    sets policy `manual`; `--once` releases them without setting a policy; `--always` sets
    `auto` (a hand-added contact additionally needs `--i-verified-the-fingerprint`, which the
    user must confirm they did out-of-band).
-2. Ask for explicit confirmation with AskUserQuestion before running. Do not run anything
+2. `--always` takes the fingerprint and nothing else: a name prefix or an e-mail exits 2 with
+   `owl allow --always needs the fingerprint, not a name: verify it out-of-band and pass owl:… (this peer: <fp>)`,
+   writing no policy and releasing nothing. Pass the `owl:…` from that message only after the
+   user says they checked it out-of-band. `owl allow <peer>` and `--once` still take a name.
+3. Ask for explicit confirmation with AskUserQuestion before running. Do not run anything
    until the user says yes.
-3. Run `owl allow $ARGUMENTS` and show the output. On a non-zero exit, show the error line
+4. Run `owl allow $ARGUMENTS` and show the output. On a non-zero exit, show the error line
    (unknown peer, or a missing `--i-verified-the-fingerprint`) and stop.
-4. Offer `/owlpost:inbox` to see the released questions.
+5. Offer `/owlpost:inbox` to see the released questions.
