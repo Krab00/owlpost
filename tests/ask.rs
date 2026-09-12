@@ -99,6 +99,9 @@ fn accepted_id(out: &Output) -> String {
     line.trim()
         .strip_prefix("accepted ")
         .unwrap_or_else(|| panic!("stdout {line:?}"))
+        .split_whitespace()
+        .next()
+        .unwrap()
         .to_string()
 }
 
@@ -360,7 +363,8 @@ async fn ask_accepted_writes_ask_record() {
         Body::Question {
             project: PROJECT.into(),
             path: Some(PATH.into()),
-            question: QUESTION.into()
+            question: QUESTION.into(),
+            context: None,
         }
     );
     assert_eq!(ids(&spool, Dir::Asks), std::slice::from_ref(&qid));
@@ -416,7 +420,8 @@ async fn ask_without_path() {
         Body::Question {
             project: PROJECT.into(),
             path: None,
-            question: QUESTION.into()
+            question: QUESTION.into(),
+            context: None,
         }
     );
     assert!(
@@ -490,7 +495,8 @@ async fn ask_without_path() {
         Body::Question {
             project: PROJECT.into(),
             path: Some(PATH.into()),
-            question: "Why that file?".into()
+            question: "Why that file?".into(),
+            context: None,
         }
     );
     assert_eq!(
@@ -1475,7 +1481,7 @@ async fn unexpected_status_is_an_error_naming_it() {
     .unwrap()
     .unwrap();
     assert!(
-        matches!(out, SendOutcome::Accepted { ref id } if *id == q.id),
+        matches!(out, SendOutcome::Accepted { ref id, .. } if *id == q.id),
         "{out:?}"
     );
     b.running.shutdown();
@@ -1688,7 +1694,8 @@ async fn file_with_peer_skips_blame_and_sends() {
         Body::Question {
             project: PROJECT.into(),
             path: Some("src/nowhere.rs".into()),
-            question: "Why?".into()
+            question: "Why?".into(),
+            context: None,
         }
     );
     // Missing question with --file is a usage error, nothing sent.

@@ -28,7 +28,7 @@ over `owl contact list` ending with the `@owl:to://` mention hint.
   `/owlpost:install`, `/owlpost:uninstall`, `/owlpost:doctor`, `/owlpost:update`
 - Contacts and trust: `/owlpost:contacts`, `/owlpost:contact`, `/owlpost:add`,
   `/owlpost:allow`, `/owlpost:deny`
-- Asking: `/owlpost:ask`, `/owlpost:history`, `/owlpost:watch`
+- Asking: `/owlpost:ask`, `/owlpost:status`, `/owlpost:history`, `/owlpost:watch`
 - Answering: `/owlpost:inbox`, `/owlpost:show`, `/owlpost:draft`, `/owlpost:edit`,
   `/owlpost:send`, `/owlpost:reject`
 
@@ -75,6 +75,9 @@ owl ask --file <path> "<question>"          # proposes peers from git blame of <
 owl ask --file <path> --peer <peer> "<question>"
 owl ask <peer> <path> "<question>"          # peer: name prefix, email or fingerprint
 owl ask <peer> "<question>"                  # no path: a question about the repository as a whole
+owl ask <peer> --reply-to <id> "<question>"  # continues an earlier exchange (its thread id is reused)
+owl ask <peer> --context <file> "<question>" # attaches a snippet (diff, error, excerpt; ≤ 8 KiB), `-` = stdin
+owl status [<id>]                            # where every open question stands, in the peer's words
 ```
 
 1. Prefer `--file <path>`. It proposes peers from `git blame` of that file and uses the
@@ -83,10 +86,19 @@ owl ask <peer> "<question>"                  # no path: a question about the rep
    their own words), run the command at once and report the peer (name and fingerprint),
    the path and the question with the result. Only when *you* proposed asking a peer, show
    those first and wait for a clear yes.
-3. Read the result. `accepted` means the question was delivered; add `--wait <secs>` when
-   the user wants to block for the answer. Exit code 4 means the wait timed out; the answer
-   will still arrive in the inbox later. Do not retry a rejected or denied question.
+3. Read the result. `accepted <id> — <state>` means the question was delivered and tells
+   where it stands (`waiting for the owner's consent`, `the owner's agent is answering`);
+   `owl status` (`/owlpost:status`) shows the current state of every open question. Add
+   `--wait <secs>` when the user wants to block for the answer: each state change prints
+   as `<HH:MM> <state>`, and `declined by <name>` (exit 2) means the peer turned the
+   question down. Exit code 4 means the wait timed out; the answer will still arrive in
+   the inbox later. Do not retry a rejected, denied or declined question.
 4. Use `--project <id>` only when the repo has no `origin` remote.
+5. Follow up with `--reply-to <id>` (the id of the earlier question or of its answer) when
+   the user's question continues an exchange: the peer's agent then sees the earlier
+   questions and answers of that thread. Attach the diff, error or excerpt the question is
+   about with `--context <file>` (or `--context -` from stdin) instead of pasting it into
+   the question; the peer's agent reads it as data.
 
 ## Reacting to the injected counter
 

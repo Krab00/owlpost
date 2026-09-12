@@ -150,8 +150,10 @@ owl card bartek
 /owlpost:card bartek
 ```
 
-Own card with no argument, the peer's card with one. Note: `owl card` is not implemented yet
-and prints `not implemented yet`.
+Own card with no argument (the running daemon's copy, which also lists the iroh interface),
+the peer's card with one (fetched from the first reachable endpoint). The card is an A2A 1.0
+agent card: who this is, how to authenticate (`owl-mtls`), the one skill (`ask-about-repo`)
+and the three owlpost extensions (identity, repository question, human gate).
 
 ---
 
@@ -166,18 +168,44 @@ owl ask bartek src/auth/session.rs "why is the refresh token rotated on every re
 
 Sends the question to Bartek's machine. The path is optional; without it the question is about
 the whole repository.
-You should see `accepted <id>`, or the answer text right away when it came from the cache or
-Bartek has you on auto.
+You should see `accepted <id> — waiting for the owner's consent` (or `— the owner's agent is
+answering` once Bartek has allowed you), or the answer text right away when it came from the
+cache or Bartek has you on auto.
 
 Other flags:
-- `--wait <secs>` — block and poll for the answer; exit code 4 on timeout.
+- `--wait <secs>` — block and poll for the answer; every change on Bartek's side prints one
+  line `<HH:MM> <state>` (`waiting for the owner's consent`, `the owner's agent is
+  answering`, `the owner is reviewing the answer`); `declined by Bartek: the owner declined`
+  ends the wait with exit code 2; exit code 4 on timeout.
+- `--reply-to <id>` — continue an earlier exchange with Bartek (the id of a question you sent
+  or of an answer you received): his agent then sees the earlier questions and answers of
+  that thread. An unknown id is `no exchange <id>`, another peer's is `<id> was asked to
+  <name>, not <peer>`.
+- `--context <file>` — attach a snippet (a diff, an error, a file excerpt; `-` reads stdin;
+  at most 8192 bytes, else `context is <n> bytes, max 8192`) so Bartek's agent answers the
+  question actually being asked. Shown under the question in `owl show`.
 - `--file <path>` — propose peers from `git blame` of that file; the path is also the question's path.
 - `--peer <peer>` — name the peer instead of picking one.
 - `--project <id>` — override the detected project id.
-- `--no-cache` — skip the local answer cache.
+- `--no-cache` — skip the local answer cache (a question with `--context` or `--reply-to`
+  skips it anyway).
 
 Failures: `offline` (no endpoint reachable, exit 2), `unavailable` (policy never, exit 2),
 `rate limited` (exit 3).
+
+### 3.1a Where does it stand?
+
+```
+owl status
+owl status <id>
+/owlpost:status
+```
+
+One row per open question: `ID  PEER  PATH  STATE  SINCE`, the STATE in Bartek's words
+(`waiting for the owner's consent`, `the owner's agent is answering`, `the owner is reviewing
+the answer`), `offline` when his machine cannot be reached right now. A question Bartek
+declined moves to history as `declined`. `--json` prints the raw task objects. Exit code 4
+with `no open questions` when nothing is open.
 
 ### 3.2 Bartek sees the question
 

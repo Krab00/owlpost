@@ -46,6 +46,46 @@ async fn card_at(client: &reqwest::Client, d: &TestDaemon, path: &str) -> Value 
     resp.json().await.unwrap()
 }
 
+/// The `params` of one of the card's three extensions (OWL-034).
+fn ext<'a>(card: &'a Value, uri: &str) -> &'a Value {
+    owlpost::server::extension_params(card, uri).unwrap_or_else(|| panic!("no {uri} in {card}"))
+}
+
+/// The identity extension's `fingerprint`.
+fn card_fp(card: &Value) -> &str {
+    ext(card, owlpost::server::EXT_IDENTITY)["fingerprint"]
+        .as_str()
+        .unwrap()
+}
+
+/// The human-gate extension's `responds`.
+fn card_responds(card: &Value) -> Value {
+    ext(card, owlpost::server::EXT_HUMAN_GATE)["responds"].clone()
+}
+
+/// `GET /v1/questions/{id}` as `caller`: `(status, body)`.
+async fn task_at(client: &reqwest::Client, d: &TestDaemon, id: &str) -> (u16, Value) {
+    let resp = client
+        .get(d.url(&format!("/v1/questions/{id}")))
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    let body: Value = resp.json().await.unwrap_or(Value::Null);
+    (status, body)
+}
+
+/// `(state, text)` of a Task body.
+fn state_of(task: &Value) -> (String, String) {
+    (
+        task["status"]["state"].as_str().unwrap_or("?").to_string(),
+        task["status"]["message"]["parts"][0]["text"]
+            .as_str()
+            .unwrap_or("?")
+            .to_string(),
+    )
+}
+
 // AC1
 /// The shared fixture must never reach the OS notifier (`tests/notify.rs` opts in on its own).
 #[tokio::test]
@@ -67,24 +107,66 @@ async fn card_is_served_unpinned_and_pinned() {
     let pinned = client(Some(&a), &b.id);
     for path in CARD_PATHS {
         for (who, cl) in [("unpinned", &unpinned), ("pinned", &pinned)] {
+            // OWL-034 AC1: the A2A 1.0 card, from the daemon (iroh endpoint bound).
             let card = card_at(cl, &b, path).await;
-            let owl = card.get("owlpost").expect("owlpost block");
-            assert_eq!(owl["fingerprint"], b.fp(), "{who} {path}");
+            let pubkey = identity::pubkey_string(&b.id.verifying_key());
+            let ident = ext(&card, owlpost::server::EXT_IDENTITY);
+            assert_eq!(ident["fingerprint"], b.fp(), "{who} {path}");
+            assert_eq!(ident["pubkey"], pubkey);
+            assert_eq!(ident["relay"], Value::Null, "fixture daemons have no relay");
+            let gate = ext(&card, owlpost::server::EXT_HUMAN_GATE);
+            assert_eq!(gate["responds"], true);
+            assert_eq!(gate["harness"], "claude");
+            let repo = ext(&card, owlpost::server::EXT_REPO_QUESTION);
+            assert_eq!(repo["projects"], json!([]));
+            let ifs = card["supportedInterfaces"].as_array().unwrap();
+            assert_eq!(ifs.len(), 2, "https and iroh: {ifs:?}");
+            assert_eq!(ifs[0]["url"], format!("https://{}/", b.addr));
             assert_eq!(
-                owl["pubkey"],
-                identity::pubkey_string(&b.id.verifying_key())
+                ifs[1]["url"],
+                format!("owl-iroh://{}", pubkey.strip_prefix("ed25519:").unwrap())
             );
-            assert_eq!(owl["protocol"], 1);
-            assert_eq!(owl["responds"], true);
-            assert_eq!(owl["harness"], "claude");
+            for i in ifs {
+                assert_eq!(i["protocolBinding"], "owlpost-v1");
+                assert_eq!(i["protocolVersion"], "1");
+            }
             assert_eq!(card["capabilities"]["streaming"], false);
             assert_eq!(card["capabilities"]["pushNotifications"], false);
-            assert_eq!(card["skills"], json!([]));
+            assert_eq!(card["capabilities"]["extendedAgentCard"], false);
+            let uris: Vec<&str> = card["capabilities"]["extensions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|e| e["uri"].as_str().unwrap())
+                .collect();
+            assert_eq!(
+                uris,
+                [
+                    "urn:owlpost:ext:identity:v1",
+                    "urn:owlpost:ext:repo-question:v1",
+                    "urn:owlpost:ext:human-gate:v1"
+                ]
+            );
+            assert!(
+                card["securitySchemes"]["owl-mtls"]["mtlsSecurityScheme"]["description"]
+                    .is_string()
+            );
+            assert_eq!(
+                card["securityRequirements"],
+                json!([{ "schemes": { "owl-mtls": { "list": [] } } }])
+            );
+            assert_eq!(card["defaultInputModes"], json!(["text/plain"]));
+            assert_eq!(card["defaultOutputModes"], json!(["text/plain"]));
+            assert_eq!(card["skills"][0]["id"], "ask-about-repo");
+            assert_eq!(card["skills"].as_array().unwrap().len(), 1);
             assert_eq!(card["name"], "Bea");
-            assert_eq!(card["url"], format!("https://{}/", b.addr));
+            assert_eq!(card["provider"]["organization"], "Bea");
+            assert_eq!(card["provider"]["url"], "");
             assert_eq!(card["version"], env!("CARGO_PKG_VERSION"));
-            assert!(card["protocolVersion"].is_string());
             assert!(card["description"].is_string());
+            for gone in ["url", "protocolVersion", "owlpost", "iroh"] {
+                assert!(card.get(gone).is_none(), "{who} {path}: top-level {gone}");
+            }
         }
     }
     // Card is the only thing an unpinned client gets: every /v1 route is 401.
@@ -123,22 +205,34 @@ async fn card_is_served_unpinned_and_pinned() {
     let b = spawn_daemon_with(4, &[Peer::new(&a, "Ana", None)], |cfg| {
         cfg.responder.harness = "codex".into();
         cfg.name = "Cody".into();
+        cfg.emails = vec!["cody@example.org".into()];
         cfg.endpoints = vec!["cody.example.org:7411".into()];
+        cfg.projects
+            .insert("github.com/cody/x".into(), "/tmp/x".into());
     })
     .await;
     for path in CARD_PATHS {
         let card = card_at(&client(None, &b.id), &b, path).await;
-        assert_eq!(card["owlpost"]["harness"], "codex");
+        assert_eq!(ext(&card, owlpost::server::EXT_HUMAN_GATE)["harness"], "codex");
+        assert_eq!(
+            ext(&card, owlpost::server::EXT_REPO_QUESTION)["projects"],
+            json!(["github.com/cody/x"])
+        );
         assert_eq!(card["name"], "Cody");
-        assert_eq!(card["url"], "https://cody.example.org:7411/");
-        assert_eq!(card["owlpost"]["fingerprint"], b.fp());
+        assert_eq!(card["provider"]["organization"], "Cody");
+        assert_eq!(card["provider"]["url"], "mailto:cody@example.org");
+        assert_eq!(
+            card["supportedInterfaces"][0]["url"],
+            "https://cody.example.org:7411/"
+        );
+        assert_eq!(card_fp(&card), b.fp());
     }
     b.running.shutdown();
 
     // A daemon with no contacts at all still serves the card to unpinned clients.
     let b = spawn_daemon(5, true, &[]).await;
     let card = card_at(&client(None, &b.id), &b, CARD_PATHS[1]).await;
-    assert_eq!(card["owlpost"]["fingerprint"], b.fp());
+    assert_eq!(card_fp(&card), b.fp());
     assert!(
         client(Some(&a), &b.id)
             .get(b.url(CARD_PATHS[0]))
@@ -167,7 +261,11 @@ async fn question_is_accepted_and_spooled() {
     let resp = post_envelope(&client(Some(&a), &b.id), &b, &env).await;
     assert_eq!(resp.status(), 202);
     let body: Value = resp.json().await.unwrap();
-    assert_eq!(body, json!({ "status": "accepted", "id": payload.id }));
+    // OWL-034 AC2: a `manual` peer's question is already being worked on.
+    assert_eq!(
+        body,
+        json!({ "status": "accepted", "id": payload.id, "state": "TASK_STATE_WORKING" })
+    );
 
     let rec = b
         .spool()
@@ -279,7 +377,7 @@ async fn never_and_disabled_return_unavailable() {
     .await;
     let unpinned = client(None, &b.id);
     assert_eq!(
-        card_at(&unpinned, &b, CARD_PATHS[0]).await["owlpost"]["responds"],
+        card_responds(&card_at(&unpinned, &b, CARD_PATHS[0]).await),
         true
     );
     let env = signed(&a, &b.id, "why?");
@@ -319,10 +417,7 @@ async fn never_and_disabled_return_unavailable() {
     .await;
     let unpinned = client(None, &b.id);
     for path in CARD_PATHS {
-        assert_eq!(
-            card_at(&unpinned, &b, path).await["owlpost"]["responds"],
-            false
-        );
+        assert_eq!(card_responds(&card_at(&unpinned, &b, path).await), false);
     }
     let env = signed(&a, &b.id, "why?");
     let q: Payload = serde_json::from_str(&env.raw).unwrap();
@@ -978,8 +1073,8 @@ async fn daemon_foreground_writes_addr_and_serves_card() {
         .json()
         .await
         .unwrap();
-    assert_eq!(card["owlpost"]["fingerprint"], fp(&b));
-    assert_eq!(card["owlpost"]["protocol"], 1);
+    assert_eq!(card_fp(&card), fp(&b));
+    assert_eq!(card["skills"][0]["id"], "ask-about-repo");
     let resp = client(Some(&a), &b)
         .get(format!("https://{addr}/v1/outbox"))
         .send()
