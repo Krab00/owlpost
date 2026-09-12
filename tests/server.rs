@@ -213,7 +213,10 @@ async fn card_is_served_unpinned_and_pinned() {
     .await;
     for path in CARD_PATHS {
         let card = card_at(&client(None, &b.id), &b, path).await;
-        assert_eq!(ext(&card, owlpost::server::EXT_HUMAN_GATE)["harness"], "codex");
+        assert_eq!(
+            ext(&card, owlpost::server::EXT_HUMAN_GATE)["harness"],
+            "codex"
+        );
         assert_eq!(
             ext(&card, owlpost::server::EXT_REPO_QUESTION)["projects"],
             json!(["github.com/cody/x"])
@@ -1228,11 +1231,17 @@ async fn task_route_reports_every_state() {
     assert_eq!(status, 200, "{task}");
     assert_eq!(
         state_of(&task),
-        ("TASK_STATE_SUBMITTED".into(), "waiting for the owner's consent".into())
+        (
+            "TASK_STATE_SUBMITTED".into(),
+            "waiting for the owner's consent".into()
+        )
     );
     assert_eq!(task["id"], q.id);
     assert_eq!(task["contextId"], "thread-ana");
-    assert_eq!(task["status"]["message"]["messageId"], format!("{}-status", q.id));
+    assert_eq!(
+        task["status"]["message"]["messageId"],
+        format!("{}-status", q.id)
+    );
     assert_eq!(task["status"]["message"]["role"], "ROLE_AGENT");
     let rec = b.spool().get(Dir::Inbox, &q.id).unwrap().unwrap();
     assert_eq!(task["status"]["timestamp"], rec.received_at);
@@ -1240,14 +1249,25 @@ async fn task_route_reports_every_state() {
         task["metadata"]["owlpost"],
         json!({ "from": fp(&ana), "to": b.fp(), "project": PROJECT, "path": PATH })
     );
-    assert!(task.get("artifacts").is_none(), "the answer travels via the outbox");
+    assert!(
+        task.get("artifacts").is_none(),
+        "the answer travels via the outbox"
+    );
     // Another pinned contact holding the same id: 404, never Ana's state (OWL-008 rule).
     assert_eq!(task_at(&cat_cl, &b, &q.id).await.0, 404);
     // Unknown and malformed ids: 404; an unpinned client: 401.
-    assert_eq!(task_at(&ana_cl, &b, "0191c7a0-0000-7000-8000-000000009999").await.0, 404);
+    assert_eq!(
+        task_at(&ana_cl, &b, "0191c7a0-0000-7000-8000-000000009999")
+            .await
+            .0,
+        404
+    );
     assert_eq!(task_at(&ana_cl, &b, "a%20b").await.0, 404);
     let (status, body) = task_at(&client(None, &b.id), &b, &q.id).await;
-    assert_eq!((status, body["error"].as_str()), (401, Some("client certificate required")));
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (401, Some("client certificate required"))
+    );
     // A question without a thread id has no `contextId`.
     let plain = signed(&ana, &b.id, "plain?");
     let plain_q: Payload = serde_json::from_str(&plain.raw).unwrap();
@@ -1268,11 +1288,18 @@ async fn task_route_reports_every_state() {
         assert_eq!(status, 200);
         assert_eq!(
             state_of(&task),
-            ("TASK_STATE_WORKING".into(), "the owner's agent is answering".into())
+            (
+                "TASK_STATE_WORKING".into(),
+                "the owner's agent is answering".into()
+            )
         );
     }
     let resp = post_envelope(&cat_cl, &b, &signed(&cat, &b.id, "again?")).await;
-    assert_eq!(resp.status(), 429, "the POST bucket is spent, the GETs did not touch it");
+    assert_eq!(
+        resp.status(),
+        429,
+        "the POST bucket is spent, the GETs did not touch it"
+    );
     // pending + auto_error (a failed automatic attempt): still WORKING, other words.
     let spool = b.spool();
     let mut rec = spool.get(Dir::Inbox, &qc.id).unwrap().unwrap();
@@ -1294,7 +1321,10 @@ async fn task_route_reports_every_state() {
     let (_, task) = task_at(&cat_cl, &b, &qc.id).await;
     assert_eq!(
         state_of(&task),
-        ("TASK_STATE_WORKING".into(), "the owner is reviewing the answer".into())
+        (
+            "TASK_STATE_WORKING".into(),
+            "the owner is reviewing the answer".into()
+        )
     );
     // owl send: the answer sits in outbox/ → COMPLETED "answered"; metadata still names
     // the question; then the ack moves it to done/acked → still COMPLETED "answered".
@@ -1304,7 +1334,10 @@ async fn task_route_reports_every_state() {
     assert!(spool.get(Dir::Outbox, &aid).unwrap().is_some());
     let (status, task) = task_at(&cat_cl, &b, &qc.id).await;
     assert_eq!(status, 200);
-    assert_eq!(state_of(&task), ("TASK_STATE_COMPLETED".into(), "answered".into()));
+    assert_eq!(
+        state_of(&task),
+        ("TASK_STATE_COMPLETED".into(), "answered".into())
+    );
     assert_eq!(task["metadata"]["owlpost"]["project"], PROJECT);
     assert_eq!(task["metadata"]["owlpost"]["from"], fp(&cat));
     let resp = cat_cl
@@ -1316,11 +1349,20 @@ async fn task_route_reports_every_state() {
     assert_eq!(spool.get(Dir::Done, &aid).unwrap().unwrap().state, "acked");
     let (status, task) = task_at(&cat_cl, &b, &qc.id).await;
     assert_eq!(status, 200);
-    assert_eq!(state_of(&task), ("TASK_STATE_COMPLETED".into(), "answered".into()));
+    assert_eq!(
+        state_of(&task),
+        ("TASK_STATE_COMPLETED".into(), "answered".into())
+    );
     let done_q = spool.get(Dir::Done, &qc.id).unwrap().unwrap();
-    assert_eq!(task["status"]["timestamp"], done_q.meta["done_at"], "done_at once finished");
+    assert_eq!(
+        task["status"]["timestamp"], done_q.meta["done_at"],
+        "done_at once finished"
+    );
     // Ana is still waiting for consent; another asker's answer changes nothing for her.
-    assert_eq!(state_of(&task_at(&ana_cl, &b, &q.id).await.1).0, "TASK_STATE_SUBMITTED");
+    assert_eq!(
+        state_of(&task_at(&ana_cl, &b, &q.id).await.1).0,
+        "TASK_STATE_SUBMITTED"
+    );
 
     // owl deny Ana → done/denied → REJECTED "the owner declined" (for both her asks).
     let (code, out, err) = owl_at(b.home(), &["deny", "Ana"]);
@@ -1337,13 +1379,24 @@ async fn task_route_reports_every_state() {
     // Ana is `never` now: an id she never asked about is REJECTED "unavailable", not 404.
     let (status, task) = task_at(&ana_cl, &b, "0191c7a0-0000-7000-8000-000000009999").await;
     assert_eq!(status, 200);
-    assert_eq!(state_of(&task), ("TASK_STATE_REJECTED".into(), "unavailable".into()));
+    assert_eq!(
+        state_of(&task),
+        ("TASK_STATE_REJECTED".into(), "unavailable".into())
+    );
     assert_eq!(task["metadata"]["owlpost"]["from"], fp(&ana));
     // Dan (`never` from the start), same thing; Cat (manual) still gets 404 for unknown ids.
     let (status, task) = task_at(&dan_cl, &b, &q.id).await;
     assert_eq!(status, 200);
-    assert_eq!(state_of(&task), ("TASK_STATE_REJECTED".into(), "unavailable".into()));
-    assert_eq!(task_at(&cat_cl, &b, "0191c7a0-0000-7000-8000-000000009999").await.0, 404);
+    assert_eq!(
+        state_of(&task),
+        ("TASK_STATE_REJECTED".into(), "unavailable".into())
+    );
+    assert_eq!(
+        task_at(&cat_cl, &b, "0191c7a0-0000-7000-8000-000000009999")
+            .await
+            .0,
+        404
+    );
 
     // owl reject on a pending question → done/rejected → REJECTED "the owner declined".
     let env_c2 = signed(&cat, &b.id, "cat two?");
@@ -1362,10 +1415,18 @@ async fn task_route_reports_every_state() {
     b.running.shutdown();
 
     // Responder disabled: an unknown id is REJECTED "unavailable" for every pinned peer.
-    let b = spawn_daemon(5, false, &[Peer::new(&cat, "Cat", Some(policy(Mode::Manual, None)))]).await;
+    let b = spawn_daemon(
+        5,
+        false,
+        &[Peer::new(&cat, "Cat", Some(policy(Mode::Manual, None)))],
+    )
+    .await;
     let (status, task) = task_at(&client(Some(&cat), &b.id), &b, &qc.id).await;
     assert_eq!(status, 200);
-    assert_eq!(state_of(&task), ("TASK_STATE_REJECTED".into(), "unavailable".into()));
+    assert_eq!(
+        state_of(&task),
+        ("TASK_STATE_REJECTED".into(), "unavailable".into())
+    );
     b.running.shutdown();
 }
 
@@ -1378,7 +1439,12 @@ async fn task_route_reports_every_state() {
 #[tokio::test]
 async fn context_is_bounded_and_threaded_questions_bypass_the_cache() {
     let a = id(1);
-    let b = spawn_daemon(2, true, &[Peer::new(&a, "Ana", Some(policy(Mode::Manual, None)))]).await;
+    let b = spawn_daemon(
+        2,
+        true,
+        &[Peer::new(&a, "Ana", Some(policy(Mode::Manual, None)))],
+    )
+    .await;
     let cl = client(Some(&a), &b.id);
     let post = |ctx: String| {
         let env = threaded(&a, &b.id, "bounded?", "thread-bound", Some(&ctx));
@@ -1404,7 +1470,10 @@ async fn context_is_bounded_and_threaded_questions_bypass_the_cache() {
     let resp = post_raw(&cl, &b, bytes, Some(&sig)).await;
     assert_eq!(resp.status(), 400);
     let body: Value = resp.json().await.unwrap();
-    assert!(body["error"].as_str().unwrap().starts_with("bad schema"), "{body}");
+    assert!(
+        body["error"].as_str().unwrap().starts_with("bad schema"),
+        "{body}"
+    );
     raw["body"]["context"] = Value::Null;
     let bytes = serde_json::to_vec(&raw).unwrap();
     let sig = sig_over(&a, &bytes);
@@ -1422,7 +1491,10 @@ async fn context_is_bounded_and_threaded_questions_bypass_the_cache() {
     let spool = b.spool();
     let hash = question_hash(PROJECT, Some(PATH), "cached?");
     let earlier = question(&a, &b.id, "cached?");
-    let ans = Envelope::sign(&Payload::answer(&earlier, "From cache.", "fake", 0, true), &b.id);
+    let ans = Envelope::sign(
+        &Payload::answer(&earlier, "From cache.", "fake", 0, true),
+        &b.id,
+    );
     spool
         .cache_put(&hash, &record(&ans.raw, &ans.sig, "unacked"))
         .unwrap();
@@ -1437,7 +1509,12 @@ async fn context_is_bounded_and_threaded_questions_bypass_the_cache() {
     assert_eq!(resp.status(), 202);
     assert_eq!(inbox_ids(&b).len(), before + 1);
     // A second identical send (new id, same text and context): a second inbox record.
-    let resp = post_envelope(&cl, &b, &threaded(&a, &b.id, "cached?", "thread-ctx2", Some("diff"))).await;
+    let resp = post_envelope(
+        &cl,
+        &b,
+        &threaded(&a, &b.id, "cached?", "thread-ctx2", Some("diff")),
+    )
+    .await;
     assert_eq!(resp.status(), 202);
     assert_eq!(inbox_ids(&b).len(), before + 2);
     // (context absent, thread known — `thread-ctx` now has an inbox record): stored.
@@ -1448,20 +1525,42 @@ async fn context_is_bounded_and_threaded_questions_bypass_the_cache() {
     let done_q = threaded(&a, &b.id, "old?", "thread-done", None);
     let done_id = serde_json::from_str::<Payload>(&done_q.raw).unwrap().id;
     spool
-        .put(Dir::Done, &done_id, &record(&done_q.raw, &done_q.sig, "answered"))
+        .put(
+            Dir::Done,
+            &done_id,
+            &record(&done_q.raw, &done_q.sig, "answered"),
+        )
         .unwrap();
-    let resp = post_envelope(&cl, &b, &threaded(&a, &b.id, "cached?", "thread-done", None)).await;
+    let resp = post_envelope(
+        &cl,
+        &b,
+        &threaded(&a, &b.id, "cached?", "thread-done", None),
+    )
+    .await;
     assert_eq!(resp.status(), 202);
     assert_eq!(inbox_ids(&b).len(), before + 4);
     // (context present, thread known): stored as well — and the plain twin still hits.
-    let resp = post_envelope(&cl, &b, &threaded(&a, &b.id, "cached?", "thread-done", Some("d"))).await;
+    let resp = post_envelope(
+        &cl,
+        &b,
+        &threaded(&a, &b.id, "cached?", "thread-done", Some("d")),
+    )
+    .await;
     assert_eq!(resp.status(), 202);
     assert_eq!(inbox_ids(&b).len(), before + 5);
-    let resp = post_envelope(&cl, &b, &threaded(&a, &b.id, "cached?", "thread-fresh", None)).await;
+    let resp = post_envelope(
+        &cl,
+        &b,
+        &threaded(&a, &b.id, "cached?", "thread-fresh", None),
+    )
+    .await;
     assert_eq!(resp.status(), 200, "the cache itself is intact");
     // Every stored record kept its context byte for byte.
     let ctx_rec = spool
-        .get(Dir::Inbox, &serde_json::from_str::<Payload>(&with_ctx.raw).unwrap().id)
+        .get(
+            Dir::Inbox,
+            &serde_json::from_str::<Payload>(&with_ctx.raw).unwrap().id,
+        )
         .unwrap()
         .unwrap();
     let p: Payload = serde_json::from_str(&ctx_rec.raw).unwrap();

@@ -5,6 +5,7 @@
 
 mod common;
 
+use std::io::Write;
 use std::net::{SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -185,6 +186,16 @@ struct FakeScript {
     ack_status: u16,
     /// When set, every accepted question is answered with this text straight into the outbox.
     answer_with: Option<String>,
+    /// OWL-034: `"state"` of the well-formed `202` body; `None` omits the key entirely.
+    accept_state: Option<&'static str>,
+    /// OWL-034: successive `(status, body)` for `GET /v1/questions/{id}`; the last row
+    /// repeats once the script runs out, and an EMPTY script is a peer with no task route
+    /// (every fetch is a `404`). `id` / `contextId` are filled in from the live question.
+    tasks: Vec<(u16, Value)>,
+    /// With `answer_with`, hold the answer back until this many task fetches have been
+    /// served (`0` = straight into the outbox at accept time). Lets a test script the state
+    /// transitions that must be printed BEFORE the answer ends the wait.
+    answer_after_tasks: usize,
 }
 
 struct FakeState {
@@ -193,6 +204,8 @@ struct FakeState {
     questions: Mutex<Vec<Payload>>,
     outbox: Mutex<Vec<(Payload, Envelope)>>,
     acked: Mutex<Vec<String>>,
+    /// OWL-034: the question id of every `GET /v1/questions/{id}` this peer served.
+    task_fetches: Mutex<Vec<String>>,
 }
 
 struct FakePeer {
@@ -216,6 +229,11 @@ impl FakePeer {
     }
     fn acked(&self) -> Vec<String> {
         self.state.acked.lock().unwrap().clone()
+    }
+    /// The ids this peer served a Task for, in order (OWL-034; counted server-side so no
+    /// test has to infer the client's polling from timing).
+    fn task_fetches(&self) -> Vec<String> {
+        self.state.task_fetches.lock().unwrap().clone()
     }
     fn shutdown(&self) {
         self.handle.shutdown();
@@ -243,15 +261,91 @@ async fn fake_questions(
             body.clone(),
         );
     }
-    if let Some(text) = &st.script.answer_with {
+    if let Some(text) = &st.script.answer_with
+        && st.script.answer_after_tasks == 0
+    {
         let ans = Payload::answer(&q, text, "fake", 0, false);
         let env = Envelope::sign(&ans, &st.id);
         st.outbox.lock().unwrap().push((ans, env));
     }
+    let mut body = json!({ "status": "accepted", "id": q.id });
+    if let Some(state) = st.script.accept_state {
+        body["state"] = json!(state);
+    }
+    (StatusCode::ACCEPTED, headers, body.to_string())
+}
+
+/// `GET /v1/questions/{id}` (OWL-034): the next scripted Task, with `id` / `contextId`
+/// filled in from the live question. An empty script is a peer without the route: `404`.
+async fn fake_task(
+    State(st): State<Arc<FakeState>>,
+    AxPath(id): AxPath<String>,
+) -> (StatusCode, HeaderMap, String) {
+    let served = {
+        let mut fetches = st.task_fetches.lock().unwrap();
+        fetches.push(id.clone());
+        fetches.len()
+    };
+    let question = st.questions.lock().unwrap().last().cloned();
+    // The answer is released only once the scripted transitions have been served.
+    if let Some(text) = &st.script.answer_with
+        && st.script.answer_after_tasks > 0
+        && served >= st.script.answer_after_tasks
+        && let Some(q) = &question
+    {
+        let mut outbox = st.outbox.lock().unwrap();
+        if outbox.is_empty() {
+            let ans = Payload::answer(q, text, "fake", 0, false);
+            let env = Envelope::sign(&ans, &st.id);
+            outbox.push((ans, env));
+        }
+    }
+    let mut headers = HeaderMap::new();
+    headers.insert("content-type", "application/json".parse().unwrap());
+    let Some((status, body)) = st
+        .script
+        .tasks
+        .get(served - 1)
+        .or_else(|| st.script.tasks.last())
+    else {
+        return (
+            StatusCode::NOT_FOUND,
+            headers,
+            json!({ "error": "unknown question" }).to_string(),
+        );
+    };
+    let mut body = body.clone();
+    body["status"]["message"]["messageId"] = json!(format!("{id}-status"));
+    body["id"] = json!(id);
+    body["contextId"] = json!(question.and_then(|q| q.context_id));
     (
-        StatusCode::ACCEPTED,
+        StatusCode::from_u16(*status).unwrap(),
         headers,
-        json!({ "status": "accepted", "id": q.id }).to_string(),
+        body.to_string(),
+    )
+}
+
+/// One A2A Task body in the shape the real server produces (OWL-034); `id` / `contextId`
+/// are placeholders that [`fake_task`] replaces with the live question's.
+fn task_body(state: &str, text: &str) -> (u16, Value) {
+    (
+        200,
+        json!({
+            "id": "",
+            "contextId": Value::Null,
+            "status": {
+                "state": state,
+                "timestamp": "2026-09-12T10:00:00Z",
+                "message": {
+                    "messageId": "status",
+                    "role": "ROLE_AGENT",
+                    "parts": [{ "text": text }],
+                },
+            },
+            "metadata": { "owlpost": {
+                "from": "fake", "to": "asker", "project": PROJECT, "path": PATH,
+            } },
+        }),
     )
 }
 
@@ -301,9 +395,11 @@ async fn spawn_fake(seed: u8, asker: &Identity, script: FakeScript) -> FakePeer 
         questions: Mutex::new(vec![]),
         outbox: Mutex::new(vec![]),
         acked: Mutex::new(vec![]),
+        task_fetches: Mutex::new(vec![]),
     });
     let app = Router::new()
         .route("/v1/questions", post(fake_questions))
+        .route("/v1/questions/{id}", get(fake_task))
         .route("/v1/outbox", get(fake_outbox))
         .route("/v1/outbox/{id}/ack", post(fake_ack))
         .with_state(state.clone());
@@ -1711,4 +1807,751 @@ async fn file_with_peer_skips_blame_and_sends() {
     );
     assert_eq!(ids(&Spool::new(home.path()).unwrap(), Dir::Asks).len(), 1);
     b.running.shutdown();
+}
+
+// ---- OWL-034: task state, threads, context ----------------------------------------------
+
+/// Every new `owl` run is reaped under this deadline instead of an unbounded `wait()`.
+const BOUND: Duration = Duration::from_secs(90);
+
+/// Waits for `child` with a deadline: `try_wait` in a loop, then `kill()` and fail.
+fn reap(mut child: std::process::Child, limit: Duration, what: &str) -> Output {
+    let deadline = Instant::now() + limit;
+    loop {
+        if child.try_wait().unwrap().is_some() {
+            return child.wait_with_output().unwrap();
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("{what} did not exit within {limit:?}");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn owl_bounded(home: &Path, args: &[&str], limit: Duration) -> Output {
+    let child = owl(home, home)
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    reap(child, limit, "owl")
+}
+
+/// [`ask`] under a deadline.
+fn ask_bounded(home: &Path, extra: &[&str], limit: Duration) -> Output {
+    let mut args: Vec<&str> = vec!["ask", "Bea", PATH, QUESTION, "--project", PROJECT];
+    args.extend_from_slice(extra);
+    owl_bounded(home, &args, limit)
+}
+
+/// `owl ask … --context -` with `snippet` written to the child's stdin.
+fn ask_context_stdin(home: &Path, snippet: &str, limit: Duration) -> Output {
+    let mut child = owl(home, home)
+        .args([
+            "ask",
+            "Bea",
+            PATH,
+            QUESTION,
+            "--project",
+            PROJECT,
+            "--context",
+            "-",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(snippet.as_bytes())
+        .unwrap();
+    reap(child, limit, "owl ask --context -")
+}
+
+/// A fake that accepts every question (`202`, optional `state`) and never answers.
+fn accepts_only(state: Option<&'static str>) -> FakeScript {
+    FakeScript {
+        ack_status: 204,
+        accept_state: state,
+        ..Default::default()
+    }
+}
+
+fn home_for(a: &Identity, peer: &FakePeer) -> TempDir {
+    asker_home(a, &peer.state.id, &[&peer.addr.to_string()])
+}
+
+/// The `<HH:MM> <text>` state lines of a `--wait` run, in order, with the clock parsed (not
+/// matched as a substring). Warnings and the `accepted …` line start with a word, not a time.
+fn transitions(err: &str) -> Vec<String> {
+    err.lines()
+        .filter_map(|line| {
+            let (clock, text) = line.split_once(' ')?;
+            let (h, m) = clock.split_once(':')?;
+            if h.len() != 2 || m.len() != 2 {
+                return None;
+            }
+            let (h, m): (u32, u32) = (h.parse().ok()?, m.parse().ok()?);
+            assert!(h < 24 && m < 60, "not a clock time: {line:?}");
+            Some(text.to_string())
+        })
+        .collect()
+}
+
+fn question_context(p: &Payload) -> Option<&str> {
+    match &p.body {
+        Body::Question { context, .. } => context.as_deref(),
+        Body::Answer { .. } => panic!("not a question: {p:?}"),
+    }
+}
+
+// AC3: the `202` state is named on stdout, in plain text and in `--json`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn accepted_line_names_the_task_state() {
+    let a = id(1);
+    // Each row differs from the next only in the `state` the peer's `202` carried.
+    for (state, text) in [
+        (
+            Some(envelope::TASK_STATE_SUBMITTED),
+            Some("waiting for the owner's consent"),
+        ),
+        (
+            Some(envelope::TASK_STATE_WORKING),
+            Some("the owner's agent is answering"),
+        ),
+        // No `state` key at all, and a state name this version does not know: both fall
+        // back to the bare line (`state_text` → `None`).
+        (None, None),
+        (Some("TASK_STATE_CANCELED"), None),
+    ] {
+        let peer = spawn_fake(2, &a, accepts_only(state)).await;
+        let home = home_for(&a, &peer);
+
+        let out = ask_bounded(home.path(), &[], BOUND);
+        assert_eq!(out.status.code(), Some(0), "{state:?}: {}", stderr(&out));
+        assert!(stderr(&out).is_empty(), "{state:?}: {}", stderr(&out));
+        let qid = peer.questions()[0].id.clone();
+        let expected = match text {
+            Some(t) => format!("accepted {qid} — {t}\n"),
+            None => format!("accepted {qid}\n"),
+        };
+        assert_eq!(stdout(&out), expected, "{state:?}");
+
+        let out = ask_bounded(home.path(), &["--json"], BOUND);
+        assert_eq!(out.status.code(), Some(0), "{state:?}: {}", stderr(&out));
+        let qid2 = peer.questions()[1].id.clone();
+        let got: Value = serde_json::from_str(&stdout(&out)).unwrap();
+        // The raw state name travels in `--json`, not the human text (and `null` when the
+        // peer sent none) — asserted as a whole object, so no extra key can sneak in.
+        assert_eq!(
+            got,
+            json!({ "status": "accepted", "id": qid2, "state": state }),
+            "{state:?}"
+        );
+        assert!(peer.task_fetches().is_empty(), "no --wait, no task fetch");
+        peer.shutdown();
+    }
+}
+
+/// AC3: `--wait` prints one `<HH:MM> <text>` line per CHANGE of the peer's Task text — the
+/// repeated `SUBMITTED` tick prints nothing — and the answer still lands on stdout.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn wait_prints_each_task_state_change_once() {
+    let a = id(1);
+    let peer = spawn_fake(
+        2,
+        &a,
+        FakeScript {
+            accept_state: Some(envelope::TASK_STATE_SUBMITTED),
+            tasks: vec![
+                task_body(
+                    envelope::TASK_STATE_SUBMITTED,
+                    "waiting for the owner's consent",
+                ),
+                task_body(
+                    envelope::TASK_STATE_SUBMITTED,
+                    "waiting for the owner's consent",
+                ),
+                task_body(
+                    envelope::TASK_STATE_WORKING,
+                    "the owner's agent is answering",
+                ),
+            ],
+            answer_after_tasks: 3,
+            ..well_formed()
+        },
+    )
+    .await;
+    let home = home_for(&a, &peer);
+    let out = ask_bounded(home.path(), &["--wait", "20"], BOUND);
+    let (qid, _aid) = assert_answered_via_wait(&out, &peer, home.path());
+    let err = stderr(&out);
+    assert_eq!(
+        transitions(&err),
+        [
+            "waiting for the owner's consent",
+            "the owner's agent is answering"
+        ],
+        "one line per change, the repeat silent: {err}"
+    );
+    assert!(
+        err.contains(&format!(
+            "accepted {qid} — waiting for the owner's consent; waiting up to 20s for an answer"
+        )),
+        "{err}"
+    );
+    // Counted by the peer, not inferred from the client's timing: three Task fetches (the
+    // fourth tick found the answer in the outbox and returned first).
+    assert_eq!(peer.task_fetches(), [qid.clone(), qid.clone(), qid]);
+    peer.shutdown();
+}
+
+/// AC3: `--quiet` drops every state line; the same script still returns the answer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn wait_quiet_prints_no_task_states() {
+    let a = id(1);
+    let peer = spawn_fake(
+        2,
+        &a,
+        FakeScript {
+            accept_state: Some(envelope::TASK_STATE_SUBMITTED),
+            tasks: vec![
+                task_body(
+                    envelope::TASK_STATE_SUBMITTED,
+                    "waiting for the owner's consent",
+                ),
+                task_body(
+                    envelope::TASK_STATE_WORKING,
+                    "the owner's agent is answering",
+                ),
+            ],
+            answer_after_tasks: 2,
+            ..well_formed()
+        },
+    )
+    .await;
+    let home = home_for(&a, &peer);
+    let out = ask_bounded(home.path(), &["--wait", "20", "--quiet"], BOUND);
+    let (qid, _aid) = assert_answered_via_wait(&out, &peer, home.path());
+    let err = stderr(&out);
+    assert!(transitions(&err).is_empty(), "{err}");
+    assert!(err.is_empty(), "{err}");
+    assert_eq!(peer.task_fetches(), [qid.clone(), qid]);
+    peer.shutdown();
+}
+
+/// AC3: a Task that turns `REJECTED` ends the wait at once — `declined by <name>: <text>`,
+/// exit 2, the ask filed under `done/` as `declined` and shown so by `owl history`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn wait_declined_task_exits_2_and_files_the_ask() {
+    let a = id(1);
+    let peer = spawn_fake(
+        2,
+        &a,
+        FakeScript {
+            accept_state: Some(envelope::TASK_STATE_SUBMITTED),
+            tasks: vec![
+                task_body(
+                    envelope::TASK_STATE_SUBMITTED,
+                    "waiting for the owner's consent",
+                ),
+                task_body(envelope::TASK_STATE_REJECTED, "the owner declined"),
+            ],
+            ack_status: 204,
+            ..Default::default()
+        },
+    )
+    .await;
+    let home = home_for(&a, &peer);
+    let out = ask_bounded(home.path(), &["--wait", "20"], BOUND);
+    let err = stderr(&out);
+    assert_eq!(out.status.code(), Some(2), "{err}");
+    assert!(err.contains("declined by Bea: the owner declined"), "{err}");
+    assert!(stdout(&out).is_empty(), "{}", stdout(&out));
+    // The rejecting tick reports the decline, not another state line.
+    assert_eq!(
+        transitions(&err),
+        ["waiting for the owner's consent"],
+        "{err}"
+    );
+
+    let qid = peer.questions()[0].id.clone();
+    assert_eq!(peer.task_fetches(), [qid.clone(), qid.clone()]);
+    let spool = Spool::new(home.path()).unwrap();
+    assert!(ids(&spool, Dir::Asks).is_empty(), "the ask left asks/");
+    assert_eq!(
+        spool.get(Dir::Done, &qid).unwrap().unwrap().state,
+        "declined"
+    );
+    assert!(ids(&spool, Dir::Inbox).is_empty());
+    assert!(ids(&spool, Dir::Cache).is_empty());
+
+    let hist = owl_bounded(home.path(), &["history", "--json"], BOUND);
+    assert_eq!(hist.status.code(), Some(0), "{}", stderr(&hist));
+    let rows: Value = serde_json::from_str(&stdout(&hist)).unwrap();
+    assert_eq!(rows.as_array().unwrap().len(), 1, "{rows}");
+    assert_eq!(rows[0]["id"], qid.as_str());
+    assert_eq!(rows[0]["state"], "declined");
+    assert_eq!(rows[0]["peer_name"], "Bea");
+    peer.shutdown();
+}
+
+/// AC3: a peer without the Task route (`404` on every fetch — the `Ok(None)` arm) waits
+/// exactly as before: the answer is delivered, exit 0, and nothing is printed about state.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn wait_works_against_a_peer_without_a_task_route() {
+    let a = id(1);
+    let peer = spawn_fake(
+        2,
+        &a,
+        FakeScript {
+            // Empty script = no task route; the answer is held back so the route is really
+            // reached before the wait ends.
+            tasks: vec![],
+            answer_after_tasks: 2,
+            ..well_formed()
+        },
+    )
+    .await;
+    let home = home_for(&a, &peer);
+    let out = ask_bounded(home.path(), &["--wait", "20"], BOUND);
+    let (qid, _aid) = assert_answered_via_wait(&out, &peer, home.path());
+    let err = stderr(&out);
+    assert!(transitions(&err).is_empty(), "{err}");
+    assert!(
+        !err.contains("warning"),
+        "a 404 is not worth a warning: {err}"
+    );
+    assert!(
+        err.contains(&format!("accepted {qid}; waiting up to 20s")),
+        "no state from this peer, so no dash: {err}"
+    );
+    assert_eq!(peer.task_fetches(), [qid.clone(), qid]);
+    peer.shutdown();
+}
+
+/// AC5: `--context <file>` trims the file (outer whitespace only) and sends the bytes as
+/// `body.context`; without it the field is absent. The negative twin differs only in the flag.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn context_travels_on_the_wire_and_into_the_ask_record() {
+    let a = id(1);
+    let peer = spawn_fake(2, &a, accepts_only(None)).await;
+    let home = home_for(&a, &peer);
+    let snippet = "  \n\tfn rotate(t: &Token) -> Token {\n\n    t.next()\n}\n \n";
+    let trimmed = snippet.trim();
+    assert!(
+        trimmed.contains('\n') && trimmed.contains("\n\n"),
+        "the fixture proves the trim is outer-only"
+    );
+    let file = home.path().join("snippet.txt");
+    std::fs::write(&file, snippet).unwrap();
+
+    let out = ask_bounded(home.path(), &["--context", file.to_str().unwrap()], BOUND);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let qid = peer.questions()[0].id.clone();
+    assert_eq!(stdout(&out), format!("accepted {qid}\n"));
+
+    let spool = Spool::new(home.path()).unwrap();
+    let rec = spool.get(Dir::Asks, &qid).unwrap().expect("asks/<id>.json");
+    let stored: Payload = serde_json::from_str(&rec.raw).unwrap();
+    assert_eq!(
+        stored.body,
+        Body::Question {
+            project: PROJECT.into(),
+            path: Some(PATH.into()),
+            question: QUESTION.into(),
+            context: Some(trimmed.into()),
+        }
+    );
+    assert_eq!(
+        question_context(&stored).unwrap().as_bytes(),
+        trimmed.as_bytes(),
+        "byte-identical to the trimmed file"
+    );
+    assert_eq!(rec.meta["threaded"], true);
+    // The peer got the same bytes.
+    assert_eq!(
+        question_context(&peer.questions()[0]).unwrap().as_bytes(),
+        trimmed.as_bytes()
+    );
+
+    // Negative twin: the same ask without `--context` carries none and is not threaded.
+    let out = ask_bounded(home.path(), &[], BOUND);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let qid2 = peer.questions()[1].id.clone();
+    let rec2 = spool.get(Dir::Asks, &qid2).unwrap().unwrap();
+    assert_eq!(question_context(&payload(&rec2)), None);
+    assert!(
+        !rec2.raw.contains("\"context\""),
+        "omitted on the wire: {}",
+        rec2.raw
+    );
+    assert_eq!(rec2.meta["threaded"], false);
+    peer.shutdown();
+}
+
+/// AC5: `--context -` reads the snippet from stdin, trimmed the same way.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn context_from_stdin() {
+    let a = id(1);
+    let peer = spawn_fake(2, &a, accepts_only(None)).await;
+    let home = home_for(&a, &peer);
+    let snippet = "\n\n  error[E0308]: mismatched types\n\n   --> src/lib.rs:12\n  \n";
+    let trimmed = snippet.trim();
+
+    let out = ask_context_stdin(home.path(), snippet, BOUND);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let qid = peer.questions()[0].id.clone();
+    assert_eq!(stdout(&out), format!("accepted {qid}\n"));
+    assert_eq!(
+        question_context(&peer.questions()[0]).unwrap().as_bytes(),
+        trimmed.as_bytes()
+    );
+    let spool = Spool::new(home.path()).unwrap();
+    let rec = spool.get(Dir::Asks, &qid).unwrap().unwrap();
+    assert_eq!(question_context(&payload(&rec)), Some(trimmed));
+    assert_eq!(rec.meta["threaded"], true);
+    peer.shutdown();
+}
+
+/// AC5: the cap is 8192 BYTES, measured after trimming. Each row differs from the accepted
+/// ones only in the size of the snippet; nothing is sent for a rejected one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn context_cap_is_bytes_after_trimming() {
+    let a = id(1);
+    let peer = spawn_fake(2, &a, accepts_only(None)).await;
+    let home = home_for(&a, &peer);
+    let multibyte = "ł".repeat(4097);
+    assert_eq!((multibyte.len(), multibyte.chars().count()), (8194, 4097));
+    let padded = format!("\n\n{}\n\n", "x".repeat(8192));
+    let mut sent = 0;
+    for (what, snippet, expected) in [
+        ("exactly the cap", "x".repeat(8192), Ok(8192)),
+        ("one byte over", "x".repeat(8193), Err(8193)),
+        // 4097 chars, 8194 bytes: under the cap in characters, over it in bytes.
+        ("multi-byte over", multibyte.clone(), Err(8194)),
+        // Raw 8196 bytes, 8192 once trimmed: the trim happens before the measurement.
+        ("padded to the cap", padded.clone(), Ok(8192)),
+    ] {
+        let file = home.path().join("big.txt");
+        std::fs::write(&file, &snippet).unwrap();
+        let out = ask_bounded(home.path(), &["--context", file.to_str().unwrap()], BOUND);
+        match expected {
+            Ok(bytes) => {
+                sent += 1;
+                assert_eq!(out.status.code(), Some(0), "{what}: {}", stderr(&out));
+                assert_eq!(
+                    question_context(peer.questions().last().unwrap())
+                        .unwrap()
+                        .len(),
+                    bytes,
+                    "{what}"
+                );
+            }
+            Err(n) => {
+                assert_eq!(out.status.code(), Some(1), "{what}: {}", stderr(&out));
+                assert_eq!(
+                    stderr(&out).trim_end(),
+                    format!("owl: context is {n} bytes, max 8192"),
+                    "{what}"
+                );
+                assert!(stdout(&out).is_empty(), "{what}");
+            }
+        }
+        assert_eq!(
+            peer.questions().len(),
+            sent,
+            "{what}: nothing else was sent"
+        );
+    }
+    peer.shutdown();
+}
+
+/// AC5: a `--context` question bypasses the asker cache in both directions — it is never
+/// served from a hit, and its answer is never written back. The 2×2 of
+/// {context absent, present} × {cache hit, no cache}.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn context_bypasses_the_asker_cache() {
+    let a = id(1);
+    let peer = spawn_fake(2, &a, well_formed()).await;
+    let home = home_for(&a, &peer);
+    let spool = Spool::new(home.path()).unwrap();
+    let hash = question_hash(PROJECT, Some(PATH), QUESTION);
+    let file = home.path().join("snippet.txt");
+    std::fs::write(&file, "let token = rotate(&t);").unwrap();
+    let ctx = ["--context", file.to_str().unwrap()];
+
+    // 1. No context, no cache: sent, answered, and the answer cached.
+    let out = ask_bounded(home.path(), &["--wait", "20"], BOUND);
+    assert_answered_via_wait(&out, &peer, home.path());
+    let cached = spool.cache_get(&hash).unwrap().expect("cached").raw;
+    assert_eq!(peer.questions().len(), 1);
+
+    // 2. No context, cache hit: served from the cache, nothing sent.
+    let out = ask_bounded(home.path(), &[], BOUND);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(stdout(&out).trim(), ANSWER);
+    assert_eq!(peer.questions().len(), 1, "the cache answered it");
+
+    // 3. Context + the same cache hit: the hit is ignored, the question goes out again, and
+    //    the new answer does not overwrite the cache entry.
+    let out = ask_bounded(home.path(), &[ctx[0], ctx[1], "--wait", "20"], BOUND);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(stdout(&out).trim(), ANSWER);
+    assert_eq!(peer.questions().len(), 2, "the cache did not serve it");
+    assert_eq!(
+        question_context(&peer.questions()[1]),
+        Some("let token = rotate(&t);")
+    );
+    assert_eq!(
+        spool.cache_get(&hash).unwrap().unwrap().raw,
+        cached,
+        "the threaded answer was not written to the cache"
+    );
+    let aid2 = peer.answers()[1].id.clone();
+    assert!(
+        spool.get(Dir::Inbox, &aid2).unwrap().is_some(),
+        "it is stored in inbox/, only not cached"
+    );
+
+    // 4. Context, no cache at all: answered, stored, and the cache stays empty.
+    let home2 = home_for(&a, &peer);
+    let spool2 = Spool::new(home2.path()).unwrap();
+    let out = ask_bounded(home2.path(), &[ctx[0], ctx[1], "--wait", "20"], BOUND);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(stdout(&out).trim(), ANSWER);
+    assert_eq!(peer.questions().len(), 3);
+    let qid3 = peer.questions()[2].id.clone();
+    assert!(
+        ids(&spool2, Dir::Cache).is_empty(),
+        "a threaded answer is never cached"
+    );
+    assert_eq!(ids(&spool2, Dir::Inbox).len(), 1);
+    assert_eq!(
+        spool2.get(Dir::Done, &qid3).unwrap().unwrap().state,
+        "answered"
+    );
+    peer.shutdown();
+}
+
+/// AC5/AC6 (pure serde): `context` and `context_id` are omitted when absent, and both an
+/// explicit `null` and a missing key read back as `None`.
+#[test]
+fn context_is_optional_on_the_wire() {
+    let (a, b) = (id(1), id(2));
+    let mut p = Payload::question(&fp(&a), &fp(&b), PROJECT, Some(PATH), QUESTION);
+    let bare = serde_json::to_string(&p).unwrap();
+    assert!(!bare.contains("\"context\""), "{bare}");
+    assert!(!bare.contains("\"context_id\""), "{bare}");
+    assert_eq!(
+        serde_json::from_str::<Payload>(&bare).unwrap(),
+        p,
+        "absent keys round-trip to None"
+    );
+
+    p.context_id = Some("0199001a-0000-7000-8000-000000000001".into());
+    if let Body::Question { context, .. } = &mut p.body {
+        *context = Some("let x = 1;".into());
+    }
+    let full = serde_json::to_string(&p).unwrap();
+    assert!(full.contains("\"context\":\"let x = 1;\""), "{full}");
+    assert_eq!(serde_json::from_str::<Payload>(&full).unwrap(), p);
+
+    // Explicit nulls are the same as absent.
+    let mut v: Value = serde_json::from_str(&full).unwrap();
+    v["context_id"] = Value::Null;
+    v["body"]["context"] = Value::Null;
+    let nulled: Payload = serde_json::from_value(v).unwrap();
+    assert_eq!(nulled.context_id, None);
+    assert_eq!(question_context(&nulled), None);
+}
+
+/// AC6: `--reply-to` an open `asks/` record reuses that exchange's thread id, on the wire
+/// and in the new record; without it every ask mints a fresh UUID thread.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reply_to_reuses_an_open_asks_thread() {
+    let a = id(1);
+    let peer = spawn_fake(2, &a, accepts_only(None)).await;
+    let home = home_for(&a, &peer);
+    let spool = Spool::new(home.path()).unwrap();
+
+    let qid = accepted_id(&ask_bounded(home.path(), &[], BOUND));
+    let thread = payload(&spool.get(Dir::Asks, &qid).unwrap().unwrap())
+        .context_id
+        .expect("a fresh thread id");
+
+    let out = ask_bounded(home.path(), &["--reply-to", &qid], BOUND);
+    let qid2 = accepted_id(&out);
+    assert_ne!(qid2, qid);
+    assert_eq!(
+        peer.questions()[1].context_id.as_deref(),
+        Some(thread.as_str()),
+        "the peer saw the thread on the wire"
+    );
+    assert_eq!(
+        payload(&spool.get(Dir::Asks, &qid2).unwrap().unwrap()).context_id,
+        Some(thread.clone())
+    );
+    assert_eq!(
+        spool.get(Dir::Asks, &qid2).unwrap().unwrap().meta["threaded"],
+        true
+    );
+    // The open ask itself is untouched.
+    assert_eq!(
+        payload(&spool.get(Dir::Asks, &qid).unwrap().unwrap()).context_id,
+        Some(thread)
+    );
+    peer.shutdown();
+}
+
+/// AC6: the thread of a FINISHED exchange is reachable from either end — the question in
+/// `done/` and the answer in `inbox/` — and the answer carries the question's thread id.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reply_to_reuses_a_finished_exchange_thread() {
+    let a = id(1);
+    let peer = spawn_fake(2, &a, well_formed()).await;
+    let home = home_for(&a, &peer);
+    let spool = Spool::new(home.path()).unwrap();
+
+    let out = ask_bounded(home.path(), &["--wait", "20"], BOUND);
+    let (qid, aid) = assert_answered_via_wait(&out, &peer, home.path());
+    let thread = payload(&spool.get(Dir::Done, &qid).unwrap().unwrap())
+        .context_id
+        .expect("the question's thread");
+    // The answer we received is on the same thread as the question we sent.
+    assert_eq!(
+        payload(&spool.get(Dir::Inbox, &aid).unwrap().unwrap()).context_id,
+        Some(thread.clone()),
+        "the answer copies the question's context_id"
+    );
+
+    // From the `done/` question…
+    let from_done = accepted_id(&ask_bounded(home.path(), &["--reply-to", &qid], BOUND));
+    assert_eq!(
+        payload(&spool.get(Dir::Asks, &from_done).unwrap().unwrap()).context_id,
+        Some(thread.clone())
+    );
+    // …and from the `inbox/` answer (whose counterpart is `payload.from`).
+    let from_answer = accepted_id(&ask_bounded(home.path(), &["--reply-to", &aid], BOUND));
+    assert_eq!(
+        payload(&spool.get(Dir::Asks, &from_answer).unwrap().unwrap()).context_id,
+        Some(thread.clone())
+    );
+    assert_eq!(
+        peer.questions()
+            .iter()
+            .filter_map(|q| q.context_id.clone())
+            .filter(|c| *c == thread)
+            .count(),
+        3,
+        "all three questions travelled on one thread"
+    );
+    peer.shutdown();
+}
+
+/// AC6: every `--reply-to` failure names its reason and sends nothing. The positive twin is
+/// the same record shape, addressed to Bea and carrying a thread id.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reply_to_errors_name_the_reason() {
+    let a = id(1);
+    let other = id(3);
+    let peer = spawn_fake(2, &a, accepts_only(None)).await;
+    let home = home_for(&a, &peer);
+    write_contact_full(
+        home.path(),
+        &Peer::new(&other, "Cid", None),
+        &[&closed_port()],
+        &["cid@example.org"],
+    );
+    let spool = Spool::new(home.path()).unwrap();
+    let thread = uuid::Uuid::now_v7().to_string();
+    // Three records of the SAME shape; each differs from the twin below it in one field.
+    let mut stored = Vec::new();
+    for (to, context_id) in [
+        (&peer.state.id, Some(thread.clone())),
+        (&other, Some(thread.clone())),
+        (&peer.state.id, None),
+    ] {
+        let mut q = Payload::question(&fp(&a), &fp(to), PROJECT, Some(PATH), "Earlier?");
+        q.context_id = context_id;
+        let env = Envelope::sign(&q, &a);
+        spool
+            .put(Dir::Asks, &q.id, &record(&env, "waiting"))
+            .unwrap();
+        stored.push(q.id);
+    }
+    let (to_bea, to_cid, no_thread) = (&stored[0], &stored[1], &stored[2]);
+
+    for (what, id, message) in [
+        (
+            "unknown id",
+            "does-not-exist",
+            "owl: no exchange does-not-exist",
+        ),
+        (
+            "another peer",
+            to_cid.as_str(),
+            &format!("owl: {to_cid} was asked to Cid, not Bea"),
+        ),
+        (
+            "no thread id",
+            no_thread.as_str(),
+            &format!("owl: {no_thread} carries no thread id"),
+        ),
+    ] {
+        let out = ask_bounded(home.path(), &["--reply-to", id], BOUND);
+        assert_eq!(out.status.code(), Some(1), "{what}: {}", stderr(&out));
+        assert_eq!(stderr(&out).trim_end(), message, "{what}");
+        assert!(stdout(&out).is_empty(), "{what}");
+        assert!(peer.questions().is_empty(), "{what}: nothing was sent");
+        assert_eq!(ids(&spool, Dir::Asks).len(), 3, "{what}: nothing recorded");
+    }
+
+    // Positive twin: the record addressed to Bea, carrying the same thread id, works.
+    let out = ask_bounded(home.path(), &["--reply-to", to_bea], BOUND);
+    let qid = accepted_id(&out);
+    assert_eq!(peer.questions()[0].context_id.as_deref(), Some(&*thread));
+    assert_eq!(
+        payload(&spool.get(Dir::Asks, &qid).unwrap().unwrap()).context_id,
+        Some(thread)
+    );
+    peer.shutdown();
+}
+
+/// AC6: without `--reply-to` each ask starts its own thread — a fresh, parseable UUID.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn each_ask_mints_a_fresh_thread_id() {
+    let a = id(1);
+    let peer = spawn_fake(2, &a, accepts_only(None)).await;
+    let home = home_for(&a, &peer);
+    let spool = Spool::new(home.path()).unwrap();
+
+    let first = accepted_id(&ask_bounded(home.path(), &[], BOUND));
+    let second = accepted_id(&ask_with(home.path(), home.path(), "And this one?", &[]));
+    let threads: Vec<String> = [&first, &second]
+        .iter()
+        .map(|qid| {
+            let rec = spool.get(Dir::Asks, qid).unwrap().unwrap();
+            let stored = payload(&rec).context_id.expect("a thread id");
+            let sent = peer
+                .questions()
+                .iter()
+                .find(|q| q.id == **qid)
+                .unwrap()
+                .context_id
+                .clone()
+                .unwrap();
+            assert_eq!(stored, sent, "the stored thread is the one sent");
+            assert!(uuid::Uuid::parse_str(&stored).is_ok(), "{stored} is a UUID");
+            stored
+        })
+        .collect();
+    assert_ne!(threads[0], threads[1], "a fresh thread per ask");
+    peer.shutdown();
 }

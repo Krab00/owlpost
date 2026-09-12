@@ -777,11 +777,7 @@ mod tests {
                 ] }
             })
         };
-        let connected = card(
-            true,
-            pubkey.clone().into(),
-            "http://127.0.0.1:3340/".into(),
-        );
+        let connected = card(true, pubkey.clone().into(), "http://127.0.0.1:3340/".into());
         assert_eq!(
             iroh_check(Some(&connected)).line(),
             format!("ok   iroh: {hex}, relay http://127.0.0.1:3340/")
@@ -797,7 +793,11 @@ mod tests {
         // No iroh interface (outside the daemon), a pubkey that is not a string, no identity
         // extension at all, or a card that is not an object: not bound.
         for card in [
-            card(false, pubkey.clone().into(), "http://127.0.0.1:3340/".into()),
+            card(
+                false,
+                pubkey.clone().into(),
+                "http://127.0.0.1:3340/".into(),
+            ),
             card(true, 5.into(), "x".into()),
             serde_json::json!({ "supportedInterfaces": [ { "url": "owl-iroh://AAAA" } ] }),
             serde_json::json!({ "capabilities": { "extensions": [] } }),
