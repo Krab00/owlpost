@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use common::{
-    PATH, PROJECT, Peer, claude_home, client, fp, id, policy, post_envelope, prepare_home_with,
-    question, respawn, signed,
+    PATH, PROJECT, Peer, claude_home, client, fp, id, key_line, policy, post_envelope,
+    prepare_home_with, question, respawn, signed,
 };
 use owlpost::config::Harness;
 use owlpost::contacts::Mode;
@@ -2277,14 +2277,21 @@ fn show_format_claude_prints_the_framed_block() {
         )
     );
 
-    // A consent record: the fingerprint right after the bold name.
+    // A consent record: the fingerprint right after the bold name, and (OWL-035 AC3) exactly
+    // one `🔑` standing line between the header and the code block.
     let c = h.put(&h.ana, "Held?", "consent");
     h.set_received(&c, Dir::Inbox, RECEIVED);
     let out = h.ok_tz("UTC", &["show", &c, "--format", "claude"]);
     assert_eq!(
-        out.lines().nth(1).unwrap(),
-        format!("🦉 **Ana** ({}) · 23:08 · {PROJECT} · {PATH}", fp(&h.ana))
+        out,
+        format!(
+            "{FRAME}\n🦉 **Ana** ({}) · 23:08 · {PROJECT} · {PATH}\n{}\n```text\nHeld?\n```\n{FRAME}\n",
+            fp(&h.ana),
+            key_line("Ana")
+        )
     );
+    assert_eq!(out.lines().nth(2).unwrap(), key_line("Ana"));
+    assert_eq!(out.matches('🔑').count(), 1, "{out}");
     assert!(fp(&h.ana).starts_with("owl:"));
     assert!(out.contains("** (owl:"), "{out}");
     assert!(h.inbox(&c).unwrap().seen, "show marks seen");
@@ -2308,6 +2315,15 @@ fn show_format_claude_prints_the_framed_block() {
         "{all}"
     );
     assert_eq!(all.lines().filter(|l| *l == FRAME).count(), 8);
+    assert_eq!(all.matches('🔑').count(), 1, "one held record: {all}");
+
+    // The negative twin: the same peer's question in every other state has no `🔑` line.
+    for state in ["pending", "drafted", "answered"] {
+        let o = h.put(&h.ana, "Not held?", state);
+        h.set_received(&o, Dir::Inbox, RECEIVED);
+        let other = h.ok_tz("UTC", &["show", &o, "--format", "claude"]);
+        assert!(!other.contains('🔑'), "{state}: {other}");
+    }
 }
 
 /// AC1 + AC4: a drafted record prints the frame, then `draft:`, the draft in a plain
@@ -2665,16 +2681,19 @@ fn inbox_format_claude_prints_blocks_then_table_and_nothing_else() {
     assert_eq!(
         out,
         format!(
-            "{FRAME}\n🦉 **Ana** ({}) · 23:08 · {PROJECT} · {PATH}\n```text\nHeld one?\n```\n{FRAME}\n\n\
+            "{FRAME}\n🦉 **Ana** ({}) · 23:08 · {PROJECT} · {PATH}\n{}\n```text\nHeld one?\n```\n{FRAME}\n\n\
              {FRAME}\n🦉 **Maciek** · 23:08 · {PROJECT} · {PATH}\n```text\nPending one?\n```\n{FRAME}\n\n\
              {FRAME}\n🦉 **Maciek** · 23:08 · {PROJECT} · {PATH}\n```text\n{pl_q}\n```\n{FRAME}\n\
              draft:\n```text\n{en_d}\n```\nharness: fake\n{NOTE}\n\n\
              🟦 ↳ {} \"asked?\"\n| 🟦 {} · Maciek | yes\\|no |\n|---|---|\n",
             fp(&h.ana),
+            key_line("Ana"),
             short(&qid),
             utc_hh_mm(t)
         )
     );
+    // OWL-035 AC3: exactly one `🔑` line in the whole listing — the one held record's.
+    assert_eq!(out.matches('🔑').count(), 1, "{out}");
     assert!(h.path().join("markers.json").exists());
     assert!(h.inbox(&p).unwrap().seen && h.inbox(&c).unwrap().seen);
     // Only questions: the blocks, no table; an empty inbox: nothing.
@@ -3236,10 +3255,10 @@ fn show_prints_the_context_block_and_the_follow_up_line() {
         .iter()
         .position(|l| *l == follow)
         .expect("follow line");
-    assert!(
-        lines[at - 1].starts_with("🦉 "),
-        "under the header: {framed}"
-    );
+    // OWL-035: on a `consent` record the `🔑` standing line sits between the header and the
+    // follow-up line, so the follow-up is still the last line above the question block.
+    assert_eq!(lines[at - 1], key_line("Maciek"), "{framed}");
+    assert!(lines[at - 2].starts_with("🦉 "), "under the header: {framed}");
     assert_eq!(
         lines[at + 1],
         "```text",

@@ -11,8 +11,8 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use common::{
-    PATH, PROJECT, Peer, TestDaemon, client, fp, id, policy, post_envelope, prepare_home_with,
-    signed, spawn_daemon, spawn_daemon_with,
+    PATH, PROJECT, Peer, TestDaemon, client, fp, id, key_standing, policy, post_envelope,
+    prepare_home_with, signed, spawn_daemon, spawn_daemon_with,
 };
 use owlpost::answer::{AUTO_ERROR, OUTGOING_LOG};
 use owlpost::auto::{self, Outcome};
@@ -339,7 +339,7 @@ fn allow_writes_manual_and_always_writes_auto() {
     assert_eq!(inbox(h.path(), &held).unwrap().state, "consent");
 
     // With the flag: auto, released.
-    let out = h.ok(&["allow", "Ana", "--always", "--i-verified-the-fingerprint"]);
+    let out = h.ok(&["allow", &ana_fp, "--always", "--i-verified-the-fingerprint"]);
     assert!(out.contains("policy auto"), "{out}");
     assert_eq!(overlay(h.path(), &h.ana)["policy"]["mode"], "auto");
     assert_eq!(policy_mode(h.path(), h.cwd(), &h.ana), Some(Mode::Auto));
@@ -365,7 +365,8 @@ fn allow_writes_manual_and_always_writes_auto() {
     let book = ContactBook::load(h.path(), repo.path()).unwrap();
     assert_eq!(book.resolve("Bea").unwrap().source, "local");
     let held = h.put(&bea, "from the repo?", "consent");
-    let out = owl_ok(h.path(), repo.path(), &["allow", "Bea", "--always"]);
+    let bea_fp = fp(&bea);
+    let out = owl_ok(h.path(), repo.path(), &["allow", &bea_fp, "--always"]);
     assert!(out.contains("policy auto"), "{out}");
     let file = overlay(h.path(), &bea);
     assert_eq!(file["policy"]["mode"], "auto");
@@ -736,8 +737,10 @@ fn inbox_prompts_for_consent_records() {
         out.contains(&format!("owl deny {ana_fp}")),
         "deny with the fingerprint: {out}"
     );
+    // OWL-035 AC2: the key's standing sits between the project and the `owl allow` hint.
     let expected = format!(
-        "Ana wants to ask your agent about {PROJECT} — owl allow {ana_fp} [--once|--always] / owl deny {ana_fp}"
+        "Ana wants to ask your agent about {PROJECT} — {} — owl allow {ana_fp} [--once|--always] / owl deny {ana_fp}",
+        key_standing("Ana")
     );
     assert!(
         out.lines().any(|l| l == expected),
@@ -762,6 +765,20 @@ fn inbox_prompts_for_consent_records() {
         .unwrap();
     assert_eq!(row["state"], "consent");
     assert_eq!(row["auto_error"], Value::Null);
+    // OWL-035 AC2: `key_standing` rides on the consent row only.
+    assert_eq!(row["key_standing"], "contact");
+    let released = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == pending)
+        .unwrap();
+    assert_eq!(released["state"], "pending");
+    assert_eq!(
+        released.get("key_standing"),
+        None,
+        "only a consent row carries the standing: {released}"
+    );
 
     // Once allowed, the prompt disappears; once denied, the record is gone.
     h.ok(&["allow", &ana_fp]);
