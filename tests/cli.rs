@@ -37,6 +37,7 @@ fn help_lists_all_subcommands() {
         "allow",
         "deny",
         "ask",
+        "status",
         "inbox",
         "show",
         "draft",
@@ -313,17 +314,22 @@ fn whoami_prints_configured_endpoints() {
     assert_eq!(v["endpoints"], serde_json::json!(["a:1", "b:2"]));
 }
 
+/// OWL-034: `owl card` exists now; without an identity it refuses like `whoami` does.
 #[test]
-fn unimplemented_subcommand_exits_1() {
+fn card_without_identity_exits_1() {
     let home = tempfile::tempdir().unwrap();
-    let out = owl()
-        .args(["--home"])
-        .arg(home.path())
-        .args(["card", "someone"])
-        .output()
-        .unwrap();
-    assert_eq!(out.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&out.stderr).contains("not implemented yet"));
+    for args in [vec!["card"], vec!["card", "someone"]] {
+        let out = owl()
+            .args(["--home"])
+            .arg(home.path())
+            .args(&args)
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(1), "{args:?}");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains("owl init"), "{args:?}: {err}");
+        assert!(!err.contains("not implemented"), "{args:?}: {err}");
+    }
 }
 
 #[test]

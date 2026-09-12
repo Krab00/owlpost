@@ -46,6 +46,46 @@ async fn card_at(client: &reqwest::Client, d: &TestDaemon, path: &str) -> Value 
     resp.json().await.unwrap()
 }
 
+/// The `params` of one of the card's three extensions (OWL-034).
+fn ext<'a>(card: &'a Value, uri: &str) -> &'a Value {
+    owlpost::server::extension_params(card, uri).unwrap_or_else(|| panic!("no {uri} in {card}"))
+}
+
+/// The identity extension's `fingerprint`.
+fn card_fp(card: &Value) -> &str {
+    ext(card, owlpost::server::EXT_IDENTITY)["fingerprint"]
+        .as_str()
+        .unwrap()
+}
+
+/// The human-gate extension's `responds`.
+fn card_responds(card: &Value) -> Value {
+    ext(card, owlpost::server::EXT_HUMAN_GATE)["responds"].clone()
+}
+
+/// `GET /v1/questions/{id}` as `caller`: `(status, body)`.
+async fn task_at(client: &reqwest::Client, d: &TestDaemon, id: &str) -> (u16, Value) {
+    let resp = client
+        .get(d.url(&format!("/v1/questions/{id}")))
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    let body: Value = resp.json().await.unwrap_or(Value::Null);
+    (status, body)
+}
+
+/// `(state, text)` of a Task body.
+fn state_of(task: &Value) -> (String, String) {
+    (
+        task["status"]["state"].as_str().unwrap_or("?").to_string(),
+        task["status"]["message"]["parts"][0]["text"]
+            .as_str()
+            .unwrap_or("?")
+            .to_string(),
+    )
+}
+
 // AC1
 /// The shared fixture must never reach the OS notifier (`tests/notify.rs` opts in on its own).
 #[tokio::test]
@@ -67,24 +107,66 @@ async fn card_is_served_unpinned_and_pinned() {
     let pinned = client(Some(&a), &b.id);
     for path in CARD_PATHS {
         for (who, cl) in [("unpinned", &unpinned), ("pinned", &pinned)] {
+            // OWL-034 AC1: the A2A 1.0 card, from the daemon (iroh endpoint bound).
             let card = card_at(cl, &b, path).await;
-            let owl = card.get("owlpost").expect("owlpost block");
-            assert_eq!(owl["fingerprint"], b.fp(), "{who} {path}");
+            let pubkey = identity::pubkey_string(&b.id.verifying_key());
+            let ident = ext(&card, owlpost::server::EXT_IDENTITY);
+            assert_eq!(ident["fingerprint"], b.fp(), "{who} {path}");
+            assert_eq!(ident["pubkey"], pubkey);
+            assert_eq!(ident["relay"], Value::Null, "fixture daemons have no relay");
+            let gate = ext(&card, owlpost::server::EXT_HUMAN_GATE);
+            assert_eq!(gate["responds"], true);
+            assert_eq!(gate["harness"], "claude");
+            let repo = ext(&card, owlpost::server::EXT_REPO_QUESTION);
+            assert_eq!(repo["projects"], json!([]));
+            let ifs = card["supportedInterfaces"].as_array().unwrap();
+            assert_eq!(ifs.len(), 2, "https and iroh: {ifs:?}");
+            assert_eq!(ifs[0]["url"], format!("https://{}/", b.addr));
             assert_eq!(
-                owl["pubkey"],
-                identity::pubkey_string(&b.id.verifying_key())
+                ifs[1]["url"],
+                format!("owl-iroh://{}", pubkey.strip_prefix("ed25519:").unwrap())
             );
-            assert_eq!(owl["protocol"], 1);
-            assert_eq!(owl["responds"], true);
-            assert_eq!(owl["harness"], "claude");
+            for i in ifs {
+                assert_eq!(i["protocolBinding"], "owlpost-v1");
+                assert_eq!(i["protocolVersion"], "1");
+            }
             assert_eq!(card["capabilities"]["streaming"], false);
             assert_eq!(card["capabilities"]["pushNotifications"], false);
-            assert_eq!(card["skills"], json!([]));
+            assert_eq!(card["capabilities"]["extendedAgentCard"], false);
+            let uris: Vec<&str> = card["capabilities"]["extensions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|e| e["uri"].as_str().unwrap())
+                .collect();
+            assert_eq!(
+                uris,
+                [
+                    "urn:owlpost:ext:identity:v1",
+                    "urn:owlpost:ext:repo-question:v1",
+                    "urn:owlpost:ext:human-gate:v1"
+                ]
+            );
+            assert!(
+                card["securitySchemes"]["owl-mtls"]["mtlsSecurityScheme"]["description"]
+                    .is_string()
+            );
+            assert_eq!(
+                card["securityRequirements"],
+                json!([{ "schemes": { "owl-mtls": { "list": [] } } }])
+            );
+            assert_eq!(card["defaultInputModes"], json!(["text/plain"]));
+            assert_eq!(card["defaultOutputModes"], json!(["text/plain"]));
+            assert_eq!(card["skills"][0]["id"], "ask-about-repo");
+            assert_eq!(card["skills"].as_array().unwrap().len(), 1);
             assert_eq!(card["name"], "Bea");
-            assert_eq!(card["url"], format!("https://{}/", b.addr));
+            assert_eq!(card["provider"]["organization"], "Bea");
+            assert_eq!(card["provider"]["url"], "");
             assert_eq!(card["version"], env!("CARGO_PKG_VERSION"));
-            assert!(card["protocolVersion"].is_string());
             assert!(card["description"].is_string());
+            for gone in ["url", "protocolVersion", "owlpost", "iroh"] {
+                assert!(card.get(gone).is_none(), "{who} {path}: top-level {gone}");
+            }
         }
     }
     // Card is the only thing an unpinned client gets: every /v1 route is 401.
@@ -123,22 +205,50 @@ async fn card_is_served_unpinned_and_pinned() {
     let b = spawn_daemon_with(4, &[Peer::new(&a, "Ana", None)], |cfg| {
         cfg.responder.harness = "codex".into();
         cfg.name = "Cody".into();
+        cfg.emails = vec!["cody@example.org".into()];
         cfg.endpoints = vec!["cody.example.org:7411".into()];
+        cfg.projects
+            .insert("github.com/cody/x".into(), "/tmp/x".into());
     })
     .await;
     for path in CARD_PATHS {
         let card = card_at(&client(None, &b.id), &b, path).await;
-        assert_eq!(card["owlpost"]["harness"], "codex");
+        assert_eq!(
+            ext(&card, owlpost::server::EXT_HUMAN_GATE)["harness"],
+            "codex"
+        );
+        assert_eq!(
+            ext(&card, owlpost::server::EXT_REPO_QUESTION)["projects"],
+            json!(["github.com/cody/x"])
+        );
         assert_eq!(card["name"], "Cody");
-        assert_eq!(card["url"], "https://cody.example.org:7411/");
-        assert_eq!(card["owlpost"]["fingerprint"], b.fp());
+        assert_eq!(card["provider"]["organization"], "Cody");
+        assert_eq!(card["provider"]["url"], "mailto:cody@example.org");
+        assert_eq!(
+            card["supportedInterfaces"][0]["url"],
+            "https://cody.example.org:7411/"
+        );
+        assert_eq!(card_fp(&card), b.fp());
     }
+    b.running.shutdown();
+
+    // OWL-034 AC1: an empty first e-mail is no e-mail — `provider.url` stays `""` rather
+    // than the bare `mailto:` that dropping the `!e.is_empty()` filter would produce. The
+    // second, non-empty address must not rescue it either: only `emails.first()` is read.
+    let b = spawn_daemon_with(6, &[], |cfg| {
+        cfg.name = "Eve".into();
+        cfg.emails = vec![String::new(), "eve@example.org".into()];
+    })
+    .await;
+    let card = card_at(&client(None, &b.id), &b, CARD_PATHS[0]).await;
+    assert_eq!(card["provider"]["url"], "", "empty first e-mail: {card}");
+    assert_eq!(card["provider"]["organization"], "Eve");
     b.running.shutdown();
 
     // A daemon with no contacts at all still serves the card to unpinned clients.
     let b = spawn_daemon(5, true, &[]).await;
     let card = card_at(&client(None, &b.id), &b, CARD_PATHS[1]).await;
-    assert_eq!(card["owlpost"]["fingerprint"], b.fp());
+    assert_eq!(card_fp(&card), b.fp());
     assert!(
         client(Some(&a), &b.id)
             .get(b.url(CARD_PATHS[0]))
@@ -167,7 +277,11 @@ async fn question_is_accepted_and_spooled() {
     let resp = post_envelope(&client(Some(&a), &b.id), &b, &env).await;
     assert_eq!(resp.status(), 202);
     let body: Value = resp.json().await.unwrap();
-    assert_eq!(body, json!({ "status": "accepted", "id": payload.id }));
+    // OWL-034 AC2: a `manual` peer's question is already being worked on.
+    assert_eq!(
+        body,
+        json!({ "status": "accepted", "id": payload.id, "state": "TASK_STATE_WORKING" })
+    );
 
     let rec = b
         .spool()
@@ -279,7 +393,7 @@ async fn never_and_disabled_return_unavailable() {
     .await;
     let unpinned = client(None, &b.id);
     assert_eq!(
-        card_at(&unpinned, &b, CARD_PATHS[0]).await["owlpost"]["responds"],
+        card_responds(&card_at(&unpinned, &b, CARD_PATHS[0]).await),
         true
     );
     let env = signed(&a, &b.id, "why?");
@@ -319,10 +433,7 @@ async fn never_and_disabled_return_unavailable() {
     .await;
     let unpinned = client(None, &b.id);
     for path in CARD_PATHS {
-        assert_eq!(
-            card_at(&unpinned, &b, path).await["owlpost"]["responds"],
-            false
-        );
+        assert_eq!(card_responds(&card_at(&unpinned, &b, path).await), false);
     }
     let env = signed(&a, &b.id, "why?");
     let q: Payload = serde_json::from_str(&env.raw).unwrap();
@@ -978,8 +1089,8 @@ async fn daemon_foreground_writes_addr_and_serves_card() {
         .json()
         .await
         .unwrap();
-    assert_eq!(card["owlpost"]["fingerprint"], fp(&b));
-    assert_eq!(card["owlpost"]["protocol"], 1);
+    assert_eq!(card_fp(&card), fp(&b));
+    assert_eq!(card["skills"][0]["id"], "ask-about-repo");
     let resp = client(Some(&a), &b)
         .get(format!("https://{addr}/v1/outbox"))
         .send()
@@ -1065,5 +1176,682 @@ async fn incoming_question_wakes_the_affine_live_session() {
             .unwrap()
             .seen
     );
+    b.running.shutdown();
+}
+
+// ---------- OWL-034: task state for the asker, context, threads ----------
+
+/// A signed question from `from` to `to` with a thread id and, optionally, a context.
+fn threaded(from: &Identity, to: &Identity, text: &str, cid: &str, ctx: Option<&str>) -> Envelope {
+    let mut q = question(from, to, text);
+    q.context_id = Some(cid.to_string());
+    if let Body::Question { context, .. } = &mut q.body {
+        *context = ctx.map(str::to_string);
+    }
+    Envelope::sign(&q, from)
+}
+
+/// `owl <args>` against `home`, `(exit code, stdout, stderr)`.
+fn owl_at(home: &std::path::Path, args: &[&str]) -> (Option<i32>, String, String) {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_owl"))
+        .env_remove("OWLPOST_HOME")
+        .arg("--home")
+        .arg(home)
+        .args(args)
+        .current_dir(home)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    (
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+/// OWL-034 AC2: the `202` body's `state` per policy, and `GET /v1/questions/{id}` through
+/// every row of the state table — `consent`, `pending` (with and without `auto_error`),
+/// `drafted`, after `owl send` (outbox), after the ack (`done/acked`), after `owl deny`
+/// and after `owl reject`; another pinned contact, an unknown and a malformed id are 404;
+/// a `never` peer and a disabled responder get `REJECTED` / `unavailable` for an id they
+/// hold no record of; the route is not rate limited.
+#[tokio::test]
+async fn task_route_reports_every_state() {
+    let (ana, cat, dan) = (id(1), id(3), id(4));
+    let b = spawn_daemon(
+        2,
+        true,
+        &[
+            Peer::new(&ana, "Ana", None),
+            Peer::new(&cat, "Cat", Some(policy(Mode::Manual, Some(1)))),
+            Peer::new(&dan, "Dan", Some(policy(Mode::Never, None))),
+        ],
+    )
+    .await;
+    let (ana_cl, cat_cl, dan_cl) = (
+        client(Some(&ana), &b.id),
+        client(Some(&cat), &b.id),
+        client(Some(&dan), &b.id),
+    );
+    // Ana, no policy: 202 SUBMITTED; the Task says so, with the thread id and metadata.
+    let env = threaded(&ana, &b.id, "why?", "thread-ana", None);
+    let q: Payload = serde_json::from_str(&env.raw).unwrap();
+    let resp = post_envelope(&ana_cl, &b, &env).await;
+    assert_eq!(resp.status(), 202);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["state"], "TASK_STATE_SUBMITTED");
+    let (status, task) = task_at(&ana_cl, &b, &q.id).await;
+    assert_eq!(status, 200, "{task}");
+    assert_eq!(
+        state_of(&task),
+        (
+            "TASK_STATE_SUBMITTED".into(),
+            "waiting for the owner's consent".into()
+        )
+    );
+    assert_eq!(task["id"], q.id);
+    assert_eq!(task["contextId"], "thread-ana");
+    assert_eq!(
+        task["status"]["message"]["messageId"],
+        format!("{}-status", q.id)
+    );
+    assert_eq!(task["status"]["message"]["role"], "ROLE_AGENT");
+    let rec = b.spool().get(Dir::Inbox, &q.id).unwrap().unwrap();
+    assert_eq!(task["status"]["timestamp"], rec.received_at);
+    assert_eq!(
+        task["metadata"]["owlpost"],
+        json!({ "from": fp(&ana), "to": b.fp(), "project": PROJECT, "path": PATH })
+    );
+    assert!(
+        task.get("artifacts").is_none(),
+        "the answer travels via the outbox"
+    );
+    // Another pinned contact holding the same id: 404, never Ana's state (OWL-008 rule).
+    assert_eq!(task_at(&cat_cl, &b, &q.id).await.0, 404);
+    // Unknown and malformed ids: 404; an unpinned client: 401.
+    assert_eq!(
+        task_at(&ana_cl, &b, "0191c7a0-0000-7000-8000-000000009999")
+            .await
+            .0,
+        404
+    );
+    assert_eq!(task_at(&ana_cl, &b, "a%20b").await.0, 404);
+    let (status, body) = task_at(&client(None, &b.id), &b, &q.id).await;
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (401, Some("client certificate required"))
+    );
+    // A question without a thread id has no `contextId`.
+    let plain = signed(&ana, &b.id, "plain?");
+    let plain_q: Payload = serde_json::from_str(&plain.raw).unwrap();
+    assert_eq!(post_envelope(&ana_cl, &b, &plain).await.status(), 202);
+    let (_, task) = task_at(&ana_cl, &b, &plain_q.id).await;
+    assert!(task.get("contextId").is_none(), "{task}");
+
+    // Cat, manual: 202 WORKING "the owner's agent is answering"; not rate limited — the
+    // 1/h bucket is spent by the POST, three GETs still answer.
+    let env_c = signed(&cat, &b.id, "cat?");
+    let qc: Payload = serde_json::from_str(&env_c.raw).unwrap();
+    let resp = post_envelope(&cat_cl, &b, &env_c).await;
+    assert_eq!(resp.status(), 202);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["state"], "TASK_STATE_WORKING");
+    for _ in 0..3 {
+        let (status, task) = task_at(&cat_cl, &b, &qc.id).await;
+        assert_eq!(status, 200);
+        assert_eq!(
+            state_of(&task),
+            (
+                "TASK_STATE_WORKING".into(),
+                "the owner's agent is answering".into()
+            )
+        );
+    }
+    let resp = post_envelope(&cat_cl, &b, &signed(&cat, &b.id, "again?")).await;
+    assert_eq!(
+        resp.status(),
+        429,
+        "the POST bucket is spent, the GETs did not touch it"
+    );
+    // pending + auto_error (a failed automatic attempt): still WORKING, other words.
+    let spool = b.spool();
+    let mut rec = spool.get(Dir::Inbox, &qc.id).unwrap().unwrap();
+    rec.meta["auto_error"] = json!("draft status timeout");
+    spool.put(Dir::Inbox, &qc.id, &rec).unwrap();
+    let (_, task) = task_at(&cat_cl, &b, &qc.id).await;
+    assert_eq!(
+        state_of(&task).1,
+        "the owner's agent could not answer; waiting for the owner"
+    );
+    // drafted: WORKING "the owner is reviewing the answer".
+    rec.meta = json!({ "peer": fp(&cat), "hash": "h" });
+    rec.state = "drafted".into();
+    rec.draft = Some(json!({
+        "text": "Because.", "harness": "fake", "redactions": 0, "status": "ok",
+        "drafted_at": "2026-09-12T10:00:00Z"
+    }));
+    spool.put(Dir::Inbox, &qc.id, &rec).unwrap();
+    let (_, task) = task_at(&cat_cl, &b, &qc.id).await;
+    assert_eq!(
+        state_of(&task),
+        (
+            "TASK_STATE_WORKING".into(),
+            "the owner is reviewing the answer".into()
+        )
+    );
+    // owl send: the answer sits in outbox/ → COMPLETED "answered"; metadata still names
+    // the question; then the ack moves it to done/acked → still COMPLETED "answered".
+    let (code, out, err) = owl_at(b.home(), &["send", &qc.id]);
+    assert_eq!(code, Some(0), "{out}{err}");
+    let aid = out.split_whitespace().nth(1).unwrap().to_string();
+    assert!(spool.get(Dir::Outbox, &aid).unwrap().is_some());
+    let (status, task) = task_at(&cat_cl, &b, &qc.id).await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        state_of(&task),
+        ("TASK_STATE_COMPLETED".into(), "answered".into())
+    );
+    assert_eq!(task["metadata"]["owlpost"]["project"], PROJECT);
+    assert_eq!(task["metadata"]["owlpost"]["from"], fp(&cat));
+    let resp = cat_cl
+        .post(b.url(&format!("/v1/outbox/{aid}/ack")))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 204);
+    assert_eq!(spool.get(Dir::Done, &aid).unwrap().unwrap().state, "acked");
+    let (status, task) = task_at(&cat_cl, &b, &qc.id).await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        state_of(&task),
+        ("TASK_STATE_COMPLETED".into(), "answered".into())
+    );
+    let done_q = spool.get(Dir::Done, &qc.id).unwrap().unwrap();
+    assert_eq!(
+        task["status"]["timestamp"], done_q.meta["done_at"],
+        "done_at once finished"
+    );
+    // Ana is still waiting for consent; another asker's answer changes nothing for her.
+    assert_eq!(
+        state_of(&task_at(&ana_cl, &b, &q.id).await.1).0,
+        "TASK_STATE_SUBMITTED"
+    );
+
+    // owl deny Ana → done/denied → REJECTED "the owner declined" (for both her asks).
+    let (code, out, err) = owl_at(b.home(), &["deny", "Ana"]);
+    assert_eq!(code, Some(0), "{out}{err}");
+    for qid in [&q.id, &plain_q.id] {
+        assert_eq!(spool.get(Dir::Done, qid).unwrap().unwrap().state, "denied");
+        let (status, task) = task_at(&ana_cl, &b, qid).await;
+        assert_eq!(status, 200);
+        assert_eq!(
+            state_of(&task),
+            ("TASK_STATE_REJECTED".into(), "the owner declined".into())
+        );
+    }
+    // Ana is `never` now: an id she never asked about is REJECTED "unavailable", not 404.
+    let (status, task) = task_at(&ana_cl, &b, "0191c7a0-0000-7000-8000-000000009999").await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        state_of(&task),
+        ("TASK_STATE_REJECTED".into(), "unavailable".into())
+    );
+    assert_eq!(task["metadata"]["owlpost"]["from"], fp(&ana));
+    // Dan (`never` from the start), same thing; Cat (manual) still gets 404 for unknown ids.
+    let (status, task) = task_at(&dan_cl, &b, &q.id).await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        state_of(&task),
+        ("TASK_STATE_REJECTED".into(), "unavailable".into())
+    );
+    assert_eq!(
+        task_at(&cat_cl, &b, "0191c7a0-0000-7000-8000-000000009999")
+            .await
+            .0,
+        404
+    );
+
+    // owl reject on a pending question → done/rejected → REJECTED "the owner declined".
+    let env_c2 = signed(&cat, &b.id, "cat two?");
+    let qc2: Payload = serde_json::from_str(&env_c2.raw).unwrap();
+    let mut rec = record(&env_c2.raw, &env_c2.sig, "pending");
+    rec.meta = json!({ "peer": fp(&cat), "hash": "h2" });
+    spool.put(Dir::Inbox, &qc2.id, &rec).unwrap();
+    let (code, out, err) = owl_at(b.home(), &["reject", &qc2.id]);
+    assert_eq!(code, Some(0), "{out}{err}");
+    let (status, task) = task_at(&cat_cl, &b, &qc2.id).await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        state_of(&task),
+        ("TASK_STATE_REJECTED".into(), "the owner declined".into())
+    );
+    b.running.shutdown();
+
+    // Responder disabled: an unknown id is REJECTED "unavailable" for every pinned peer.
+    let b = spawn_daemon(
+        5,
+        false,
+        &[Peer::new(&cat, "Cat", Some(policy(Mode::Manual, None)))],
+    )
+    .await;
+    let (status, task) = task_at(&client(Some(&cat), &b.id), &b, &qc.id).await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        state_of(&task),
+        ("TASK_STATE_REJECTED".into(), "unavailable".into())
+    );
+    b.running.shutdown();
+}
+
+/// OWL-034 AC5 (server side): `body.context` is bounded in bytes after trimming — 8192 is
+/// accepted, 8193 is `400 context too long`, and so is a multi-byte snippet whose byte
+/// length exceeds the cap though its char count does not; a non-string context is a schema
+/// error. Cache bypass, 2×2: a question is served from the responder cache only without a
+/// context and without a thread id this daemon already holds; a second identical send with
+/// a context stores a second inbox record.
+#[tokio::test]
+async fn context_is_bounded_and_threaded_questions_bypass_the_cache() {
+    let a = id(1);
+    let b = spawn_daemon(
+        2,
+        true,
+        &[Peer::new(&a, "Ana", Some(policy(Mode::Manual, None)))],
+    )
+    .await;
+    let cl = client(Some(&a), &b.id);
+    let post = |ctx: String| {
+        let env = threaded(&a, &b.id, "bounded?", "thread-bound", Some(&ctx));
+        let (cl, b) = (&cl, &b);
+        async move { post_envelope(cl, b, &env).await }
+    };
+    let resp = post("x".repeat(8192)).await;
+    assert_eq!(resp.status(), 202, "exactly 8192 bytes");
+    let resp = post("x".repeat(8193)).await;
+    assert_error(resp, 400, "context too long").await;
+    let resp = post(format!("  {}\n\n", "x".repeat(8192))).await;
+    assert_eq!(resp.status(), 202, "trimmed before measuring");
+    // 4096 × `ł` is 8192 bytes; 4097 is 8194 bytes although only 4097 chars.
+    let resp = post("ł".repeat(4096)).await;
+    assert_eq!(resp.status(), 202);
+    let resp = post("ł".repeat(4097)).await;
+    assert_error(resp, 400, "context too long").await;
+    // A context that is not a string is a schema error; `null` reads as absent.
+    let mut raw: Value = serde_json::from_str(&signed(&a, &b.id, "shape?").raw).unwrap();
+    raw["body"]["context"] = json!(7);
+    let bytes = serde_json::to_vec(&raw).unwrap();
+    let sig = sig_over(&a, &bytes);
+    let resp = post_raw(&cl, &b, bytes, Some(&sig)).await;
+    assert_eq!(resp.status(), 400);
+    let body: Value = resp.json().await.unwrap();
+    assert!(
+        body["error"].as_str().unwrap().starts_with("bad schema"),
+        "{body}"
+    );
+    raw["body"]["context"] = Value::Null;
+    let bytes = serde_json::to_vec(&raw).unwrap();
+    let sig = sig_over(&a, &bytes);
+    let resp = post_raw(&cl, &b, bytes, Some(&sig)).await;
+    assert_eq!(resp.status(), 202);
+    let stored = b
+        .spool()
+        .get(Dir::Inbox, raw["id"].as_str().unwrap())
+        .unwrap()
+        .unwrap();
+    let p: Payload = serde_json::from_str(&stored.raw).unwrap();
+    assert!(matches!(p.body, Body::Question { context: None, .. }));
+
+    // The cache: an answer to `cached?` is in B's responder cache.
+    let spool = b.spool();
+    let hash = question_hash(PROJECT, Some(PATH), "cached?");
+    let earlier = question(&a, &b.id, "cached?");
+    let ans = Envelope::sign(
+        &Payload::answer(&earlier, "From cache.", "fake", 0, true),
+        &b.id,
+    );
+    spool
+        .cache_put(&hash, &record(&ans.raw, &ans.sig, "unacked"))
+        .unwrap();
+    let before = inbox_ids(&b).len();
+    // (context absent, thread unknown): served from the cache, nothing stored.
+    let resp = post_envelope(&cl, &b, &threaded(&a, &b.id, "cached?", "thread-new", None)).await;
+    assert_eq!(resp.status(), 200);
+    assert_eq!(inbox_ids(&b).len(), before);
+    // (context present, thread unknown): stored, not served.
+    let with_ctx = threaded(&a, &b.id, "cached?", "thread-ctx", Some("diff"));
+    let resp = post_envelope(&cl, &b, &with_ctx).await;
+    assert_eq!(resp.status(), 202);
+    assert_eq!(inbox_ids(&b).len(), before + 1);
+    // A second identical send (new id, same text and context): a second inbox record.
+    let resp = post_envelope(
+        &cl,
+        &b,
+        &threaded(&a, &b.id, "cached?", "thread-ctx2", Some("diff")),
+    )
+    .await;
+    assert_eq!(resp.status(), 202);
+    assert_eq!(inbox_ids(&b).len(), before + 2);
+    // (context absent, thread known — `thread-ctx` now has an inbox record): stored.
+    let resp = post_envelope(&cl, &b, &threaded(&a, &b.id, "cached?", "thread-ctx", None)).await;
+    assert_eq!(resp.status(), 202);
+    assert_eq!(inbox_ids(&b).len(), before + 3);
+    // A thread known only from done/ counts too.
+    let done_q = threaded(&a, &b.id, "old?", "thread-done", None);
+    let done_id = serde_json::from_str::<Payload>(&done_q.raw).unwrap().id;
+    spool
+        .put(
+            Dir::Done,
+            &done_id,
+            &record(&done_q.raw, &done_q.sig, "answered"),
+        )
+        .unwrap();
+    let resp = post_envelope(
+        &cl,
+        &b,
+        &threaded(&a, &b.id, "cached?", "thread-done", None),
+    )
+    .await;
+    assert_eq!(resp.status(), 202);
+    assert_eq!(inbox_ids(&b).len(), before + 4);
+    // (context present, thread known): stored as well — and the plain twin still hits.
+    let resp = post_envelope(
+        &cl,
+        &b,
+        &threaded(&a, &b.id, "cached?", "thread-done", Some("d")),
+    )
+    .await;
+    assert_eq!(resp.status(), 202);
+    assert_eq!(inbox_ids(&b).len(), before + 5);
+    let resp = post_envelope(
+        &cl,
+        &b,
+        &threaded(&a, &b.id, "cached?", "thread-fresh", None),
+    )
+    .await;
+    assert_eq!(resp.status(), 200, "the cache itself is intact");
+    // Every stored record kept its context byte for byte.
+    let ctx_rec = spool
+        .get(
+            Dir::Inbox,
+            &serde_json::from_str::<Payload>(&with_ctx.raw).unwrap().id,
+        )
+        .unwrap()
+        .unwrap();
+    let p: Payload = serde_json::from_str(&ctx_rec.raw).unwrap();
+    assert!(matches!(p.body, Body::Question { context: Some(ref c), .. } if c == "diff"));
+    b.running.shutdown();
+}
+
+/// The whole-card assertions AC1 fixes, applied to a card however it was obtained.
+fn assert_a2a_card(card: &Value, name: &str, provider_url: &str, iroh_bound: bool) {
+    assert_eq!(card["name"], name, "{card}");
+    assert_eq!(card["provider"]["organization"], name, "{card}");
+    assert_eq!(card["provider"]["url"], provider_url, "{card}");
+    assert_eq!(card["version"], env!("CARGO_PKG_VERSION"), "{card}");
+    let ifs = card["supportedInterfaces"].as_array().expect("interfaces");
+    assert_eq!(ifs.len(), if iroh_bound { 2 } else { 1 }, "{card}");
+    for i in ifs {
+        assert_eq!(i["protocolBinding"], owlpost::server::PROTOCOL_BINDING);
+        assert_eq!(i["protocolVersion"], "1");
+    }
+    assert!(
+        ifs[0]["url"].as_str().unwrap().starts_with("https://"),
+        "{card}"
+    );
+    assert_eq!(
+        ifs.iter()
+            .any(|i| i["url"].as_str().unwrap().starts_with("owl-iroh://")),
+        iroh_bound,
+        "{card}"
+    );
+    let uris: Vec<&str> = card["capabilities"]["extensions"]
+        .as_array()
+        .expect("extensions")
+        .iter()
+        .map(|e| e["uri"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        uris,
+        vec![
+            owlpost::server::EXT_IDENTITY,
+            owlpost::server::EXT_REPO_QUESTION,
+            owlpost::server::EXT_HUMAN_GATE,
+        ],
+        "{card}"
+    );
+    let ident = ext(card, owlpost::server::EXT_IDENTITY);
+    assert!(ident["fingerprint"].as_str().unwrap().starts_with("owl:"));
+    assert!(ident["pubkey"].as_str().unwrap().starts_with("ed25519:"));
+    assert!(ident.get("relay").is_some(), "relay param present: {card}");
+    assert!(
+        ext(card, owlpost::server::EXT_REPO_QUESTION)["projects"].is_array(),
+        "{card}"
+    );
+    assert!(
+        ext(card, owlpost::server::EXT_HUMAN_GATE)["responds"].is_boolean(),
+        "{card}"
+    );
+    assert_eq!(card["capabilities"]["streaming"], false);
+    assert_eq!(card["capabilities"]["pushNotifications"], false);
+    assert_eq!(card["capabilities"]["extendedAgentCard"], false);
+    assert!(card["securitySchemes"]["owl-mtls"]["mtlsSecurityScheme"]["description"].is_string());
+    assert_eq!(
+        card["securityRequirements"],
+        json!([{ "schemes": { "owl-mtls": { "list": [] } } }]),
+        "{card}"
+    );
+    assert_eq!(card["defaultInputModes"], json!(["text/plain"]));
+    assert_eq!(card["defaultOutputModes"], json!(["text/plain"]));
+    assert_eq!(card["skills"].as_array().unwrap().len(), 1, "{card}");
+    assert_eq!(card["skills"][0]["id"], "ask-about-repo");
+    assert_eq!(card["skills"][0]["inputModes"], json!(["text/plain"]));
+    for gone in ["url", "protocolVersion", "owlpost", "iroh"] {
+        assert!(card.get(gone).is_none(), "top-level {gone} in {card}");
+    }
+}
+
+/// OWL-034 AC1, through the `owl card` command: `owl card` prints this machine's own 1.0
+/// card — from the running daemon when `daemon.addr` names one (that copy carries the
+/// `owl-iroh://` interface), and one built in-process (no iroh interface) when the file is
+/// missing or names a dead port. `owl card <peer>` fetches the peer's card over pinned
+/// mTLS; a peer whose endpoint is dead, and one with no endpoint at all, are exit 2
+/// `offline` with the two different explanations.
+// Multi-thread: `owl_at` blocks the calling thread while the daemon under test must keep
+// serving the CLI's card request.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn owl_card_prints_the_a2a_card_of_this_machine_and_of_a_peer() {
+    let ana = id(1);
+    let b = spawn_daemon_with(2, &[Peer::new(&ana, "Ana", None)], |cfg| {
+        cfg.emails = vec!["bea@example.org".into()];
+        cfg.projects
+            .insert("github.com/company/monorepo".into(), "/tmp/mono".into());
+    })
+    .await;
+
+    // --- `owl card` on the responder's own home, with the daemon's address on disk.
+    std::fs::write(b.home().join("daemon.addr"), format!("{}\n", b.addr)).unwrap();
+    let (code, out, err) = owl_at(b.home(), &["card"]);
+    assert_eq!(code, Some(0), "stderr: {err}");
+    let from_daemon: Value = serde_json::from_str(&out).expect("card is JSON");
+    assert_a2a_card(&from_daemon, "Bea", "mailto:bea@example.org", true);
+    assert_eq!(card_fp(&from_daemon), b.fp());
+    assert_eq!(
+        ext(&from_daemon, owlpost::server::EXT_REPO_QUESTION)["projects"],
+        json!(["github.com/company/monorepo"])
+    );
+
+    // A `daemon.addr` naming a dead port falls back to the card built in this process: same
+    // identity, but no iroh interface (the CLI binds no endpoint) — the fallback arm.
+    let dead = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap()
+    };
+    std::fs::write(b.home().join("daemon.addr"), format!("{dead}\n")).unwrap();
+    let (code, out, err) = owl_at(b.home(), &["card"]);
+    assert_eq!(code, Some(0), "stderr: {err}");
+    let local: Value = serde_json::from_str(&out).unwrap();
+    assert_a2a_card(&local, "Bea", "mailto:bea@example.org", false);
+    assert_eq!(card_fp(&local), b.fp());
+
+    // No `daemon.addr` at all: the same locally built card — the `None` arm.
+    std::fs::remove_file(b.home().join("daemon.addr")).unwrap();
+    let (code, out, err) = owl_at(b.home(), &["card"]);
+    assert_eq!(code, Some(0), "stderr: {err}");
+    assert_eq!(serde_json::from_str::<Value>(&out).unwrap(), local);
+
+    // --- `owl card <peer>` from Ana's home over pinned mTLS.
+    let ana_home = tempfile::tempdir().unwrap();
+    prepare_home(ana_home.path(), &ana, true, &[]);
+    write_contact_full(
+        ana_home.path(),
+        &Peer::new(&b.id, "Bea", None),
+        &[&b.addr.to_string()],
+        &["bea@example.org"],
+    );
+    let (code, out, err) = owl_at(ana_home.path(), &["card", "Bea"]);
+    assert_eq!(code, Some(0), "stderr: {err}");
+    let fetched: Value = serde_json::from_str(&out).unwrap();
+    assert_a2a_card(&fetched, "Bea", "mailto:bea@example.org", true);
+    assert_eq!(card_fp(&fetched), b.fp());
+
+    // A peer with a dead endpoint: exit 2, and the message names the endpoint it tried.
+    let cid = id(3);
+    write_contact_full(
+        ana_home.path(),
+        &Peer::new(&cid, "Cid", None),
+        &[&dead.to_string()],
+        &["cid@example.org"],
+    );
+    let (code, out, err) = owl_at(ana_home.path(), &["card", "Cid"]);
+    assert_eq!(code, Some(2), "stdout: {out}");
+    assert!(
+        err.contains("offline: no endpoint of Cid reachable"),
+        "{err}"
+    );
+    assert!(err.contains(&dead.to_string()), "{err}");
+    assert!(out.is_empty(), "nothing printed on the failure: {out:?}");
+
+    // A peer with no endpoint at all: the same exit 2, the other explanation (the card is
+    // not forwardable over iroh) — the empty-`errors` arm.
+    let dee = id(4);
+    write_contact_full(
+        ana_home.path(),
+        &Peer::new(&dee, "Dee", None),
+        &[],
+        &["dee@example.org"],
+    );
+    let (code, _out, err) = owl_at(ana_home.path(), &["card", "Dee"]);
+    assert_eq!(code, Some(2), "{err}");
+    assert!(
+        err.contains("offline: no endpoint of Dee reachable (no endpoints configured; the card is not served over iroh)"),
+        "{err}"
+    );
+
+    b.running.shutdown();
+}
+
+/// OWL-034 AC2, the outbox branch of `find_task` (`src/server.rs`): once the answer is in
+/// `outbox/` the Task is still the ASKER's alone — a second pinned contact reading the same
+/// id gets `404`, never the answered state (the OWL-008 rule, on this branch too). And when
+/// the finished question is no longer readable in `done/`, the metadata falls back to the
+/// answer's own fields, read from the asker's point of view: `from` is the asker, `to` is
+/// this machine — not the other way round.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn task_of_an_answered_question_is_only_for_its_asker() {
+    let (cat, ana) = (id(3), id(1));
+    let b = spawn_daemon(
+        2,
+        true,
+        &[
+            Peer::new(&cat, "Cat", Some(policy(Mode::Manual, None))),
+            // Ana is pinned and has a policy, so an id she never asked about is a plain
+            // `404` — not the `never`/disabled `REJECTED` Task, which would mask the check.
+            Peer::new(&ana, "Ana", Some(policy(Mode::Manual, None))),
+        ],
+    )
+    .await;
+    let (cat_cl, ana_cl) = (client(Some(&cat), &b.id), client(Some(&ana), &b.id));
+    let spool = b.spool();
+
+    // Cat asks; the owner drafts and sends: the answer lands in `outbox/` (unacked) and the
+    // question moves to `done/`.
+    let env = threaded(&cat, &b.id, "why here?", "thread-cat", None);
+    let q: Payload = serde_json::from_str(&env.raw).unwrap();
+    let mut rec = record(&env.raw, &env.sig, "drafted");
+    rec.meta = json!({ "peer": fp(&cat), "hash": "h-outbox" });
+    rec.draft = Some(json!({
+        "text": "Because the store is append-only.", "harness": "fake",
+        "redactions": 0, "status": "ok", "drafted_at": "2026-09-12T10:00:00Z"
+    }));
+    spool.put(Dir::Inbox, &q.id, &rec).unwrap();
+    let (code, out, err) = owl_at(b.home(), &["send", &q.id]);
+    assert_eq!(code, Some(0), "{out}{err}");
+    let aid = out.split_whitespace().nth(1).unwrap().to_string();
+    assert!(
+        spool.get(Dir::Outbox, &aid).unwrap().is_some(),
+        "the answer is unacked in outbox/, which is the branch under test"
+    );
+    assert!(spool.get(Dir::Done, &q.id).unwrap().is_some());
+
+    // The asker sees the answered Task, with the question's own project and path.
+    let (status, task) = task_at(&cat_cl, &b, &q.id).await;
+    assert_eq!(status, 200, "{task}");
+    assert_eq!(
+        state_of(&task),
+        ("TASK_STATE_COMPLETED".into(), "answered".into())
+    );
+    assert_eq!(
+        task["metadata"]["owlpost"],
+        json!({ "from": fp(&cat), "to": b.fp(), "project": PROJECT, "path": PATH })
+    );
+
+    // Another pinned contact reading the very same id: 404, not Cat's answered Task.
+    let (status, body) = task_at(&ana_cl, &b, &q.id).await;
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (404, Some("not found")),
+        "the outbox branch is the asker's alone: {body}"
+    );
+    assert!(body.get("status").is_none(), "no Task leaked: {body}");
+
+    // --- the metadata fallback: the finished question is gone from `done/`.
+    std::fs::remove_file(spool.path(Dir::Done, &q.id)).unwrap();
+    assert!(spool.get(Dir::Done, &q.id).unwrap().is_none());
+    let (status, task) = task_at(&cat_cl, &b, &q.id).await;
+    assert_eq!(status, 200, "{task}");
+    assert_eq!(
+        state_of(&task),
+        ("TASK_STATE_COMPLETED".into(), "answered".into()),
+        "the state still comes from the outbox record"
+    );
+    assert_eq!(
+        task["metadata"]["owlpost"]["from"],
+        fp(&cat),
+        "from is the asker, taken from the answer's `to`: {task}"
+    );
+    assert_eq!(
+        task["metadata"]["owlpost"]["to"],
+        b.fp(),
+        "to is this machine, taken from the answer's `from`: {task}"
+    );
+    assert_ne!(
+        task["metadata"]["owlpost"]["from"], task["metadata"]["owlpost"]["to"],
+        "the two are distinct, so a swap is visible"
+    );
+    assert_eq!(task["metadata"]["owlpost"]["project"], Value::Null);
+    assert_eq!(task["metadata"]["owlpost"]["path"], Value::Null);
+    // The caller check still applies on the fallback path.
+    assert_eq!(task_at(&ana_cl, &b, &q.id).await.0, 404);
+
+    // --- the same fallback when the `done/` record is there but unreadable.
+    std::fs::write(spool.path(Dir::Done, &q.id), b"{ not json").unwrap();
+    let (status, task) = task_at(&cat_cl, &b, &q.id).await;
+    assert_eq!(status, 200, "{task}");
+    assert_eq!(
+        task["metadata"]["owlpost"],
+        json!({ "from": fp(&cat), "to": b.fp(), "project": null, "path": null }),
+        "a corrupt done/ record reaches the same fallback: {task}"
+    );
+    assert_eq!(task_at(&ana_cl, &b, &q.id).await.0, 404);
+
     b.running.shutdown();
 }

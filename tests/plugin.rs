@@ -148,6 +148,7 @@ fn seed(home: &Path, me: &Identity, maciek: &Identity, n: usize, seen: bool) {
             project,
             path,
             question,
+            ..
         } = &p.body
         else {
             unreachable!("signed() builds questions")
@@ -1072,7 +1073,7 @@ fn commands_have_descriptions() {
     // clap change that drops the `Arguments:` section is noticed.
     let with_args: Vec<&str> = [
         "card", "contact", "add", "allow", "deny", "ask", "show", "draft", "edit", "send",
-        "reject", "route",
+        "reject", "route", "status",
     ]
     .to_vec();
     for sub in &subs {
@@ -1093,7 +1094,11 @@ fn commands_have_descriptions() {
         fm_value(&fm, "argument-hint"),
         Some("\"<peer> [path] <question...>\"")
     );
-    assert!(ask.contains("`<peer> [path] <question...>`"), "{ask}");
+    // OWL-034 widened the parse line with the two optional flags; `[path]` stays optional.
+    assert!(
+        ask.contains("`<peer> [path] [--reply-to <id>] [--context <path>] <question...>`"),
+        "{ask}"
+    );
     assert!(
         ask.contains("`owl ask <peer> \"<question>\"`"),
         "the no-path invocation: {ask}"
@@ -2083,5 +2088,93 @@ fn show_format_claude_frames_a_consent_question_end_to_end() {
     assert!(
         spool.get(Dir::Inbox, &id).unwrap().unwrap().seen,
         "show marks seen"
+    );
+}
+
+// ---------- OWL-034: threads, context and status ----------
+
+/// AC8: `commands/ask.md` documents `--reply-to` and `--context`, `commands/status.md`
+/// exists and wraps `owl status` (the parity tests above cover it by directory listing;
+/// pinned here by name too), SKILL.md names `/owlpost:status`, `--reply-to` and
+/// `--context`, and the plugin README has the status row.
+#[test]
+fn ask_documents_reply_to_and_context_and_status_wraps_owl_status() {
+    let (fm, ask) = frontmatter("commands/ask.md");
+    assert_eq!(
+        fm_value(&fm, "argument-hint"),
+        Some("\"<peer> [path] <question...>\"")
+    );
+    assert!(
+        ask.contains("`--reply-to <id>` continues an earlier exchange with that peer"),
+        "{ask}"
+    );
+    assert!(ask.contains("`--context <path>`"), "{ask}");
+    assert!(
+        ask.contains("attaches that file (a diff, an error, an excerpt; at most 8192 bytes)"),
+        "{ask}"
+    );
+    assert!(
+        ask.contains("append `--reply-to <id>` and `--context <path>` when given"),
+        "{ask}"
+    );
+    assert!(ask.contains("`accepted <id> — <state>`"), "{ask}");
+    let (fm, status) = frontmatter("commands/status.md");
+    assert_eq!(fm_value(&fm, "allowed-tools"), Some("Bash(owl status:*)"));
+    assert_eq!(fm_value(&fm, "argument-hint"), Some("\"[<id>]\""));
+    assert!(status.contains("Run `owl status $ARGUMENTS`"), "{status}");
+    assert!(
+        status.contains("`ID  PEER  PATH  STATE  SINCE`"),
+        "{status}"
+    );
+    // Single-line needles only (OWL-022): each state text sits on one line of status.md, so
+    // the pin cannot be broken by a reflow and cannot pass on a fragment.
+    for state in [
+        "`waiting for the owner's consent`",
+        "`the owner's agent is answering`",
+        "`the owner is reviewing the answer`",
+        "`offline` when the peer cannot be reached",
+        "it moves to history as `declined`",
+        "Exit code 4 means there are no open questions: say that and stop.",
+    ] {
+        assert!(
+            status.contains(state),
+            "status.md lacks {state:?}: {status}"
+        );
+        assert!(!state.contains('\n'), "one-line needle only: {state:?}");
+    }
+    assert!(command_names().contains(&"status".to_string()));
+    assert!(help_subcommands(&[]).contains(&"status".to_string()));
+    let (_, skill) = frontmatter("skills/owlpost/SKILL.md");
+    assert!(
+        mentions_command(&skill, "status"),
+        "SKILL.md lacks /owlpost:status"
+    );
+    assert!(
+        skill.contains("owl ask <peer> --reply-to <id> \"<question>\""),
+        "{skill}"
+    );
+    assert!(
+        skill.contains("owl ask <peer> --context <file> \"<question>\""),
+        "{skill}"
+    );
+    assert!(skill.contains("owl status [<id>]"), "{skill}");
+    assert!(
+        skill.contains("Follow up with `--reply-to <id>`"),
+        "{skill}"
+    );
+    assert!(
+        skill.contains("with `--context <file>` (or `--context -` from stdin)"),
+        "{skill}"
+    );
+    let readme = read("README.md");
+    assert!(
+        readme.contains("| `/owlpost:status [id]` | `commands/status.md` | `owl status`"),
+        "{readme}"
+    );
+    assert!(
+        readme.contains(
+            "`--reply-to <id>` continues a thread, `--context <path>` attaches a snippet"
+        ),
+        "{readme}"
     );
 }

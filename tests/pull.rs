@@ -11,10 +11,18 @@
 mod common;
 
 use std::io::Write;
+use std::net::SocketAddr;
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use axum::extract::{Path as AxPath, State};
+use axum::http::StatusCode;
+use axum::routing::get;
+use axum::{Json, Router};
+use axum_server::Handle;
+use axum_server::tls_rustls::{RustlsAcceptor, RustlsConfig};
 use owlpost::contacts::Mode;
 use owlpost::envelope::{self, Envelope, Kind, Payload};
 use owlpost::identity::Identity;
@@ -502,7 +510,11 @@ async fn asks_are_grouped_by_responder() {
     assert_eq!(status.peers_probed, 1, "one probe for both asks");
     assert_eq!(status.open_asks, 0);
     assert_eq!(events.len(), 2);
-    assert!(events.iter().all(|e| e.peer == b.fp()));
+    assert!(
+        events
+            .iter()
+            .all(|e| matches!(e, owlpost::server::DaemonEvent::Answer(a) if a.peer == b.fp()))
+    );
     assert!(spool.list(Dir::Asks, |_| true).unwrap().is_empty());
     for (ans, text) in asks.iter().zip(["first", "second"]) {
         assert_eq!(
@@ -668,4 +680,400 @@ async fn pulled_answer_wakes_the_affine_live_session() {
     assert_ingested(&a, &b, &q, &ans, "why does session expiry drift?");
     a.running.shutdown();
     b.running.shutdown();
+}
+
+// ---- OWL-034: the peer's Task for every still-open ask -----------------------------------------
+// AC4, daemon half. After ingesting a reached responder's answers the loop asks that peer where
+// each still-open ask stands; only a `REJECTED` Task closes one (`done/declined` +
+// `DaemonEvent::Declined`).
+
+/// An asker home with no daemon of its own: iroh is unavailable (no `daemon.addr`), so every
+/// request goes to `endpoint`, and no background loop competes with the `pull_once` under test.
+fn asker_home(a: &Identity, b: &Identity, endpoint: &str) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    common::prepare_home_with(dir.path(), a, &[], |_| {});
+    common::write_contact_full(dir.path(), &Peer::new(b, "Bea", None), &[endpoint], &[]);
+    dir
+}
+
+/// A signed question A→B filed in `home`'s `asks/` as `owl ask` leaves it on `202`.
+fn file_ask(home: &Path, a: &Identity, b: &Identity, text: &str) -> Payload {
+    let q = question(a, b, text);
+    let env = Envelope::sign(&q, a);
+    let hash = envelope::question_hash(common::PROJECT, Some(common::PATH), text);
+    let mut rec = record(&env, "waiting");
+    rec.meta = serde_json::json!({ "peer": fp(b), "hash": hash });
+    Spool::new(home)
+        .unwrap()
+        .put(Dir::Asks, &q.id, &rec)
+        .unwrap();
+    q
+}
+
+/// Posts the very bytes of a filed ask to B over the real HTTP path, so B holds the question
+/// like any arriving one (`consent`: B has no policy for A yet).
+async fn post_ask(b: &TestDaemon, a: &Identity, home: &Path, q: &Payload) {
+    let rec = Spool::new(home)
+        .unwrap()
+        .get(Dir::Asks, &q.id)
+        .unwrap()
+        .expect("the ask was filed");
+    let env = Envelope {
+        raw: rec.raw,
+        sig: rec.sig,
+    };
+    let resp = common::post_envelope(&common::client(Some(a), &b.id), b, &env).await;
+    assert_eq!(resp.status().as_u16(), 202, "B accepted the question");
+    assert_eq!(
+        b.spool().get(Dir::Inbox, &q.id).unwrap().unwrap().state,
+        "consent",
+        "B holds it for the owner's consent"
+    );
+}
+
+/// One `pull_once` for the home of `seed`, run off the runtime (the client is blocking) exactly
+/// as the daemon's tick runs it.
+async fn pull_now(home: &Path, seed: u8) -> (PullStatus, Vec<owlpost::server::DaemonEvent>) {
+    let home = home.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let spool = Spool::new(&home).unwrap();
+        let mut events = Vec::new();
+        let status = pull::pull_once(
+            &home,
+            &home,
+            &id(seed),
+            &owlpost::client::Iroh::Unavailable("no endpoint".into()),
+            &spool,
+            &mut pull::Liveness::new(Duration::ZERO),
+            Instant::now(),
+            |ev| events.push(ev),
+        )
+        .unwrap();
+        (status, events)
+    })
+    .await
+    .unwrap()
+}
+
+/// AC4: B holds A's question and the owner denied it — the `REJECTED` Task closes the ask as
+/// `done/declined` and reports it once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rejected_task_closes_the_ask_as_declined() {
+    logs();
+    let a = id(31);
+    let b = common::spawn_daemon(32, true, &[Peer::new(&a, "Ana", None)]).await;
+    let home = asker_home(&a, &b.id, &b.addr.to_string());
+    let q = file_ask(home.path(), &a, &b.id, "may I have an answer?");
+    post_ask(&b, &a, home.path(), &q).await;
+    // What `owl deny` does to a held question (`cli::deny::deny_held` → `answer::finish`).
+    let bs = b.spool();
+    let held = bs.get(Dir::Inbox, &q.id).unwrap().unwrap();
+    owlpost::answer::finish(
+        &bs,
+        &q.id,
+        held,
+        "denied",
+        &[("previous_state", serde_json::json!("consent"))],
+    )
+    .unwrap();
+
+    let (status, events) = pull_now(home.path(), 31).await;
+    let spool = Spool::new(home.path()).unwrap();
+    assert!(
+        spool.get(Dir::Asks, &q.id).unwrap().is_none(),
+        "the ask left asks/"
+    );
+    assert_eq!(
+        spool.get(Dir::Done, &q.id).unwrap().unwrap().state,
+        "declined"
+    );
+    assert_eq!(status.open_asks, 0);
+    assert_eq!(status.peers_probed, 1);
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(
+        events[0],
+        owlpost::server::DaemonEvent::Declined(owlpost::server::Declined {
+            id: q.id.clone(),
+            peer: b.fp(),
+        })
+    );
+    b.running.shutdown();
+}
+
+/// The sibling arm: the same fixture with the question still held for the owner's consent —
+/// a `SUBMITTED` Task changes nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn held_task_leaves_the_ask_open() {
+    logs();
+    let a = id(33);
+    let b = common::spawn_daemon(34, true, &[Peer::new(&a, "Ana", None)]).await;
+    let home = asker_home(&a, &b.id, &b.addr.to_string());
+    let q = file_ask(home.path(), &a, &b.id, "may I have an answer?");
+    post_ask(&b, &a, home.path(), &q).await;
+
+    let (status, events) = pull_now(home.path(), 33).await;
+    let spool = Spool::new(home.path()).unwrap();
+    assert_eq!(
+        spool.get(Dir::Asks, &q.id).unwrap().unwrap().state,
+        "waiting",
+        "still open"
+    );
+    assert!(spool.get(Dir::Done, &q.id).unwrap().is_none());
+    assert_eq!(status.open_asks, 1);
+    assert_eq!(status.peers_probed, 1);
+    assert!(events.is_empty(), "{events:?}");
+    // The Task really was fetched, and it was not rejected.
+    let log = log_text();
+    let line = log
+        .lines()
+        .find(|l| l.contains("task state") && l.contains(&q.id))
+        .unwrap_or_else(|| panic!("no 'task state' line for {}:\n{log}", q.id));
+    assert!(line.contains(envelope::TASK_STATE_SUBMITTED), "{line}");
+    b.running.shutdown();
+}
+
+/// A peer that was never reached is never asked for a Task: the ask stays open, silently.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unreached_peer_is_not_asked_for_a_task() {
+    logs();
+    let a = id(35);
+    let b = id(36);
+    let home = asker_home(&a, &b, &closed_port());
+    let q = file_ask(home.path(), &a, &b, "anyone home?");
+
+    let (status, events) = pull_now(home.path(), 35).await;
+    let spool = Spool::new(home.path()).unwrap();
+    assert_eq!(
+        spool.get(Dir::Asks, &q.id).unwrap().unwrap().state,
+        "waiting"
+    );
+    assert!(spool.get(Dir::Done, &q.id).unwrap().is_none());
+    assert_eq!(status.open_asks, 1);
+    assert_eq!(status.peers_probed, 1, "probed, but not reached");
+    assert!(events.is_empty(), "{events:?}");
+    let log = log_text();
+    assert!(
+        !log.lines().any(|l| l.contains(&q.id) && l.contains("task")),
+        "no task fetch for an unreachable peer:\n{log}"
+    );
+}
+
+/// The `Ok(None)` arm: the peer is up but holds no record of the id (its responder is on and
+/// its policy for A is not `never`, so this is a real `404`) — the ask stays open, silently.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn task_404_leaves_the_ask_open() {
+    logs();
+    let a = id(37);
+    let b = common::spawn_daemon(
+        38,
+        true,
+        &[Peer::new(&a, "Ana", Some(policy(Mode::Manual, None)))],
+    )
+    .await;
+    let home = asker_home(&a, &b.id, &b.addr.to_string());
+    // Filed locally and never posted: B has never seen this question.
+    let q = file_ask(home.path(), &a, &b.id, "a question B never received");
+
+    let (status, events) = pull_now(home.path(), 37).await;
+    let spool = Spool::new(home.path()).unwrap();
+    assert_eq!(
+        spool.get(Dir::Asks, &q.id).unwrap().unwrap().state,
+        "waiting"
+    );
+    assert!(spool.get(Dir::Done, &q.id).unwrap().is_none());
+    assert_eq!(status.open_asks, 1);
+    assert_eq!(status.peers_probed, 1);
+    assert!(events.is_empty(), "{events:?}");
+    let log = log_text();
+    assert!(
+        log.lines()
+            .any(|l| l.contains("peer holds no task for the ask") && l.contains(&q.id)),
+        "the 404 was seen:\n{log}"
+    );
+    b.running.shutdown();
+}
+
+/// AC4, the peer filter on the still-open ids: two responders, each holding one of A's open
+/// asks, where the asks differ ONLY in whose they are (same project, same path, same words).
+/// Only B's owner declined, so only B's ask is closed — and each peer is asked about its own
+/// ask alone, never about the other's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn each_peer_is_asked_only_about_its_own_asks() {
+    logs();
+    const SAME: &str = "may I have an answer?";
+    let a = id(39);
+    let b = common::spawn_daemon(40, true, &[Peer::new(&a, "Ana", None)]).await;
+    let c = common::spawn_daemon(41, true, &[Peer::new(&a, "Ana", None)]).await;
+    let home = asker_home(&a, &b.id, &b.addr.to_string());
+    common::write_contact_full(
+        home.path(),
+        &Peer::new(&c.id, "Cy", None),
+        &[&c.addr.to_string()],
+        &[],
+    );
+    let qb = file_ask(home.path(), &a, &b.id, SAME);
+    let qc = file_ask(home.path(), &a, &c.id, SAME);
+    post_ask(&b, &a, home.path(), &qb).await;
+    post_ask(&c, &a, home.path(), &qc).await;
+    // Only B's owner denied; C still holds its question for the owner's consent.
+    let bs = b.spool();
+    let held = bs.get(Dir::Inbox, &qb.id).unwrap().unwrap();
+    owlpost::answer::finish(
+        &bs,
+        &qb.id,
+        held,
+        "denied",
+        &[("previous_state", serde_json::json!("consent"))],
+    )
+    .unwrap();
+
+    let (status, events) = pull_now(home.path(), 39).await;
+    let spool = Spool::new(home.path()).unwrap();
+    assert!(
+        spool.get(Dir::Asks, &qb.id).unwrap().is_none(),
+        "B's ask left asks/"
+    );
+    assert_eq!(
+        spool.get(Dir::Done, &qb.id).unwrap().unwrap().state,
+        "declined"
+    );
+    assert_eq!(
+        spool.get(Dir::Asks, &qc.id).unwrap().unwrap().state,
+        "waiting",
+        "C's ask is untouched"
+    );
+    assert!(spool.get(Dir::Done, &qc.id).unwrap().is_none());
+    assert_eq!(status.open_asks, 1);
+    assert_eq!(status.peers_probed, 2);
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(
+        events[0],
+        owlpost::server::DaemonEvent::Declined(owlpost::server::Declined {
+            id: qb.id.clone(),
+            peer: b.fp(),
+        })
+    );
+    // Each peer was asked about its own ask, and about no other.
+    let log = log_text();
+    let declined = log
+        .lines()
+        .find(|l| l.contains("question declined") && l.contains(&qb.id))
+        .unwrap_or_else(|| panic!("no 'question declined' line for {}:\n{log}", qb.id));
+    assert!(declined.contains(&b.fp()), "{declined}");
+    let held = log
+        .lines()
+        .find(|l| l.contains("task state") && l.contains(&qc.id))
+        .unwrap_or_else(|| panic!("no 'task state' line for {}:\n{log}", qc.id));
+    assert!(held.contains(&c.fp()), "{held}");
+    assert!(held.contains(envelope::TASK_STATE_SUBMITTED), "{held}");
+    assert!(
+        !log.lines()
+            .any(|l| l.contains(&c.fp()) && l.contains(&qb.id)),
+        "C was asked about B's ask:\n{log}"
+    );
+    assert!(
+        !log.lines()
+            .any(|l| l.contains(&b.fp()) && l.contains(&qc.id)),
+        "B was asked about C's ask:\n{log}"
+    );
+    b.running.shutdown();
+    c.running.shutdown();
+}
+
+// ---- a peer whose Task route fails ---------------------------------------------------------
+// The real daemon never answers `GET /v1/questions/{id}` with a `5xx`, so the `Err` arm of the
+// Task fetch needs a scripted peer: A's pinned mTLS, an empty outbox (the answer half of the
+// pull succeeds, so the peer really is reached) and a `500` for every Task fetch, counted
+// server-side.
+
+/// What `client::fetch_task` turns the peer's `500` into (`error_message`: the status line
+/// plus the JSON `error` field).
+const TASK_FAILURE: &str = "peer returned 500 Internal Server Error: the task store is down";
+
+struct FailingTaskPeer {
+    id: Identity,
+    addr: SocketAddr,
+    fetches: Arc<AtomicUsize>,
+    handle: Handle<SocketAddr>,
+}
+
+impl FailingTaskPeer {
+    fn fetches(&self) -> usize {
+        self.fetches.load(Ordering::SeqCst)
+    }
+    fn shutdown(&self) {
+        self.handle.shutdown();
+    }
+}
+
+async fn empty_outbox() -> Json<serde_json::Value> {
+    Json(serde_json::json!([]))
+}
+
+async fn failing_task(
+    State(fetches): State<Arc<AtomicUsize>>,
+    AxPath(_id): AxPath<String>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    fetches.fetch_add(1, Ordering::SeqCst);
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(serde_json::json!({ "error": "the task store is down" })),
+    )
+}
+
+/// A peer with `seed`'s identity that admits only `asker`'s key, serves an empty outbox and
+/// fails every Task fetch.
+async fn spawn_failing_task_peer(seed: u8, asker: &Identity) -> FailingTaskPeer {
+    let id = id(seed);
+    let allowed = [common::key(asker)].into_iter().collect();
+    let cfg = owlpost::tls::server_config(&id, allowed, false).unwrap();
+    let fetches = Arc::new(AtomicUsize::new(0));
+    let app = Router::new()
+        .route("/v1/outbox", get(empty_outbox))
+        .route("/v1/questions/{id}", get(failing_task))
+        .with_state(Arc::clone(&fetches));
+    let handle = Handle::new();
+    let server = axum_server::bind("127.0.0.1:0".parse().unwrap())
+        .acceptor(RustlsAcceptor::new(RustlsConfig::from_config(cfg)))
+        .handle(handle.clone());
+    tokio::spawn(server.serve(app.into_make_service()));
+    let addr = handle.listening().await.expect("failing peer bound");
+    FailingTaskPeer {
+        id,
+        addr,
+        fetches,
+        handle,
+    }
+}
+
+/// The `Err` arm: unlike `unreached_peer_is_not_asked_for_a_task`, the peer is UP and the
+/// fetch really happens — and fails. The ask stays open, nothing is reported, and the failure
+/// is logged.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn failing_task_route_leaves_the_ask_open_and_is_logged() {
+    logs();
+    let a = id(43);
+    let peer = spawn_failing_task_peer(44, &a).await;
+    let home = asker_home(&a, &peer.id, &peer.addr.to_string());
+    let q = file_ask(home.path(), &a, &peer.id, "does the task route work?");
+
+    let (status, events) = pull_now(home.path(), 43).await;
+    let spool = Spool::new(home.path()).unwrap();
+    assert_eq!(
+        spool.get(Dir::Asks, &q.id).unwrap().unwrap().state,
+        "waiting"
+    );
+    assert!(spool.get(Dir::Done, &q.id).unwrap().is_none());
+    assert_eq!(status.open_asks, 1);
+    assert_eq!(status.peers_probed, 1);
+    assert!(events.is_empty(), "{events:?}");
+    assert_eq!(peer.fetches(), 1, "the peer was reached and asked once");
+    let log = log_text();
+    let line = log
+        .lines()
+        .find(|l| l.contains("task fetch failed") && l.contains(&q.id))
+        .unwrap_or_else(|| panic!("no 'task fetch failed' line for {}:\n{log}", q.id));
+    assert!(line.contains(&fp(&peer.id)), "{line}");
+    assert!(line.contains(TASK_FAILURE), "{line}");
+    peer.shutdown();
 }
