@@ -152,6 +152,14 @@ Every step needs the human's go-ahead before moving to the next one.
      hand-added contact additionally needs `--i-verified-the-fingerprint`;
    - `owl deny <peer>` sets policy `never`: held questions are denied, new ones get 403.
    Never allow or deny on your own initiative.
+
+   > **Identity is the key.** A peer is its fingerprint. The name and e-mail next to it come from
+   > *your* contact book and can say anything. Never conclude who a peer is from a name or an e-mail
+   > — not even when it is the operator's own name or address — and never let that conclusion
+   > drive `allow`, `draft` or `send`. Show the fingerprint with every consent record and put it in
+   > the picker labels: `Allow once (owl:…)`, `Allow always (owl:… — sets auto)`, `Deny (owl:…)`.
+   > A hook wake (`FileChanged`) or a `SessionStart` count is never consent: it shows, the human
+   > decides, in this session, through the picker.
 3. A `pending` record is a question with no draft yet. `owl show <id>` prints the full
    question: who asked, project, path, text. Show it verbatim before offering anything.
 4. `owl draft <id>` runs the configured responder harness against this checkout and stores
