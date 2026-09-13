@@ -4,11 +4,10 @@
 //! resources only — no tools, no prompts — so the server costs nothing in the model context.
 //! The book is re-read from disk on every list/read, so a contact added mid-session shows up.
 
-use std::collections::HashMap;
 use std::io::{BufRead, Write};
 use std::path::Path;
 
-use owlpost::contacts::{Contact, ContactBook};
+use owlpost::contacts::ContactBook;
 use serde_json::{Value, json};
 
 /// Protocol version offered when the client names none.
@@ -72,7 +71,8 @@ fn dispatch(home: &Path, cwd: &Path, method: &str, params: &Value) -> Result<Val
         "ping" => Ok(json!({})),
         "resources/list" => {
             let book = load(home, cwd)?;
-            let resources: Vec<Value> = resources(&book)
+            let resources: Vec<Value> = book
+                .uris()
                 .into_iter()
                 .map(|(uri, c)| {
                     json!({
@@ -91,7 +91,8 @@ fn dispatch(home: &Path, cwd: &Path, method: &str, params: &Value) -> Result<Val
                 .and_then(Value::as_str)
                 .ok_or_else(|| (-32602, "invalid params: uri is required".to_string()))?;
             let book = load(home, cwd)?;
-            let (_, c) = resources(&book)
+            let (_, c) = book
+                .uris()
                 .into_iter()
                 .find(|(u, _)| u == uri)
                 .ok_or_else(|| (-32002, format!("resource not found: {uri}")))?;
@@ -109,114 +110,9 @@ fn load(home: &Path, cwd: &Path) -> Result<ContactBook, (i64, String)> {
     ContactBook::load(home, cwd).map_err(|e| (-32603, format!("loading contacts: {e:#}")))
 }
 
-/// `(uri, contact)` per contact, sorted by name (then fingerprint) so the list is stable.
-/// URI: `to://<slug>.<first e-mail>` (`to://<slug>` without e-mail); when two contacts share
-/// a URI each gets `.<fingerprint without owl:>` appended, so every URI is unique.
-fn resources(book: &ContactBook) -> Vec<(String, &Contact)> {
-    let mut contacts: Vec<&Contact> = book.contacts.iter().collect();
-    contacts.sort_by(|a, b| (&a.name, &a.fingerprint).cmp(&(&b.name, &b.fingerprint)));
-    let bases: Vec<String> = contacts.iter().map(|c| base_uri(c)).collect();
-    let mut counts: HashMap<&str, usize> = HashMap::new();
-    for b in &bases {
-        *counts.entry(b).or_default() += 1;
-    }
-    contacts
-        .into_iter()
-        .zip(bases.iter())
-        .map(|(c, base)| {
-            let uri = if counts[base.as_str()] > 1 {
-                format!("{base}.{}", fp_segment(c))
-            } else {
-                base.clone()
-            };
-            (uri, c)
-        })
-        .collect()
-}
-
-fn base_uri(c: &Contact) -> String {
-    let mut segments: Vec<String> = Vec::new();
-    let slug = slug(&c.name);
-    if !slug.is_empty() {
-        segments.push(slug);
-    }
-    if let Some(email) = c.emails.first().filter(|e| !e.is_empty()) {
-        segments.push(email.clone());
-    }
-    if segments.is_empty() {
-        // A nameless, e-mail-less contact (a stray policy overlay): the fingerprint alone.
-        segments.push(fp_segment(c).to_string());
-    }
-    format!("to://{}", segments.join("."))
-}
-
-fn fp_segment(c: &Contact) -> &str {
-    c.fingerprint.strip_prefix("owl:").unwrap_or(&c.fingerprint)
-}
-
-/// Name lower-cased, every run of non-alphanumerics (Unicode: `ë` and `ł` stay) as one `-`,
-/// no leading or trailing `-`.
-fn slug(name: &str) -> String {
-    let mut out = String::new();
-    for ch in name.to_lowercase().chars() {
-        if ch.is_alphanumeric() {
-            out.push(ch);
-        } else if !out.ends_with('-') && !out.is_empty() {
-            out.push('-');
-        }
-    }
-    out.trim_end_matches('-').to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn slug_rules() {
-        assert_eq!(slug("Ana Kowalska"), "ana-kowalska");
-        assert_eq!(slug("  Zoë O'Brien-Łukasz!! "), "zoë-o-brien-łukasz");
-        assert_eq!(slug("--"), "");
-        assert_eq!(slug(""), "");
-        assert_eq!(slug("a__b  c"), "a-b-c");
-    }
-
-    fn contact(name: &str, emails: &[&str], fp: &str) -> Contact {
-        Contact {
-            name: name.into(),
-            emails: emails.iter().map(|e| e.to_string()).collect(),
-            pubkey: String::new(),
-            endpoints: vec![],
-            source: "global".into(),
-            policy: None,
-            added_at: None,
-            fingerprint: fp.into(),
-        }
-    }
-
-    #[test]
-    fn uris_are_sorted_and_unique() {
-        let book = ContactBook {
-            contacts: vec![
-                contact("Bob", &["bob@x.io"], "owl:bbbb"),
-                contact("Ana", &["ana@x.io"], "owl:aaaa"),
-                contact("Bob", &["bob@x.io"], "owl:aaab"),
-                contact("", &[], "owl:zzzz"),
-                contact("No Mail", &[], "owl:nnnn"),
-            ],
-        };
-        let uris: Vec<String> = resources(&book).into_iter().map(|(u, _)| u).collect();
-        assert_eq!(
-            uris,
-            [
-                "to://zzzz",
-                "to://ana.ana@x.io",
-                "to://bob.bob@x.io.aaab",
-                "to://bob.bob@x.io.bbbb",
-                "to://no-mail",
-            ]
-        );
-    }
 
     #[test]
     fn notifications_get_no_reply_and_bad_lines_get_null_ids() {

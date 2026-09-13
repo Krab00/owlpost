@@ -7,6 +7,7 @@
 pub mod local;
 pub mod repo;
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -209,7 +210,49 @@ impl ContactBook {
         Ok((name, paths))
     }
 
-    /// Exact fingerprint → exact email → unique case-insensitive name prefix.
+    /// `(uri, contact)` per contact, sorted by name (then fingerprint) so the list is stable.
+    /// URI: `to://<slug>.<first e-mail>` (`to://<slug>` without e-mail); when two contacts share
+    /// a URI each gets `.<fingerprint without owl:>` appended, so every URI is unique. `owl mcp`
+    /// serves these as MCP resources (§9) and [`resolve`](Self::resolve) accepts one as a peer.
+    pub fn uris(&self) -> Vec<(String, &Contact)> {
+        let mut contacts: Vec<&Contact> = self.contacts.iter().collect();
+        contacts.sort_by(|a, b| (&a.name, &a.fingerprint).cmp(&(&b.name, &b.fingerprint)));
+        let bases: Vec<String> = contacts.iter().map(|c| base_uri(c)).collect();
+        let mut counts: HashMap<&str, usize> = HashMap::new();
+        for b in &bases {
+            *counts.entry(b.as_str()).or_default() += 1;
+        }
+        contacts
+            .into_iter()
+            .zip(bases.iter())
+            .map(|(c, base)| {
+                let uri = if counts[base.as_str()] > 1 {
+                    format!("{base}.{}", fp_segment(c))
+                } else {
+                    base.clone()
+                };
+                (uri, c)
+            })
+            .collect()
+    }
+
+    /// The contact whose [`uris`](Self::uris) entry is exactly `query` — an `@owl:to://…`
+    /// mention as Claude Code passes it in a slash command's arguments, or the bare `to://…`.
+    /// A URI is exact by construction, so there is no prefix fallback; `None` lets
+    /// [`resolve`](Self::resolve) fall through to the name arm.
+    fn uri_match(&self, query: &str) -> Option<&Contact> {
+        let uri = query.strip_prefix("@owl:").unwrap_or(query);
+        if !uri.starts_with("to://") {
+            return None;
+        }
+        self.uris()
+            .into_iter()
+            .find(|(u, _)| u == uri)
+            .map(|(_, c)| c)
+    }
+
+    /// Exact fingerprint → exact email → exact `owl mcp` resource URI (`@owl:to://…` /
+    /// `to://…`) → unique case-insensitive name prefix.
     pub fn resolve(&self, query: &str) -> anyhow::Result<&Contact> {
         if let Some(c) = self.contacts.iter().find(|c| c.fingerprint == query) {
             return Ok(c);
@@ -219,6 +262,9 @@ impl ContactBook {
             .iter()
             .find(|c| c.emails.iter().any(|e| e == query))
         {
+            return Ok(c);
+        }
+        if let Some(c) = self.uri_match(query) {
             return Ok(c);
         }
         let q = query.to_lowercase();
@@ -285,6 +331,40 @@ impl ContactBook {
     }
 }
 
+fn base_uri(c: &Contact) -> String {
+    let mut segments: Vec<String> = Vec::new();
+    let slug = slug(&c.name);
+    if !slug.is_empty() {
+        segments.push(slug);
+    }
+    if let Some(email) = c.emails.first().filter(|e| !e.is_empty()) {
+        segments.push(email.clone());
+    }
+    if segments.is_empty() {
+        // A nameless, e-mail-less contact (a stray policy overlay): the fingerprint alone.
+        segments.push(fp_segment(c).to_string());
+    }
+    format!("to://{}", segments.join("."))
+}
+
+fn fp_segment(c: &Contact) -> &str {
+    c.fingerprint.strip_prefix("owl:").unwrap_or(&c.fingerprint)
+}
+
+/// Name lower-cased, every run of non-alphanumerics (Unicode: `ë` and `ł` stay) as one `-`,
+/// no leading or trailing `-`.
+fn slug(name: &str) -> String {
+    let mut out = String::new();
+    for ch in name.to_lowercase().chars() {
+        if ch.is_alphanumeric() {
+            out.push(ch);
+        } else if !out.ends_with('-') && !out.is_empty() {
+            out.push('-');
+        }
+    }
+    out.trim_end_matches('-').to_string()
+}
+
 fn now_secs() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -316,6 +396,52 @@ fn rfc3339(secs: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn contact(name: &str, emails: &[&str], fp: &str) -> Contact {
+        Contact {
+            name: name.into(),
+            emails: emails.iter().map(|e| e.to_string()).collect(),
+            pubkey: String::new(),
+            endpoints: vec![],
+            source: "global".into(),
+            policy: None,
+            added_at: None,
+            fingerprint: fp.into(),
+        }
+    }
+
+    #[test]
+    fn slug_rules() {
+        assert_eq!(slug("Ana Kowalska"), "ana-kowalska");
+        assert_eq!(slug("  Zoë O'Brien-Łukasz!! "), "zoë-o-brien-łukasz");
+        assert_eq!(slug("--"), "");
+        assert_eq!(slug(""), "");
+        assert_eq!(slug("a__b  c"), "a-b-c");
+    }
+
+    #[test]
+    fn uris_are_sorted_and_unique() {
+        let book = ContactBook {
+            contacts: vec![
+                contact("Bob", &["bob@x.io"], "owl:bbbb"),
+                contact("Ana", &["ana@x.io"], "owl:aaaa"),
+                contact("Bob", &["bob@x.io"], "owl:aaab"),
+                contact("", &[], "owl:zzzz"),
+                contact("No Mail", &[], "owl:nnnn"),
+            ],
+        };
+        let uris: Vec<String> = book.uris().into_iter().map(|(u, _)| u).collect();
+        assert_eq!(
+            uris,
+            [
+                "to://zzzz",
+                "to://ana.ana@x.io",
+                "to://bob.bob@x.io.aaab",
+                "to://bob.bob@x.io.bbbb",
+                "to://no-mail",
+            ]
+        );
+    }
 
     #[test]
     fn rfc3339_known_instants() {
