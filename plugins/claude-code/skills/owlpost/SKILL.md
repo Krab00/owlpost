@@ -58,7 +58,9 @@ every contact as a resource `to://<name-slug>.<email>` of the `owl` server; Clau
 lists them in the `@` typeahead and attaches the picked one to the prompt. To mention one,
 type @owl: and the start of the name (or e-mail), pick with the arrows, then type the
 question. An attached `@owl:to://…` resource in the user's prompt is the peer: its content
-is `{"name","fingerprint","emails"}`.
+is `{"name","fingerprint","emails"}`. When the mention arrives as text instead — a slash
+command's `$ARGUMENTS`, a pasted line — nothing is attached to read and
+the text itself is the peer: pass it to `owl ask --peer` as one shell-quoted word, as typed.
 
 - The rest of the prompt is `[path] <question>` (a path when a word contains `/` or a file
   extension and is not a question word; otherwise the whole text is the question).
