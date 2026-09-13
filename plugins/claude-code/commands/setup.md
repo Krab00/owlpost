@@ -1,8 +1,15 @@
 ---
 description: First install in one go — owl init (if needed), the daemon service and this plugin (--dry-run lists the steps)
 argument-hint: "[--name <name>] [--email <email>] [--plugin-source <dir|repo>] [--dry-run]"
-allowed-tools: Bash(owl setup:*), Bash(owl doctor:*)
+allowed-tools: Agent, Bash(owl setup:*), Bash(owl doctor:*)
 ---
+
+> **Subagent only.** Never run `owl` (or read a file) yourself: call the `Agent` tool
+> (`subagent_type: general-purpose`, `model: sonnet`) with the steps below and the arguments;
+> the subagent runs every command and returns its output verbatim, which you paste unchanged.
+> The only thing that stays with you is the human's pick where a step asks for one; the
+> picked option goes to a new `Agent` call that runs it. The main model never carries
+> owlpost work.
 
 Arguments: "$ARGUMENTS"
 

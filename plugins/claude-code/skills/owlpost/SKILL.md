@@ -17,6 +17,16 @@ run the command. An `/owlpost:ask` the user typed, a mentioned `@owl:to://` cont
 user asking in their own words ("ask Maciek why this retries") is that approval: run it
 without a confirmation step.
 
+## Subagent only
+
+Every owlpost operation — listing or showing the inbox, drafting, sending, contacts, setup,
+doctor, all of it — runs in a subagent: the `Agent` tool (`subagent_type: general-purpose`,
+`model: sonnet`) gets the command's steps and returns the `owl` output verbatim; the main
+session pastes it unchanged and runs `AskUserQuestion` where a pick is needed, then hands the
+pick to a new `Agent` call. The main model never runs `owl` itself and never carries owlpost
+work in its own context. A hook wake is the one exception: its table is already rendered, so
+the main session pastes it and offers `/owlpost:inbox`.
+
 ## Slash commands
 
 Every `owl` subcommand except `daemon` and `mcp` has a `/owlpost:<name>` command that runs
