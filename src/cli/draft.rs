@@ -1,6 +1,7 @@
-//! `owl draft <id> [--harness <name>]`: run the OWL-009 runner through the shared
+//! `owl draft <id> [--harness <name> | --text <text>]`: run the OWL-009 runner through the shared
 //! `owlpost::answer::draft`, store the draft on the inbox record (state `drafted`), print it
-//! with a redaction summary (§3.4, §10).
+//! with a redaction summary (§3.4, §10). `--text` stores the human's own answer as the
+//! draft instead (harness `human`, no redactions).
 //!
 //! State gate (§8): `pending` and `drafted` (re-draft) are accepted; `consent` is refused
 //! with a pointer to `owl allow`; anything else is refused. A `drafted` record whose signed
@@ -24,7 +25,13 @@ use super::{
     ExitError, StoredDraft, existing_answer, inbox_record, payload_of, print_json, user_error,
 };
 
-pub fn run(home: &Path, id: &str, harness: Option<&str>, json: bool) -> anyhow::Result<()> {
+pub fn run(
+    home: &Path,
+    id: &str,
+    harness: Option<&str>,
+    text: Option<String>,
+    json: bool,
+) -> anyhow::Result<()> {
     let config = Config::load(home)?;
     let spool = Spool::new(home)?;
     let rec = inbox_record(&spool, id)?;
@@ -53,8 +60,15 @@ pub fn run(home: &Path, id: &str, harness: Option<&str>, json: bool) -> anyhow::
             "record {id} already has its answer spooled as outbox/{aid}.json — run `owl send {id}` to finish it (drafting again would not change what is sent)"
         )));
     }
-    let (rec, draft) = answer::draft(&config, home, id, rec, harness)?;
-    let stored = StoredDraft::from_runner(&draft);
+    // `--text`: the human wrote the answer; no harness runs.
+    let (rec, status) = match text {
+        Some(text) => (answer::draft_text(rec, &text), DraftStatus::Ok),
+        None => {
+            let (rec, draft) = answer::draft(&config, home, id, rec, harness)?;
+            (rec, draft.status)
+        }
+    };
+    let stored = StoredDraft::from_record(id, &rec)?.expect("a drafted record has a draft");
     spool.put(Dir::Inbox, id, &rec)?;
     // Being handled: no session needs to wake for it (OWL-033).
     route::release(home, id);
@@ -72,7 +86,7 @@ pub fn run(home: &Path, id: &str, harness: Option<&str>, json: bool) -> anyhow::
         println!("redactions: {}", stored.redactions);
         println!("state: drafted ({id})");
     }
-    match draft.status {
+    match status {
         DraftStatus::Ok => Ok(()),
         status => Err(ExitError {
             code: 1,

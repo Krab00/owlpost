@@ -263,6 +263,22 @@ fn hook_script_emits_context_or_nothing() {
             .is_none()
     );
     assert_silent(&run_hook(without_owl.path(), two.path()), "no owl on PATH");
+    // ... except on SessionStart, where one hint line tells a plugin-first install what to run.
+    let out = run_hook_args(
+        without_owl.path(),
+        two.path(),
+        &["--hook-event", "SessionStart"],
+    );
+    assert_eq!(out.status.code(), Some(0), "no owl, SessionStart");
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        "owlpost: the owl binary is not installed; run /owlpost:setup --name \"Your Name\" --email you@company.com to install it\n"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        "",
+        "no owl, SessionStart: stderr"
+    );
 }
 
 /// OWL-031 AC1 through the real script, per session since OWL-033: the SessionStart
@@ -355,16 +371,19 @@ fn hook_script_forwards_session_start_and_reads_plugin_json() {
         )),
         format!("{}\n", claude_watch_zero(empty.path(), "sess-1"))
     );
-    // The script stays a no-op with the flag when owl is missing or fails.
+    // The script stays a no-op with the flag when owl fails; when owl is missing it prints
+    // the plugin-first hint line only (pinned in `hook_script_emits_context_or_nothing`).
     let without_owl = path_dir(false);
-    assert_silent(
-        &run_hook_stdin(
-            without_owl.path(),
-            empty.path(),
-            &ss,
-            &start_stdin("sess-1"),
-        ),
-        "no owl on PATH",
+    let out = run_hook_stdin(
+        without_owl.path(),
+        empty.path(),
+        &ss,
+        &start_stdin("sess-1"),
+    );
+    assert_eq!(out.status.code(), Some(0), "no owl on PATH");
+    assert!(
+        stdout(out).starts_with("owlpost: the owl binary is not installed;"),
+        "no owl on PATH: hint"
     );
     let file = tempfile::tempdir().unwrap();
     let file = file.path().join("home");
@@ -934,12 +953,14 @@ fn takes_arguments(sub: &str) -> bool {
     h.contains("\nArguments:\n") || h.contains("<COMMAND>")
 }
 
-/// The `owl` subcommand a command file wraps: the file stem, except the two files whose
-/// name is not a subcommand (`me` = `owl contact export`, `contacts` = `owl contact list`).
+/// The `owl` subcommand a command file wraps: the file stem, except the files whose name is
+/// not a subcommand (`me` = `owl contact export`, `contacts` = `owl contact list`, `reply` =
+/// `owl draft` on the last shown question).
 fn wrapped_subcommand(name: &str) -> &str {
     match name {
         "me" => "contact export",
         "contacts" => "contact",
+        "reply" => "draft",
         other => other,
     }
 }
@@ -1348,7 +1369,7 @@ fn mentions_command_needs_a_whole_token() {
 const INBOX_VERBATIM: &str =
     "The question text and every draft are printed verbatim in a code block before any picker";
 const INBOX_SEND_ONLY_ON_PICK: &str =
-    "`owl send` runs only on an explicit \"Send\" or \"Draft & send\" pick";
+    "`owl send` runs only on an explicit \"Send\" pick or a typed \"draft & send\"";
 
 #[test]
 fn inbox_command_walks_states_with_pickers() {
@@ -1375,7 +1396,9 @@ fn inbox_command_walks_states_with_pickers() {
         "--i-verified-the-fingerprint",
         "out-of-band",
         DRAFT_PICKS,
-        "Send / Edit / Reject",
+        "Send / Save as draft / Edit / Reject",
+        "owl inbox` and paste its output verbatim",
+        "--text",
         "language",
     ] {
         assert!(body.contains(needle), "inbox.md body lacks {needle:?}");
@@ -1435,9 +1458,9 @@ fn inbox_command_walks_states_with_pickers() {
 // ---------- OWL-028: one-pick "Draft & send" ----------
 
 /// The step-3 picker of `commands/inbox.md`, verbatim.
-const DRAFT_PICKS: &str = "Draft / Draft & send / Reject / Skip";
+const DRAFT_PICKS: &str = "`Type draft · draft & send · reject · skip — or write your own answer.`";
 /// What the "Draft & send" option description must say.
-const DRAFT_AND_SEND_DESC: &str = "sends the draft as-is; pick Draft to read it first";
+const DRAFT_AND_SEND_DESC: &str = "human's explicit approval to send whatever the harness produced";
 /// The amended ground rule, one line, stated in SKILL.md, inbox.md and draft.md.
 const NEVER_CHAIN: &str = "Never chain `owl draft` and `owl send` unless the human picked \"Draft & send\" (or passed `--send`); the draft is still printed in full before `owl send` runs.";
 /// The two absolute forms the rule replaced.
@@ -1459,10 +1482,11 @@ fn inbox_offers_draft_and_send_in_one_pick() {
         "inbox.md step 3 lacks {DRAFT_PICKS:?}"
     );
     for pick in [
-        "- **Draft** —",
-        "- **Draft & send** —",
-        "- **Reject** —",
-        "- **Skip** —",
+        "- **draft** —",
+        "- **draft & send** —",
+        "- **reject** —",
+        "- **skip** —",
+        "- **Anything else is the human's own answer** —",
     ] {
         assert!(
             pending.lines().any(|l| l.starts_with(pick)),
@@ -1471,8 +1495,8 @@ fn inbox_offers_draft_and_send_in_one_pick() {
     }
     let option = pending
         .lines()
-        .skip_while(|l| !l.starts_with("- **Draft & send** —"))
-        .take_while(|l| !l.starts_with("- **Reject** —"))
+        .skip_while(|l| !l.starts_with("- **draft & send** —"))
+        .take_while(|l| !l.starts_with("- **reject** —"))
         .collect::<Vec<_>>()
         .join(" ");
     for needle in [

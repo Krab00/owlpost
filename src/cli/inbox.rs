@@ -378,6 +378,12 @@ pub fn run(home: &Path, opts: Opts) -> anyhow::Result<()> {
         return count(home, &spool, &book, &opts, format, watch_enabled(home));
     }
     let records = spool.list(Dir::Inbox, |r| !opts.new || !r.seen)?;
+    // `#N` = position in the full inbox, so `--new` shows the same numbers as the whole listing.
+    let all: Vec<String> = spool
+        .list(Dir::Inbox, |_| true)?
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
     let now = envelope::now_unix();
     let mut rows = Vec::new();
     let mut notes = Vec::new();
@@ -387,6 +393,10 @@ pub fn run(home: &Path, opts: Opts) -> anyhow::Result<()> {
         let error = auto_error(rec);
         if let Some(obj) = row.as_object_mut() {
             obj.insert("auto_error".into(), json!(error));
+            obj.insert(
+                "n".into(),
+                json!(all.iter().position(|x| x == id).map_or(0, |p| p + 1)),
+            );
         }
         rows.push(row);
         if rec.state == "consent" {
@@ -412,9 +422,12 @@ pub fn run(home: &Path, opts: Opts) -> anyhow::Result<()> {
         let cells: Vec<Vec<String>> = rows
             .iter()
             .map(|r| {
-                ["id", "from_name", "type", "state", "path", "age"]
-                    .iter()
-                    .map(|k| r[k].as_str().unwrap_or_default().to_string())
+                std::iter::once(format!("#{}", r["n"]))
+                    .chain(
+                        ["id", "from_name", "type", "state", "path", "age", "summary"]
+                            .iter()
+                            .map(|k| r[k].as_str().unwrap_or_default().to_string()),
+                    )
                     .collect()
             })
             .collect();
@@ -428,7 +441,7 @@ pub fn run(home: &Path, opts: Opts) -> anyhow::Result<()> {
             })
             .collect();
         super::print_table_styled(
-            &["ID", "FROM", "TYPE", "STATE", "PATH", "AGE"],
+            &["#", "ID", "FROM", "TYPE", "STATE", "PATH", "AGE", "SUMMARY"],
             &cells,
             &styles,
         );

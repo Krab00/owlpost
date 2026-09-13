@@ -280,6 +280,22 @@ pub fn draft(
     Ok((rec, d))
 }
 
+/// Stores a human-written `text` as the draft (harness `human`, no redactions, status `ok`)
+/// without running a harness; the record becomes `drafted` like [`draft`] leaves it.
+pub fn draft_text(mut rec: Record, text: &str) -> Record {
+    let stored = StoredDraft {
+        text: text.to_string(),
+        harness: "human".into(),
+        redactions: 0,
+        status: "ok".into(),
+        drafted_at: envelope::rfc3339_now(),
+    };
+    rec.draft = Some(stored.to_value());
+    rec.state = "drafted".into();
+    meta_object(&mut rec).remove(AUTO_ERROR);
+    rec
+}
+
 /// Who pressed send: the human (`owl send`) or the scheduler.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]

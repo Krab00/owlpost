@@ -110,6 +110,9 @@ enum Cmd {
         id: String,
         #[arg(long)]
         harness: Option<String>,
+        /// Store this text as the draft instead of running a harness (harness `human`)
+        #[arg(long, conflicts_with = "harness")]
+        text: Option<String>,
     },
     /// Open the draft in $EDITOR
     Edit { id: String },
@@ -395,12 +398,23 @@ fn main() -> ExitCode {
             cli.json,
         ),
         Cmd::Deny { peer } => cli::deny::run(&home, &peer, cli.json),
-        Cmd::Show { id, format } => cli::show::run(&home, &id, cli.json, format.as_deref()),
-        Cmd::Draft { id, harness } => cli::draft::run(&home, &id, harness.as_deref(), cli.json),
-        Cmd::Edit { id } => cli::edit::run(&home, &id, cli.json),
-        Cmd::Send { id } => cli::send::run(&home, &id, cli.json),
-        Cmd::Reject { id } => cli::reject::run(&home, &id, cli.json),
-        Cmd::Route { id } => cli::route::run(&home, &id, cli.json),
+        // `#N` from the `owl inbox` listing is accepted wherever a record id is.
+        Cmd::Show { id, format } => cli::resolve_id(&home, &id)
+            .and_then(|id| cli::show::run(&home, &id, cli.json, format.as_deref())),
+        Cmd::Draft { id, harness, text } => cli::resolve_id(&home, &id)
+            .and_then(|id| cli::draft::run(&home, &id, harness.as_deref(), text, cli.json)),
+        Cmd::Edit { id } => {
+            cli::resolve_id(&home, &id).and_then(|id| cli::edit::run(&home, &id, cli.json))
+        }
+        Cmd::Send { id } => {
+            cli::resolve_id(&home, &id).and_then(|id| cli::send::run(&home, &id, cli.json))
+        }
+        Cmd::Reject { id } => {
+            cli::resolve_id(&home, &id).and_then(|id| cli::reject::run(&home, &id, cli.json))
+        }
+        Cmd::Route { id } => {
+            cli::resolve_id(&home, &id).and_then(|id| cli::route::run(&home, &id, cli.json))
+        }
         Cmd::History { peer, path, since } => {
             cli::history::run(&home, cli::history::Filters { peer, path, since }, cli.json)
         }
