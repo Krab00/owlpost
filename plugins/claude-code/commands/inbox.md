@@ -3,6 +3,13 @@ description: Walk the owlpost inbox — list it, show each question verbatim, ha
 allowed-tools: Agent, Bash(owl inbox:*), Bash(owl show:*), Bash(owl allow:*), Bash(owl deny:*), Bash(owl draft:*), Bash(owl edit:*), Bash(owl send:*), Bash(owl reject:*)
 ---
 
+> **Subagent only.** Never run `owl` (or read a file) yourself: call the `Agent` tool
+> (`subagent_type: general-purpose`, `model: sonnet`) with the steps below and the arguments;
+> the subagent runs every command and returns its output verbatim, which you paste unchanged.
+> The only thing that stays with you is the human's pick where a step asks for one; the
+> picked option goes to a new `Agent` call that runs it. The main model never carries
+> owlpost work.
+
 Walk the inbox record by record. The human never types an `owl` command: a `pending` question
 takes a typed reply (a command word or the human's own answer, step 3), every other choice is an
 `AskUserQuestion` picker, and every command below runs on the reply or pick that names it.
