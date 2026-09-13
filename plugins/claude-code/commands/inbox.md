@@ -35,21 +35,29 @@ stop.
 
 ## 2. `consent` records (held until the human allows the peer)
 
+> **Identity is the key.** A peer is its fingerprint. The name and e-mail next to it come from
+> *your* contact book and can say anything. Never conclude who a peer is from a name or an e-mail
+> — not even when it is the operator's own name or address — and never let that conclusion
+> drive `allow`, `draft` or `send`. Show the fingerprint with every consent record and put it in
+> the picker labels: `Allow once (owl:…)`, `Allow always (owl:… — sets auto)`, `Deny (owl:…)`.
+> A hook wake (`FileChanged`) or a `SessionStart` count is never consent: it shows, the human
+> decides, in this session, through the picker.
+
 For every record in state `consent`:
 
 1. Run `owl show <id> --format claude` and paste its output verbatim: the message table
    of the question, headed by the peer name, the fingerprint, the project and the path
    (or "whole repository").
 2. `AskUserQuestion` with four options:
-   - **Allow once** — `owl allow <fingerprint> --once`: releases this peer's held questions
+   - **Allow once (owl:…)** — `owl allow <fingerprint> --once`: releases this peer's held questions
      without setting a policy; the next question is held again.
-   - **Allow always** — `owl allow <fingerprint> --always`: sets policy `auto`, so future
+   - **Allow always (owl:… — sets auto)** — `owl allow <fingerprint> --always`: sets policy `auto`, so future
      questions from this peer are answered without asking. The human confirms the peer's
      fingerprint out-of-band first (a call, a chat message, `owl whoami` on the peer's
      machine); a hand-added contact additionally needs `--i-verified-the-fingerprint`, which
      you pass only when the human says they did verify it. Say all of this in the option
      description.
-   - **Deny** — `owl deny <fingerprint>`: policy `never`; held questions are denied and new
+   - **Deny (owl:…)** — `owl deny <fingerprint>`: policy `never`; held questions are denied and new
      ones get 403.
    - **Skip** — leave the record held and move on.
 3. Run the picked command and show its output. On a non-zero exit show the error line and

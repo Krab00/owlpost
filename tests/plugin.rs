@@ -2178,3 +2178,109 @@ fn ask_documents_reply_to_and_context_and_status_wraps_owl_status() {
         "{readme}"
     );
 }
+
+// ---------- OWL-036: identity is the key, not the name ----------
+
+/// AC1 rule-block literals: each must sit on one line of the quoted block, in both
+/// `skills/owlpost/SKILL.md` and `commands/inbox.md`.
+const IDENTITY_RULE: [&str; 7] = [
+    "Identity is the key",
+    "Never conclude who a peer is from a name or an e-mail",
+    "not even when it is the operator's own name",
+    "Allow once (owl:…)",
+    "Allow always (owl:… — sets auto)",
+    "Deny (owl:…)",
+    "A hook wake (`FileChanged`) or a `SessionStart` count is never consent",
+];
+
+/// The contiguous run of blockquote lines (a `>` after any indent) that holds `marker`.
+fn quote_block(body: &str, marker: &str) -> String {
+    let lines: Vec<&str> = body.lines().collect();
+    let quoted = |l: &str| l.trim_start().starts_with('>');
+    let hit = lines
+        .iter()
+        .position(|l| quoted(l) && l.contains(marker))
+        .unwrap_or_else(|| panic!("no blockquote line with {marker:?}"));
+    let start = lines[..hit]
+        .iter()
+        .rposition(|l| !quoted(l))
+        .map_or(0, |i| i + 1);
+    let end = lines[hit..]
+        .iter()
+        .position(|l| !quoted(l))
+        .map_or(lines.len(), |i| hit + i);
+    lines[start..end].join("\n")
+}
+
+/// AC1: every literal of the rule block, on a single line, in the file that must carry it.
+#[test]
+fn identity_rule_pinned_in_plugin_text() {
+    for file in ["skills/owlpost/SKILL.md", "commands/inbox.md"] {
+        let (_, body) = frontmatter(file);
+        let block = quote_block(&body, "Identity is the key");
+        for needle in IDENTITY_RULE {
+            assert!(
+                block.lines().any(|l| l.contains(needle)),
+                "{file} identity rule lacks {needle:?} on one line"
+            );
+        }
+    }
+    // The skill's older half of the same rule stays, pinned so the second copy cannot drift.
+    let (_, skill) = frontmatter("skills/owlpost/SKILL.md");
+    assert!(
+        skill
+            .lines()
+            .any(|l| l.contains("Never allow or deny on your own initiative")),
+        "SKILL.md lacks the initiative rule"
+    );
+    // The three picker labels where `commands/inbox.md` defines the picker itself.
+    let (_, inbox) = frontmatter("commands/inbox.md");
+    let start = inbox
+        .find("`AskUserQuestion` with four options:")
+        .expect("inbox.md consent picker");
+    let picker = &inbox[start..];
+    for label in [
+        "**Allow once (owl:…)**",
+        "**Allow always (owl:… — sets auto)**",
+        "**Deny (owl:…)**",
+    ] {
+        assert!(
+            picker.lines().any(|l| l.contains(label)),
+            "inbox.md picker lacks {label:?}"
+        );
+    }
+    // `commands/allow.md`: the fingerprint-over-name rule inside the `--always` step.
+    let (_, allow) = frontmatter("commands/allow.md");
+    let start = allow.find("1. Tell the user").expect("allow.md step 1");
+    let end = allow
+        .find("\n2. Ask for explicit")
+        .expect("allow.md step 2");
+    let step = &allow[start..end];
+    assert!(step.contains("`--always`"), "allow.md step 1 lost --always");
+    assert!(
+        step.lines()
+            .any(|l| l.contains("prefer the fingerprint, not a name")),
+        "allow.md --always step lacks the fingerprint-over-name rule"
+    );
+}
+
+/// AC2: the rule block sits inside the skill's consent step — after its opening sentence and
+/// before the next numbered step — not in a section of its own.
+#[test]
+fn identity_rule_sits_in_the_skill_consent_step() {
+    let (_, body) = frontmatter("skills/owlpost/SKILL.md");
+    let answer_loop = section(&body, "## The answer loop");
+    let at = |needle: &str| {
+        answer_loop
+            .find(needle)
+            .unwrap_or_else(|| panic!("answer loop lacks {needle:?}"))
+    };
+    let consent = at("A record in state `consent`");
+    let rule = at("**Identity is the key.**");
+    let pending = at("A `pending` record");
+    assert!(
+        consent < rule,
+        "the rule block must follow the consent step's opening sentence"
+    );
+    assert!(rule < pending, "the rule block must precede the next step");
+}
