@@ -1884,7 +1884,7 @@ const ICON: &str = "🦉 ";
 const RULE_ROW: &str = "|---|";
 /// The header row shape the skill documents (OWL-035 AC5).
 const TABLE_HEADER: &str =
-    "Header row: `| 🦉 **<peer>** · HH:MM · <project> · <path or \"whole repository\"> |`";
+    "Header row: `| 🦉 #N **<peer>** · HH:MM · <project> · <path or \"whole repository\"> |`";
 const DRAFTS_NOT_A_TABLE: &str = "Drafts (our own text) stay a plain code block and never become a table, so a table always means \"from a peer\".";
 /// OWL-032: the CLI renders the block, the command says to paste it (was "print the framed
 /// message block (see the skill, ...)", which pointed at text the model never had in context).
@@ -1996,7 +1996,7 @@ fn skill_documents_the_message_table() {
         .collect();
     assert_eq!(
         example[0],
-        "| 🦉 **Krzysztof Abramczyk** · 09:08 · github.com/Krab00/owlpost · whole repository |"
+        "| 🦉 #3 **Krzysztof Abramczyk** · 09:08 · github.com/Krab00/owlpost · whole repository |"
     );
     assert_eq!(example[1], RULE_ROW);
     assert_eq!(example[2], "| Jaki masz ostatni commit u Siebie? |");
@@ -2098,7 +2098,7 @@ fn show_format_claude_tables_a_consent_question_end_to_end() {
     let lines: Vec<&str> = stdout.lines().collect();
     assert_eq!(lines.len(), 3, "{stdout}");
     assert!(
-        lines[0].starts_with("| 🦉 **Maciek** (owl:"),
+        lines[0].starts_with("| 🦉 #1 **Maciek** (owl:"),
         "{}",
         lines[0]
     );

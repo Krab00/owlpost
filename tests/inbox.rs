@@ -123,6 +123,7 @@ impl Home {
                     enabled: true,
                     disabled_reason: None,
                     env: Default::default(),
+                    model: None,
                 },
             );
             cfg.responder.harness = "fake".into();
@@ -2325,7 +2326,9 @@ fn show_format_claude_prints_the_message_table() {
     let text = "Why is the refresh token rotated on every read?";
     let a = h.put(&h.maciek, text, "pending");
     h.set_received(&a, Dir::Inbox, RECEIVED);
-    let head = format!("🦉 **Maciek** · 23:08 · {PROJECT} · {PATH}");
+    // `#N` = the record's `owl inbox` row number (ids are time-ordered, so put order).
+    let head_n = |n: usize| format!("🦉 #{n} **Maciek** · 23:08 · {PROJECT} · {PATH}");
+    let head = head_n(1);
     let expected = format!("| {head} |\n{RULE}\n| {text} |\n");
     assert_eq!(
         h.ok_tz("UTC", &["show", &a, "--format", "claude"]),
@@ -2343,7 +2346,7 @@ fn show_format_claude_prints_the_message_table() {
     let tokyo = h.ok_tz("Etc/GMT-9", &["show", &a, "--format", "claude"]);
     assert_eq!(
         tokyo.lines().next().unwrap(),
-        format!("| 🦉 **Maciek** · 08:08 · {PROJECT} · {PATH} |")
+        format!("| 🦉 #1 **Maciek** · 08:08 · {PROJECT} · {PATH} |")
     );
     // codex and kimi print the same Markdown.
     assert_eq!(h.ok_tz("UTC", &["show", &a, "--format", "codex"]), expected);
@@ -2370,7 +2373,9 @@ fn show_format_claude_prints_the_message_table() {
     h.set_received(&w, Dir::Inbox, RECEIVED);
     assert_eq!(
         h.ok_tz("UTC", &["show", &w, "--format", "claude"]),
-        format!("| 🦉 **Ana** · 23:08 · {PROJECT} · whole repository |\n{RULE}\n| Whole repo? |\n")
+        format!(
+            "| 🦉 #2 **Ana** · 23:08 · {PROJECT} · whole repository |\n{RULE}\n| Whole repo? |\n"
+        )
     );
 
     // A consent record: the fingerprint right after the bold name, inside the header row.
@@ -2380,7 +2385,7 @@ fn show_format_claude_prints_the_message_table() {
     assert_eq!(
         out.lines().next().unwrap(),
         format!(
-            "| 🦉 **Ana** ({}) · 23:08 · {PROJECT} · {PATH} |",
+            "| 🦉 #3 **Ana** ({}) · 23:08 · {PROJECT} · {PATH} |",
             fp(&h.ana)
         )
     );
@@ -2392,6 +2397,7 @@ fn show_format_claude_prints_the_message_table() {
     let ticks = "Is this ```rust\nfn x() {}\n``` right?";
     let t = h.put(&h.maciek, ticks, "pending");
     h.set_received(&t, Dir::Inbox, RECEIVED);
+    let head = head_n(4);
     assert_eq!(
         h.ok_tz("UTC", &["show", &t, "--format", "claude"]),
         format!("| {head} |\n{RULE}\n| Is this ```rust |\n| fn x() {{}} |\n| ``` right? |\n")
@@ -2401,6 +2407,7 @@ fn show_format_claude_prints_the_message_table() {
     let tricky = "a|b\n\n   \nZażółć gęślą jaźń\n";
     let x = h.put(&h.maciek, tricky, "pending");
     h.set_received(&x, Dir::Inbox, RECEIVED);
+    let head = head_n(5);
     assert_eq!(
         h.ok_tz("UTC", &["show", &x, "--format", "claude"]),
         format!("| {head} |\n{RULE}\n| a\\|b |\n|  |\n|     |\n| Zażółć gęślą jaźń |\n"),
@@ -2410,6 +2417,7 @@ fn show_format_claude_prints_the_message_table() {
     // CRLF: the `\r` goes, the rows are the same as with `\n`.
     let crlf = h.put(&h.maciek, "crlf\r\nsecond", "pending");
     h.set_received(&crlf, Dir::Inbox, RECEIVED);
+    let head = head_n(6);
     assert_eq!(
         h.ok_tz("UTC", &["show", &crlf, "--format", "claude"]),
         format!("| {head} |\n{RULE}\n| crlf |\n| second |\n")
@@ -2432,7 +2440,7 @@ fn show_format_claude_prints_the_message_table() {
     assert_eq!(
         h.ok_tz("UTC", &["show", &p, "--format", "claude"]),
         format!(
-            "| 🦉 **Ana** · 23:08 · github.com/a\\|b/repo · src/a\\|b.rs |\n{RULE}\n| pipes? |\n"
+            "| 🦉 #7 **Ana** · 23:08 · github.com/a\\|b/repo · src/a\\|b.rs |\n{RULE}\n| pipes? |\n"
         ),
         "the header row escapes `|` in the project and the path"
     );
@@ -2456,26 +2464,32 @@ fn show_format_claude_prints_the_draft_and_the_language_note() {
     let en_q = "What is the last commit on your side and is it fine?";
     let pl_d = "Ostatni commit to abc123, i tak, jest ok.";
     let en_d = "The last commit is abc123 and it is fine.";
-    let block = |q: &str, d: &str| {
+    let block = |n: usize, q: &str, d: &str| {
         format!(
             "{}draft:\n```text\n{d}\n```\nharness: fake\n",
-            table(&format!("🦉 **Maciek** · 23:08 · {PROJECT} · {PATH}"), q)
+            table(
+                &format!("🦉 #{n} **Maciek** · 23:08 · {PROJECT} · {PATH}"),
+                q
+            )
         )
     };
-    for (q, d, note) in [
+    for (i, (q, d, note)) in [
         (pl_q, en_d, true),
         (en_q, pl_d, true),
         (pl_q, pl_d, false),
         (en_q, en_d, false),
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
         let id = h.put(&h.maciek, q, "pending");
         h.set_received(&id, Dir::Inbox, RECEIVED);
         h.set_draft(&id, d, "fake");
         let out = h.ok_tz("UTC", &["show", &id, "--format", "claude"]);
         let want = if note {
-            format!("{}{NOTE}\n", block(q, d))
+            format!("{}{NOTE}\n", block(i + 1, q, d))
         } else {
-            block(q, d)
+            block(i + 1, q, d)
         };
         assert_eq!(out, want, "question {q:?} draft {d:?}");
         // The draft is never a table: exactly one header row and one rule row, both the
@@ -2508,7 +2522,7 @@ fn show_format_claude_tables_an_answer() {
     let (aid, _) = h.put_answer(&h.ana, "asked earlier?", "Because of X.", RECEIVED);
     assert_eq!(
         h.ok_tz("UTC", &["show", &aid, "--format", "claude"]),
-        format!("| 🦉 **Ana** · 23:08 · {PROJECT} · {PATH} |\n{RULE}\n| Because of X. |\n")
+        format!("| 🦉 #1 **Ana** · 23:08 · {PROJECT} · {PATH} |\n{RULE}\n| Because of X. |\n")
     );
     // The question may still be an open ask (`asks/`) or a question received here
     // (`inbox/`): each arm yields its own path in the header and its first line in the
@@ -2534,7 +2548,7 @@ fn show_format_claude_tables_an_answer() {
     h.set_received(&from_ask, Dir::Inbox, RECEIVED);
     assert_eq!(
         h.ok_tz("UTC", &["show", &from_ask, "--format", "claude"]),
-        format!("| 🦉 **Ana** · 23:08 · {PROJECT} · src/asks.rs |\n{RULE}\n| From ask. |\n")
+        format!("| 🦉 #2 **Ana** · 23:08 · {PROJECT} · src/asks.rs |\n{RULE}\n| From ask. |\n")
     );
     let received = Payload::question(
         &fp(&h.ana),
@@ -2553,7 +2567,7 @@ fn show_format_claude_tables_an_answer() {
     h.set_received(&from_inbox, Dir::Inbox, RECEIVED);
     assert_eq!(
         h.ok_tz("UTC", &["show", &from_inbox, "--format", "claude"]),
-        format!("| 🦉 **Ana** · 23:08 · {PROJECT} · src/inbox.rs |\n{RULE}\n| From inbox. |\n")
+        format!("| 🦉 #4 **Ana** · 23:08 · {PROJECT} · src/inbox.rs |\n{RULE}\n| From inbox. |\n")
     );
     // The listing's `↳` lines resolve the same three arms; the three answers are older than
     // 24 h (RECEIVED), so bring them into the window first.
@@ -2583,7 +2597,7 @@ fn show_format_claude_tables_an_answer() {
     h.set_received(&orphan, Dir::Inbox, RECEIVED);
     assert_eq!(
         h.ok_tz("UTC", &["show", &orphan, "--format", "claude"]),
-        format!("| 🦉 **Ana** · 23:08 · - · whole repository |\n{RULE}\n| Orphan. |\n")
+        format!("| 🦉 #5 **Ana** · 23:08 · - · whole repository |\n{RULE}\n| Orphan. |\n")
     );
 }
 
@@ -2805,14 +2819,20 @@ fn inbox_format_claude_prints_tables_then_answers_and_nothing_else() {
             "{}\n{}\n{}draft:\n```text\n{en_d}\n```\nharness: fake\n{NOTE}\n\n\
              🟦 ↳ {} \"asked?\"\n| 🟦 {} · Maciek | yes\\|no |\n|---|---|\n",
             table(
-                &format!("🦉 **Ana** ({}) · 23:08 · {PROJECT} · {PATH}", fp(&h.ana)),
+                &format!(
+                    "🦉 #2 **Ana** ({}) · 23:08 · {PROJECT} · {PATH}",
+                    fp(&h.ana)
+                ),
                 "Held one?"
             ),
             table(
-                &format!("🦉 **Maciek** · 23:08 · {PROJECT} · {PATH}"),
+                &format!("🦉 #1 **Maciek** · 23:08 · {PROJECT} · {PATH}"),
                 "Pending one?"
             ),
-            table(&format!("🦉 **Maciek** · 23:08 · {PROJECT} · {PATH}"), pl_q),
+            table(
+                &format!("🦉 #4 **Maciek** · 23:08 · {PROJECT} · {PATH}"),
+                pl_q
+            ),
             short(&qid),
             utc_hh_mm(t)
         )
@@ -2835,7 +2855,7 @@ fn inbox_format_claude_prints_tables_then_answers_and_nothing_else() {
     let only = e.ok_tz("UTC", &["inbox", "--format", "claude"]);
     assert_eq!(
         only,
-        format!("| 🦉 **Maciek** · 23:08 · {PROJECT} · {PATH} |\n{RULE}\n| Only? |\n")
+        format!("| 🦉 #1 **Maciek** · 23:08 · {PROJECT} · {PATH} |\n{RULE}\n| Only? |\n")
     );
     assert!(!only.contains("|---|---|"));
 }
