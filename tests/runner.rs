@@ -42,6 +42,7 @@ impl Env {
                 )]
                 .into_iter()
                 .collect(),
+                model: None,
             },
         );
         cfg.harnesses.insert(
@@ -52,6 +53,7 @@ impl Env {
                 enabled: false,
                 disabled_reason: Some("read-only enforcement unverified".into()),
                 env: Default::default(),
+                model: None,
             },
         );
         cfg.responder.harness = "fake".into();
@@ -122,6 +124,24 @@ fn fake_harness_produces_redacted_draft() {
         env.log().lines().filter(|l| l.starts_with("pid: ")).count(),
         1,
         "spawned exactly once"
+    );
+}
+
+/// `harnesses.<name>.model` is appended to the command as `--model <model>`; unset adds
+/// nothing.
+#[test]
+fn harness_model_is_appended_as_model_flag() {
+    // The prompt argument spans lines, so the flag is the tail of the argv block.
+    let env = Env::new();
+    env.draft(None, "github.com/acme/widgets").unwrap();
+    assert!(!env.log().contains("--model"), "{}", env.log());
+    let mut env = Env::new();
+    env.cfg.harnesses.get_mut("fake").unwrap().model = Some("sonnet".into());
+    env.draft(None, "github.com/acme/widgets").unwrap();
+    assert!(
+        env.log().contains(" --model sonnet\npwd: "),
+        "{}",
+        env.log()
     );
 }
 

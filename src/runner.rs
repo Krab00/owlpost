@@ -219,7 +219,12 @@ pub fn draft_with(
     let redactors = compile_redactors(&config.responder.redact)?;
     let cwd = project_dir(config, project)?;
     let prompt = build_prompt_with(config, home, project, path, question, extras);
-    let (program, args, prompt_file) = render_cmd(&harness.cmd, &prompt, &prompt_dir(home))?;
+    let (program, mut args, prompt_file) = render_cmd(&harness.cmd, &prompt, &prompt_dir(home))?;
+    // ponytail: `--model` is what claude, codex and opencode all take; a harness that spells
+    // it differently puts the flag in `cmd` itself and leaves `model` unset.
+    if let Some(m) = &harness.model {
+        args.extend(["--model".to_string(), m.clone()]);
+    }
 
     let mut command = Command::new(&program);
     command

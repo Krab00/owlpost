@@ -206,13 +206,13 @@ A single question or answer shown outside the answers table (every question and 
 Code highlights as a box — so it stands out from the rest of the conversation:
 
 ```
-| 🦉 **Krzysztof Abramczyk** · 09:08 · github.com/Krab00/owlpost · whole repository |
+| 🦉 #3 **Krzysztof Abramczyk** · 09:08 · github.com/Krab00/owlpost · whole repository |
 |---|
 | Jaki masz ostatni commit u Siebie? |
 ```
 
 Do not build this table yourself: the CLI renders it — `owl show <id> --format claude` prints it (`owl inbox --format claude` prints one per question) and the model pastes the output verbatim.
-Header row: `| 🦉 **<peer>** · HH:MM · <project> · <path or "whole repository"> |`, then the rule row `|---|`.
+Header row: `| 🦉 #N **<peer>** · HH:MM · <project> · <path or "whole repository"> |` (`#N` is the row number `owl inbox` shows, the one `/owlpost:reply N` takes), then the rule row `|---|`.
 On a `consent` record the header also carries the peer's fingerprint, after the peer name.
 Body: one row per line of the message, verbatim, with `|` escaped as `\|`; an empty line is the row `|  |`; a code-fence line inside the message is just another row, because the table never fences.
 A question that continues a thread carries `↩ follow-up in thread <short id>` as its first body row, and an asker's snippet follows the body as the row `| **context:** |` plus one row per snippet line.
