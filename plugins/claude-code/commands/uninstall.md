@@ -1,7 +1,14 @@
 ---
 description: Uninstall the owl daemon service
-allowed-tools: Bash(owl uninstall:*)
+allowed-tools: Agent, Bash(owl uninstall:*)
 ---
+
+> **Subagent only.** Never run `owl` (or read a file) yourself: call the `Agent` tool
+> (`subagent_type: general-purpose`, `model: sonnet`) with the steps below and the arguments;
+> the subagent runs every command and returns its output verbatim, which you paste unchanged.
+> The only thing that stays with you is the human's pick where a step asks for one; the
+> picked option goes to a new `Agent` call that runs it. The main model never carries
+> owlpost work.
 
 Uninstalling stops the daemon, so questions and answers stop flowing until it is installed
 again; it needs one confirmation.

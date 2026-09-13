@@ -1059,8 +1059,8 @@ fn commands_have_descriptions() {
             if entry == "Bash(git blame:*)" && (name == "ask" || name == "contacts") {
                 continue;
             }
-            // The draft subagent (draft, inbox and reply run the draft steps).
-            if entry == "Agent" && ["draft", "inbox", "reply"].contains(&name) {
+            // Every command runs in a subagent (the "Subagent only" preamble).
+            if entry == "Agent" {
                 continue;
             }
             let x = entry
@@ -1175,7 +1175,7 @@ fn trust_changing_commands_confirm_before_running() {
 
 /// AC5: exactly the tools the toggle needs — it reads and writes `plugin.json`, nothing else;
 /// no `Monitor`, no `TaskStop`, nothing that lists, shows, drafts or sends.
-const WATCH_TOOLS: [&str; 2] = ["Read", "Write"];
+const WATCH_TOOLS: [&str; 3] = ["Agent", "Read", "Write"];
 
 #[test]
 fn watch_command_is_a_plugin_json_toggle() {
@@ -1693,7 +1693,7 @@ fn contacts_command_lists_and_points_at_mentions() {
     );
     assert_eq!(
         fm_value(&fm, "allowed-tools"),
-        Some("Bash(owl contact:*)"),
+        Some("Agent, Bash(owl contact:*)"),
         "{fm}"
     );
     for needle in [
@@ -2148,7 +2148,10 @@ fn ask_documents_reply_to_and_context_and_status_wraps_owl_status() {
     );
     assert!(ask.contains("`accepted <id> — <state>`"), "{ask}");
     let (fm, status) = frontmatter("commands/status.md");
-    assert_eq!(fm_value(&fm, "allowed-tools"), Some("Bash(owl status:*)"));
+    assert_eq!(
+        fm_value(&fm, "allowed-tools"),
+        Some("Agent, Bash(owl status:*)")
+    );
     assert_eq!(fm_value(&fm, "argument-hint"), Some("\"[<id>]\""));
     assert!(status.contains("Run `owl status $ARGUMENTS`"), "{status}");
     assert!(

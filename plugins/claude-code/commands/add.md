@@ -1,8 +1,15 @@
 ---
 description: Add a colleague's peer file (pasted JSON or a path) to your global contacts
 argument-hint: "<peer json | path/to/peer.json> [--local]"
-allowed-tools: Bash(owl add:*), Bash(owl contact:*), Bash(owl allow:*)
+allowed-tools: Agent, Bash(owl add:*), Bash(owl contact:*), Bash(owl allow:*)
 ---
+
+> **Subagent only.** Never run `owl` (or read a file) yourself: call the `Agent` tool
+> (`subagent_type: general-purpose`, `model: sonnet`) with the steps below and the arguments;
+> the subagent runs every command and returns its output verbatim, which you paste unchanged.
+> The only thing that stays with you is the human's pick where a step asks for one; the
+> picked option goes to a new `Agent` call that runs it. The main model never carries
+> owlpost work.
 
 Arguments: "$ARGUMENTS"
 
