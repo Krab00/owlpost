@@ -47,7 +47,8 @@ pub struct AskArgs {
     /// Propose peers from `git blame` of this file; it is also the question's path
     #[arg(long, value_name = "PATH")]
     pub file: Option<String>,
-    /// Peer to ask (fingerprint, email, or name prefix); with `--file` skips the pick
+    /// Peer to ask (fingerprint, e-mail, name prefix, or an `@owl:to://…` / `to://…` resource
+    /// URI); with `--file` skips the pick
     #[arg(long, value_name = "PEER")]
     pub peer: Option<String>,
     /// Continue an earlier exchange with this peer: reuse its thread id (an ask, a finished
