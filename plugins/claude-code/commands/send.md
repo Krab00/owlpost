@@ -1,8 +1,15 @@
 ---
 description: Sign a draft answer and move it to the outbox
 argument-hint: "<id>"
-allowed-tools: Bash(owl send:*)
+allowed-tools: Agent, Bash(owl send:*)
 ---
+
+> **Subagent only.** Never run `owl` (or read a file) yourself: call the `Agent` tool
+> (`subagent_type: general-purpose`, `model: sonnet`) with the steps below and the arguments;
+> the subagent runs every command and returns its output verbatim, which you paste unchanged.
+> The only thing that stays with you is the human's pick where a step asks for one; the
+> picked option goes to a new `Agent` call that runs it. The main model never carries
+> owlpost work.
 
 Arguments: "$ARGUMENTS"
 
