@@ -1,17 +1,18 @@
 ---
-description: Walk the owlpost inbox — show each question verbatim, handle consent (allow/deny), and pick draft/send/edit/reject with AskUserQuestion
+description: Walk the owlpost inbox — list it, show each question verbatim, handle consent (allow/deny), take a typed command or the human's own answer for a question, and pick send/edit/reject with AskUserQuestion
 allowed-tools: Bash(owl inbox:*), Bash(owl show:*), Bash(owl allow:*), Bash(owl deny:*), Bash(owl draft:*), Bash(owl edit:*), Bash(owl send:*), Bash(owl reject:*)
 ---
 
-Walk the inbox record by record. The human never types an `owl` command: every choice is an
-`AskUserQuestion` picker, and every command below runs on the pick that names it.
+Walk the inbox record by record. The human never types an `owl` command: a `pending` question
+takes a typed reply (a command word or the human's own answer, step 3), every other choice is an
+`AskUserQuestion` picker, and every command below runs on the reply or pick that names it.
 
 Two rules hold for the whole flow:
 
 - The question text and every draft are printed verbatim in a code block before any picker.
   Never paraphrase, shorten or "improve" them; never offer a choice about a text the human
   has not seen in full.
-- `owl send` runs only on an explicit "Send" or "Draft & send" pick. `owl allow --always`
+- `owl send` runs only on an explicit "Send" pick or a typed "draft & send". `owl allow --always`
   and `owl deny` run only on their pick. Never send, allow or deny on your own initiative.
 
 The CLI renders every message; you paste. Never:
@@ -26,8 +27,14 @@ The rule: a peer's message is shown as the CLI prints it — nothing before it, 
 ## 1. List
 
 Run `owl inbox --json`. Each row carries `id`, `from` (fingerprint), `from_name`, `state`,
-`project`, `path` (`null` = the whole repository), `type` and `age`. Listing marks the rows
-seen; that is expected. If the array is empty, say "owlpost inbox is empty" and stop.
+`project`, `path` (`null` = the whole repository), `type`, `age` and `summary` (the first line
+of the message, cut to 60 chars). Listing marks the rows seen; that is expected. If the array
+is empty, say "owlpost inbox is empty" and stop.
+
+Otherwise run `owl inbox` and paste its output verbatim in a plain code block — always, even
+for a single record — so the human sees the whole inbox before the first record. When you name
+a record anywhere after that (a question, a picker header), name it by its `summary`, never by
+its id.
 
 Handle the records by state, in this order: `consent`, then `pending`, then `drafted`,
 then `answer` records. After each record continue with the next one; after the last one
@@ -66,23 +73,36 @@ For every record in state `consent`:
 
 ## 3. `pending` records (question with no draft yet)
 
-- One `pending` record: run `owl show <id> --format claude` and paste its output verbatim
-  (the question's table with peer name, project and path).
-- Several: print the table (id, peer, path, age), `AskUserQuestion` to pick one, then run
-  `owl show <id> --format claude` for the pick and paste its output verbatim.
+Take the `pending` records in list order. For each one:
+run `owl show <id> --format claude` and paste its output verbatim (the question's table with
+peer name, project and path). No picker here: end the turn with this one line, in the human's language, and wait for their reply:
 
-Then `AskUserQuestion` with **Draft / Draft & send / Reject / Skip**:
+`Type draft · draft & send · reject · skip — or write your own answer.`
 
-- **Draft** — run `owl draft <id>` (the configured responder harness against this
+The reply is a command word or the human's own answer:
+
+- **draft** — run `owl draft <id>` (the configured responder harness against this
   checkout), then continue with the record in step 4.
-- **Draft & send** — run `owl draft <id>`, print the draft verbatim in a code block (as
-  step 4 does), then run `owl send <id>` at once, without a second picker. The pick is the
-  human's explicit approval to send whatever the harness produced; say so in the option
-  description: `sends the draft as-is; pick Draft to read it first`. On a non-zero `owl draft` exit
+- **draft & send** — run `owl draft <id>`, print the draft verbatim in a code block (as
+  step 4 does), then run `owl send <id>` at once, without a second picker. The typed command is the
+  human's explicit approval to send whatever the harness produced (typing draft reads it first). On a non-zero `owl draft` exit
   show the error line and stop (nothing is sent); on a non-zero `owl send` exit show the
   error line, the record stays `drafted`.
-- **Reject** — run `owl reject <id>`; the peer gets no answer.
-- **Skip** — leave it pending and move on.
+- **reject** — run `owl reject <id>`; the peer gets no answer.
+- **skip** — leave it pending and move on.
+- **Anything else is the human's own answer** — store it byte for byte as the draft, passing
+  it through a quoted heredoc so no shell character is interpreted:
+
+  ```
+  owl draft <id> --text "$(cat <<'OWL_ANSWER'
+  <the human's reply>
+  OWL_ANSWER
+  )"
+  ```
+
+  Then continue with the
+  record in step 4 (its picker offers Send, Save as draft, Edit and Reject). Never send it
+  without that Send pick.
 
 ## 4. `drafted` records (draft stored, not sent)
 
@@ -91,13 +111,14 @@ Then `AskUserQuestion` with **Draft / Draft & send / Reject / Skip**:
    then `draft:` with the draft in a plain code block and `harness: <name>`.
    When the CLI prints a `note:` line (the draft is in a different language than the
    question), recommend Edit before the picker.
-2. `AskUserQuestion` with **Send / Edit / Reject**:
+2. `AskUserQuestion` with **Send / Save as draft / Edit / Reject**:
    - **Send** — run `owl send <id>`: signs the draft and moves it to the outbox. This is the
      only pick in this picker that runs `owl send`.
+   - **Save as draft** — nothing runs; the draft stays stored (`drafted`) and the flow moves on.
    - **Edit** — `owl edit <id>` opens `$EDITOR`, which cannot run inside a session (see
      `commands/edit.md`): tell the human to run `owl edit <id>` in a terminal and say when
      they are done. Then run `owl show <id> --format claude` again, paste its output
-     verbatim, and ask again with the same Send / Edit / Reject picker. Never send a draft
+     verbatim, and ask again with the same Send / Save as draft / Edit / Reject picker. Never send a draft
      the human has not seen after editing.
    - **Reject** — run `owl reject <id>`; the draft is discarded and the peer gets no answer.
 3. Show the command's output. On a non-zero exit show the error line and stop; the record
