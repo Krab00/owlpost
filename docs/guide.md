@@ -281,10 +281,15 @@ owl draft <id>
 /owlpost:draft <id>
 ```
 
-Runs the responder harness read-only against this checkout and stores the draft on the record.
-You should see the draft text, then `harness: ...`, `redactions: N`, `state: drafted (<id>)`.
-`--harness <name>` picks another configured harness. Exit 1 means the draft was stored but needs
-a look (timeout or extraction failure).
+`owl draft <id>` runs the responder harness read-only against this checkout and stores the
+draft on the record. You should see the draft text, then `harness: ...`, `redactions: N`,
+`state: drafted (<id>)`. `--harness <name>` picks another configured harness. Exit 1 means the
+draft was stored but needs a look (timeout or extraction failure).
+
+`/owlpost:draft <id>` answers in the session instead: `owl draft <id> --prompt` prints the
+responder prompt, the plugin hands it to the Agent tool (a read-only subagent on a cheaper
+model), and `owl draft <id> --agent --text <reply>` stores the answer, redacted, as
+`harness: agent`. `/owlpost:draft <id> --harness <name>` uses the headless harness as above.
 
 ### 3.7 Edit the draft
 

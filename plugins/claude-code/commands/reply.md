@@ -1,7 +1,7 @@
 ---
 description: Reply to the question last shown in this session (else the newest pending one) — your own text, or a responder draft when no text is given
 argument-hint: "[text]"
-allowed-tools: Bash(owl inbox:*), Bash(owl show:*), Bash(owl draft:*), Bash(owl send:*), Bash(owl reject:*)
+allowed-tools: Agent, Bash(owl inbox:*), Bash(owl show:*), Bash(owl draft:*), Bash(owl send:*), Bash(owl reject:*)
 ---
 
 Arguments: "$ARGUMENTS"
@@ -25,8 +25,10 @@ the peer is still held and offer `/owlpost:inbox`.
      OWL_ANSWER
      )"
      ```
-   - `$ARGUMENTS` empty — `owl draft <id>`: the configured responder harness against this
-     checkout.
+   - `$ARGUMENTS` empty — the draft steps of `commands/draft.md`: `owl draft <id> --prompt`,
+     the `Agent` tool (`subagent_type: general-purpose`, `model: sonnet`, read-only: Read,
+     Grep, Glob only, answer text only) on that prompt, then `owl draft <id> --agent --text …`
+     with the subagent's reply through a quoted heredoc.
 
    On a non-zero exit show the error line and stop.
 3. Print the stored draft verbatim in a code block (never paraphrase or "improve" it), then

@@ -1,7 +1,10 @@
-//! `owl draft <id> [--harness <name> | --text <text>]`: run the OWL-009 runner through the shared
-//! `owlpost::answer::draft`, store the draft on the inbox record (state `drafted`), print it
-//! with a redaction summary (§3.4, §10). `--text` stores the human's own answer as the
-//! draft instead (harness `human`, no redactions).
+//! `owl draft <id> [--harness <name> | --text <text> [--agent] | --prompt]`: run the OWL-009
+//! runner through the shared `owlpost::answer::draft`, store the draft on the inbox record
+//! (state `drafted`), print it with a redaction summary (§3.4, §10). `--text` stores the
+//! human's own answer as the draft instead (harness `human`, no redactions); `--text --agent`
+//! stores an in-session agent's answer (harness `agent`, redacted like a harness answer).
+//! `--prompt` prints the responder prompt for the record and stops — the plugin hands it to
+//! the Agent tool and brings the answer back with `--text --agent`.
 //!
 //! State gate (§8): `pending` and `drafted` (re-draft) are accepted; `consent` is refused
 //! with a pointer to `owl allow`; anything else is refused. A `drafted` record whose signed
@@ -25,13 +28,20 @@ use super::{
     ExitError, StoredDraft, existing_answer, inbox_record, payload_of, print_json, user_error,
 };
 
-pub fn run(
-    home: &Path,
-    id: &str,
-    harness: Option<&str>,
-    text: Option<String>,
-    json: bool,
-) -> anyhow::Result<()> {
+pub struct Opts<'a> {
+    pub harness: Option<&'a str>,
+    pub text: Option<String>,
+    pub agent: bool,
+    pub prompt: bool,
+}
+
+pub fn run(home: &Path, id: &str, opts: Opts<'_>, json: bool) -> anyhow::Result<()> {
+    let Opts {
+        harness,
+        text,
+        agent,
+        prompt,
+    } = opts;
     let config = Config::load(home)?;
     let spool = Spool::new(home)?;
     let rec = inbox_record(&spool, id)?;
@@ -60,8 +70,18 @@ pub fn run(
             "record {id} already has its answer spooled as outbox/{aid}.json — run `owl send {id}` to finish it (drafting again would not change what is sent)"
         )));
     }
-    // `--text`: the human wrote the answer; no harness runs.
+    if prompt {
+        if json {
+            print_json(&json!({"id": id, "prompt": answer::prompt(&config, home, id, &rec)?}))?;
+        } else {
+            print!("{}", answer::prompt(&config, home, id, &rec)?);
+        }
+        return Ok(());
+    }
+    // `--text`: the human (or, with `--agent`, the session's agent) wrote the answer; no
+    // harness runs.
     let (rec, status) = match text {
+        Some(text) if agent => (answer::draft_agent(&config, rec, &text)?, DraftStatus::Ok),
         Some(text) => (answer::draft_text(rec, &text), DraftStatus::Ok),
         None => {
             let (rec, draft) = answer::draft(&config, home, id, rec, harness)?;
