@@ -29,8 +29,8 @@ over `owl contact list` ending with the `@owl:to://` mention hint.
 - Contacts and trust: `/owlpost:contacts`, `/owlpost:contact`, `/owlpost:add`,
   `/owlpost:allow`, `/owlpost:deny`
 - Asking: `/owlpost:ask`, `/owlpost:status`, `/owlpost:history`, `/owlpost:watch`
-- Answering: `/owlpost:inbox`, `/owlpost:show`, `/owlpost:draft`, `/owlpost:edit`,
-  `/owlpost:send`, `/owlpost:reject`
+- Answering: `/owlpost:inbox`, `/owlpost:reply`, `/owlpost:show`, `/owlpost:draft`,
+  `/owlpost:edit`, `/owlpost:send`, `/owlpost:reject`
 
 `/owlpost:send`, `/owlpost:allow`, `/owlpost:deny`, `/owlpost:reject` and
 `/owlpost:uninstall` ask for one explicit confirmation before running.

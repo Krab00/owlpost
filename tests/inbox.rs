@@ -705,7 +705,12 @@ fn listing_marks_seen() {
     assert!(out.contains("pending") && out.contains("consent"), "{out}");
     assert!(out.contains(PATH), "{out}");
     assert!(
-        out.lines().any(|l| l.contains(&a) && l.ends_with("2h")),
+        out.lines()
+            .any(|l| l.contains(&a) && l.contains(" 2h ") && l.ends_with("first?")),
+        "{out}"
+    );
+    assert!(
+        out.lines().next().unwrap().ends_with("AGE  SUMMARY"),
         "{out}"
     );
     assert_eq!(h.ok(&["inbox", "--count"]), "0\n");
@@ -742,7 +747,78 @@ fn listing_marks_seen() {
     assert_eq!(row["seen"], true);
     assert_eq!(row["age"], "2h");
     assert!(row["age_secs"].as_u64().unwrap() >= 7_200);
+    assert_eq!(row["summary"], "first?");
     assert_eq!(h.json(&["inbox", "--new", "--json"]), json!([]));
+
+    // The summary is the first line, cut to 60 chars.
+    let long = h.put(
+        &h.ana,
+        &format!("{}\nsecond line", "x".repeat(70)),
+        "pending",
+    );
+    let rows = h.json(&["inbox", "--json"]);
+    let row = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == long)
+        .unwrap();
+    assert_eq!(row["summary"], format!("{}…", "x".repeat(60)));
+}
+
+#[test]
+fn draft_text_stores_the_humans_answer() {
+    let h = Home::new();
+    let qid = h.put(&h.maciek, "Where is the retry policy defined?", "pending");
+    let out = h.ok(&["draft", &qid, "--text", "In src/retry.rs."]);
+    assert!(
+        out.starts_with("In src/retry.rs.\nharness: human\n"),
+        "{out}"
+    );
+    let rec = h.inbox(&qid).unwrap();
+    assert_eq!(rec.state, "drafted");
+    let d = rec.draft.as_ref().unwrap();
+    assert_eq!(
+        (&d["text"], &d["harness"], &d["redactions"], &d["status"]),
+        (
+            &json!("In src/retry.rs."),
+            &json!("human"),
+            &json!(0),
+            &json!("ok")
+        )
+    );
+    let (code, _, err) = h.run(&["draft", &qid, "--text", "x", "--harness", "fake"]);
+    assert!(
+        code == 2 && err.contains("cannot be used with"),
+        "{code} {err}"
+    );
+    h.ok(&["send", &qid]);
+    assert_eq!(h.outbox().len(), 1);
+}
+
+/// `#N` (or `N`) from the listing is accepted wherever a record id is; the number is the
+/// row's position in the full inbox, oldest first, and `--new` keeps the same numbers.
+#[test]
+fn short_numbers_resolve_to_ids() {
+    let h = Home::new();
+    let first = h.put(&h.maciek, "First?", "pending");
+    let second = h.put(&h.maciek, "Second?", "pending");
+    let out = h.ok(&["inbox"]);
+    assert!(out.starts_with("#   ID"), "{out}");
+    assert!(out.contains(&format!("#1  {first}")), "{out}");
+    assert!(out.contains(&format!("#2  {second}")), "{out}");
+    let rows = h.json(&["inbox", "--json"]);
+    assert_eq!(rows[0]["n"], json!(1));
+    assert_eq!(rows[1]["n"], json!(2));
+    assert_eq!(h.json(&["show", "#2", "--json"])["id"], json!(second));
+    assert_eq!(h.json(&["show", "2", "--json"])["id"], json!(second));
+    h.ok(&["draft", "#1", "--text", "one"]);
+    assert_eq!(h.inbox(&first).unwrap().state, "drafted");
+    h.fails(&["show", "#3"], "no inbox row #3 (owl inbox has 2 rows)");
+    h.fails(&["show", "#0"], "no inbox row #0");
+    h.ok(&["reject", "#1"]);
+    // Numbers shift with the inbox: the second question is now `#1`.
+    assert_eq!(h.json(&["show", "#1", "--json"])["id"], json!(second));
 }
 
 #[test]
@@ -2609,7 +2685,7 @@ fn inbox_format_claude_prints_the_answers_table() {
     assert_eq!(h.ok_tz("UTC", &["inbox", "--format", "kimi"]), out);
     // Plain stays today's table.
     let plain = h.ok(&["inbox", "--format", "plain"]);
-    assert!(plain.starts_with("ID "), "{plain}");
+    assert!(plain.starts_with("#"), "{plain}");
     assert_eq!(plain, h.ok(&["inbox"]));
 
     // The peers in the other order: markers follow first appearance, not the name.

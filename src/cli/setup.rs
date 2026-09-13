@@ -16,6 +16,8 @@ const MARKETPLACE: &str = "owlpost-local";
 const DEFAULT_PLUGIN_SOURCE: &str = "Krab00/owlpost";
 
 /// `owl init`: create home, key, config; print the fingerprint. Refuses when a key exists.
+/// A name or email not given as a flag is asked for on the terminal (skipped when stdin is
+/// not a tty, so scripts and the plugin's Bash calls never hang).
 pub fn init(home: &Path, name: Option<String>, emails: Vec<String>) -> anyhow::Result<()> {
     // Check the key BEFORE touching config so a refused init leaves the home untouched.
     if home.join("key").exists() {
@@ -25,17 +27,33 @@ pub fn init(home: &Path, name: Option<String>, emails: Vec<String>) -> anyhow::R
         );
     }
     let mut cfg = config::Config::load(home)?;
-    if let Some(n) = name {
+    if let Some(n) = name.or(ask("Your name")?) {
         cfg.name = n;
     }
     if !emails.is_empty() {
         cfg.emails = emails;
+    } else if let Some(e) = ask("Your email")? {
+        cfg.emails = vec![e];
     }
     cfg.save(home)?;
     let id = identity::Identity::generate();
     id.save(home)?;
     println!("{}", identity::fingerprint(&id.verifying_key()));
     Ok(())
+}
+
+/// One interactive prompt on a terminal; `None` when stdin is not a tty or the answer is empty.
+fn ask(label: &str) -> anyhow::Result<Option<String>> {
+    use std::io::{IsTerminal, Write};
+    if !std::io::stdin().is_terminal() {
+        return Ok(None);
+    }
+    print!("{label}: ");
+    std::io::stdout().flush()?;
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    let line = line.trim().to_string();
+    Ok((!line.is_empty()).then_some(line))
 }
 
 pub struct Opts {

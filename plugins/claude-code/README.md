@@ -35,6 +35,7 @@ patterns of the next steps a file runs itself); `tests/plugin.rs` pins the rule.
 | `/owlpost:status [id]` | `commands/status.md` | `owl status` — where every open question stands, in the peer's words (`waiting for the owner's consent`, …) |
 | `/owlpost:inbox` | `commands/inbox.md` | `owl inbox --json` — walk the records: question verbatim, consent picker (allow once/always, deny), draft / draft & send / reject / skip picker, verbatim draft, send/edit/reject picker |
 | `/owlpost:show <id>` | `commands/show.md` | `owl show` — full record, offer draft/send/reject |
+| `/owlpost:reply [text]` | `commands/reply.md` | `owl draft` on the question last shown in this session (else the newest pending one): `text` is stored as the human's own answer (`--text`), no text runs the responder; the draft is shown verbatim, then Send / Save as draft / Edit / Reject |
 | `/owlpost:draft <id> [--harness <name>] [--send]` | `commands/draft.md` | `owl draft` — run the responder, show the draft; `--send` then runs `owl send` at once |
 | `/owlpost:edit <id>` | `commands/edit.md` | `owl edit` opens `$EDITOR`, which cannot run in a session; explains the alternatives |
 | `/owlpost:send <id>` | `commands/send.md` | `owl send` — sign and move to outbox (confirms first) |
@@ -81,6 +82,10 @@ is named `plugin:owlpost:owl`, and that prefix sinks the contacts in the typeahe
 In one go (also creates the identity, installs the daemon and registers the `owl` MCP
 server): `owl setup`, or
 `owl setup --plugin-source /absolute/path/to/owlpost/plugins/claude-code` from a checkout.
+
+Plugin first: install the plugin with the two `/plugin` commands below, then `/owlpost:setup`
+runs the release installer (`scripts/install.sh`) when `owl` is missing and `owl setup` after
+it; until then the `SessionStart` hook prints one line saying the binary is not installed.
 
 By hand from a local checkout:
 

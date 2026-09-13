@@ -28,7 +28,7 @@ use std::path::Path;
 use anyhow::Context;
 use owlpost::contacts::ContactBook;
 use owlpost::envelope::{self, Body, Kind, Payload};
-use owlpost::spool::Record;
+use owlpost::spool::{Dir, Record, Spool};
 use serde_json::{Value, json};
 
 /// An error carrying its §9 process exit code (`1` user/data, `2` offline/unavailable, `3`
@@ -68,6 +68,20 @@ pub fn exit_code(e: &anyhow::Error) -> u8 {
 }
 
 pub use owlpost::answer::{StoredDraft, existing_answer, finish, inbox_record, payload_of};
+
+/// `#N` (or bare `N`) is the Nth row of `owl inbox` — the full inbox, oldest first; anything
+/// else is passed through as a record id (ids are UUIDs, never digits only).
+/// ponytail: the number is a position, it shifts when a record leaves the inbox.
+pub fn resolve_id(home: &Path, id: &str) -> anyhow::Result<String> {
+    let Ok(n) = id.trim_start_matches('#').parse::<usize>() else {
+        return Ok(id.to_string());
+    };
+    let records = Spool::new(home)?.list(Dir::Inbox, |_| true)?;
+    records
+        .get(n.wrapping_sub(1))
+        .map(|(id, _)| id.clone())
+        .with_context(|| format!("no inbox row #{n} (owl inbox has {} rows)", records.len()))
+}
 
 /// Loads the merged contact book for the current directory; a missing git root is fine.
 pub fn contact_book(home: &Path) -> anyhow::Result<ContactBook> {
@@ -131,7 +145,21 @@ pub fn summary(id: &str, rec: &Record, payload: &Payload, book: &ContactBook, no
         "age_secs": age,
         "age": format_age(age),
         "has_draft": rec.draft.as_ref().is_some_and(|d| !d.is_null()),
+        "summary": first_line(match &payload.body { Body::Question { question, .. } => question, Body::Answer { answer, .. } => answer }, SUMMARY_CHARS),
     })
+}
+
+/// Width of the `summary` listing field.
+pub const SUMMARY_CHARS: usize = 60;
+
+/// The first line of `text`, trimmed, cut to `max` chars with `…` when longer.
+pub fn first_line(text: &str, max: usize) -> String {
+    let line = text.lines().next().unwrap_or("").trim();
+    if line.chars().count() > max {
+        format!("{}…", line.chars().take(max).collect::<String>())
+    } else {
+        line.to_string()
+    }
 }
 
 /// ANSI colour per row when stdout is a terminal and `NO_COLOR` is unset: questions yellow,

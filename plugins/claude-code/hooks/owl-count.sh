@@ -16,8 +16,14 @@
 # On SessionEnd owl removes the session's directory and prints nothing (the plain path
 # below). The script is a strict no-op (empty stdout, exit 0) when `owl` is not on PATH or
 # fails for any reason, e.g. an uninitialised home, so a broken install can never block a
-# Claude session.
-command -v owl >/dev/null 2>&1 || exit 0
+# Claude session — except that on SessionStart a missing `owl` prints one hint line, so a
+# plugin installed before the binary (plugin-first install) tells the user what to run.
+if ! command -v owl >/dev/null 2>&1; then
+    case " $* " in
+    *" SessionStart "*) echo "owlpost: the owl binary is not installed; run /owlpost:setup --name \"Your Name\" --email you@company.com to install it" ;;
+    esac
+    exit 0
+fi
 case " $* " in
 *" FileChanged "*)
     err=$(owl inbox --count --format claude "$@" 2>&1 >/dev/null)

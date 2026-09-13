@@ -37,6 +37,11 @@ Runs 1.3–1.5 for you: `owl init` (skipped when a key exists), `owl install`, t
 You should see your fingerprint, `installed`/`started` for the daemon, and
 `set up; run \`owl doctor\``. Then skip to 1.6.
 
+Plugin first, binary second also works: after 1.5 alone, every session starts with
+`owlpost: the owl binary is not installed; run /owlpost:setup ...`, and `/owlpost:setup`
+runs the installer from 1.1 before `owl setup`. The plugin steps inside `owl setup` are no-ops
+for a plugin that is already installed.
+
 ### 1.3 Create your identity
 
 ```
@@ -44,7 +49,8 @@ owl init --name "Ania Nowak" --email ania@company.com
 /owlpost:init --name "Ania Nowak" --email ania@company.com
 ```
 
-Creates the key and config under `~/.config/owlpost`.
+Creates the key and config under `~/.config/owlpost`. Without `--name` / `--email` it asks
+for each in turn on the terminal (`/owlpost:init` and `/owlpost:setup` ask in the session).
 You should see one line: your fingerprint, `owl:` plus 16 characters.
 If a key already exists, the command refuses and changes nothing.
 
