@@ -113,6 +113,12 @@ enum Cmd {
         /// Store this text as the draft instead of running a harness (harness `human`)
         #[arg(long, conflicts_with = "harness")]
         text: Option<String>,
+        /// With --text: the text is an in-session agent's answer (harness `agent`, redacted)
+        #[arg(long, requires = "text")]
+        agent: bool,
+        /// Print the responder prompt for the record and stop (nothing runs, nothing changes)
+        #[arg(long, conflicts_with_all = ["harness", "text", "agent"])]
+        prompt: bool,
     },
     /// Open the draft in $EDITOR
     Edit { id: String },
@@ -401,8 +407,25 @@ fn main() -> ExitCode {
         // `#N` from the `owl inbox` listing is accepted wherever a record id is.
         Cmd::Show { id, format } => cli::resolve_id(&home, &id)
             .and_then(|id| cli::show::run(&home, &id, cli.json, format.as_deref())),
-        Cmd::Draft { id, harness, text } => cli::resolve_id(&home, &id)
-            .and_then(|id| cli::draft::run(&home, &id, harness.as_deref(), text, cli.json)),
+        Cmd::Draft {
+            id,
+            harness,
+            text,
+            agent,
+            prompt,
+        } => cli::resolve_id(&home, &id).and_then(|id| {
+            cli::draft::run(
+                &home,
+                &id,
+                cli::draft::Opts {
+                    harness: harness.as_deref(),
+                    text,
+                    agent,
+                    prompt,
+                },
+                cli.json,
+            )
+        }),
         Cmd::Edit { id } => {
             cli::resolve_id(&home, &id).and_then(|id| cli::edit::run(&home, &id, cli.json))
         }

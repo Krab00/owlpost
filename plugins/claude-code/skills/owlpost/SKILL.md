@@ -164,8 +164,11 @@ Every step needs the human's go-ahead before moving to the next one.
    > decides, in this session, through the picker.
 3. A `pending` record is a question with no draft yet. `owl show <id>` prints the full
    question: who asked, project, path, text. Show it verbatim before offering anything.
-4. `owl draft <id>` runs the configured responder harness against this checkout and stores
-   a draft answer (`--harness <name>` picks another configured harness).
+4. The draft, in a session: `owl draft <id> --prompt` prints the responder prompt, the
+   `Agent` tool (`subagent_type: general-purpose`, `model: sonnet`, read-only tools) answers
+   it from this checkout, `owl draft <id> --agent --text <reply>` stores the answer redacted
+   (`harness: agent`). `owl draft <id>` alone runs a configured headless harness instead
+   (`--harness <name>` picks one) — what the daemon does in auto mode.
 5. Show the draft verbatim to the human, in a code block. Do not paraphrase, shorten or
    "improve" it silently. Say so when the draft's language differs from the question's.
 6. Only on explicit human approval:

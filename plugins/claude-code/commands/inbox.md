@@ -1,6 +1,6 @@
 ---
 description: Walk the owlpost inbox — list it, show each question verbatim, handle consent (allow/deny), take a typed command or the human's own answer for a question, and pick send/edit/reject with AskUserQuestion
-allowed-tools: Bash(owl inbox:*), Bash(owl show:*), Bash(owl allow:*), Bash(owl deny:*), Bash(owl draft:*), Bash(owl edit:*), Bash(owl send:*), Bash(owl reject:*)
+allowed-tools: Agent, Bash(owl inbox:*), Bash(owl show:*), Bash(owl allow:*), Bash(owl deny:*), Bash(owl draft:*), Bash(owl edit:*), Bash(owl send:*), Bash(owl reject:*)
 ---
 
 Walk the inbox record by record. The human never types an `owl` command: a `pending` question
@@ -81,11 +81,13 @@ peer name, project and path). No picker here: end the turn with this one line, i
 
 The reply is a command word or the human's own answer:
 
-- **draft** — run `owl draft <id>` (the configured responder harness against this
-  checkout), then continue with the record in step 4.
-- **draft & send** — run `owl draft <id>`, print the draft verbatim in a code block (as
+- **draft** — the draft steps of `commands/draft.md`: `owl draft <id> --prompt`, the
+  `Agent` tool (`subagent_type: general-purpose`, `model: sonnet`, read-only: Read, Grep,
+  Glob only, answer text only) on that prompt, then `owl draft <id> --agent --text …` with
+  the subagent's reply through a quoted heredoc. Then continue with the record in step 4.
+- **draft & send** — do the **draft** steps, print the draft verbatim in a code block (as
   step 4 does), then run `owl send <id>` at once, without a second picker. The typed command is the
-  human's explicit approval to send whatever the harness produced (typing draft reads it first). On a non-zero `owl draft` exit
+  human's explicit approval to send whatever the subagent produced (typing draft reads it first). On a non-zero `owl draft` exit
   show the error line and stop (nothing is sent); on a non-zero `owl send` exit show the
   error line, the record stays `drafted`.
 - **reject** — run `owl reject <id>`; the peer gets no answer.
