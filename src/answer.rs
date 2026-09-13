@@ -264,10 +264,7 @@ pub fn draft(
 ) -> anyhow::Result<(Record, runner::Draft)> {
     let payload = payload_of(id, &rec)?;
     let (project, path, question) = question_body(id, &payload)?;
-    let history = match payload.context_id.as_deref() {
-        Some(cid) => thread_history(&Spool::new(home)?, cid, id),
-        None => Vec::new(),
-    };
+    let history = thread_history_of(home, id, &payload)?;
     let extras = runner::Extras {
         context: question_context(&payload),
         history: &history,
@@ -280,13 +277,55 @@ pub fn draft(
     Ok((rec, d))
 }
 
+/// The responder prompt for a question record — what [`draft`] hands the harness — for a
+/// caller that answers it itself (`owl draft --prompt`, the plugin's Agent flow).
+pub fn prompt(config: &Config, home: &Path, id: &str, rec: &Record) -> anyhow::Result<String> {
+    let payload = payload_of(id, rec)?;
+    let (project, path, question) = question_body(id, &payload)?;
+    let history = thread_history_of(home, id, &payload)?;
+    let extras = runner::Extras {
+        context: question_context(&payload),
+        history: &history,
+    };
+    Ok(runner::build_prompt_with(
+        config, home, project, path, question, &extras,
+    ))
+}
+
+fn thread_history_of(
+    home: &Path,
+    id: &str,
+    payload: &Payload,
+) -> anyhow::Result<Vec<(String, String)>> {
+    Ok(match payload.context_id.as_deref() {
+        Some(cid) => thread_history(&Spool::new(home)?, cid, id),
+        None => Vec::new(),
+    })
+}
+
 /// Stores a human-written `text` as the draft (harness `human`, no redactions, status `ok`)
 /// without running a harness; the record becomes `drafted` like [`draft`] leaves it.
-pub fn draft_text(mut rec: Record, text: &str) -> Record {
+pub fn draft_text(rec: Record, text: &str) -> Record {
+    store_text(rec, text.to_string(), "human", 0)
+}
+
+/// Stores an in-session agent's answer as the draft: harness `agent`, redacted like a harness
+/// answer (`responder.redact`), status `ok`.
+pub fn draft_agent(config: &Config, rec: Record, text: &str) -> anyhow::Result<Record> {
+    let (text, n) = runner::redact(&config.responder.redact, text)?;
+    Ok(store_text(
+        rec,
+        text,
+        "agent",
+        u32::try_from(n).unwrap_or(u32::MAX),
+    ))
+}
+
+fn store_text(mut rec: Record, text: String, harness: &str, redactions: u32) -> Record {
     let stored = StoredDraft {
-        text: text.to_string(),
-        harness: "human".into(),
-        redactions: 0,
+        text,
+        harness: harness.into(),
+        redactions,
         status: "ok".into(),
         drafted_at: envelope::rfc3339_now(),
     };

@@ -1059,6 +1059,10 @@ fn commands_have_descriptions() {
             if entry == "Bash(git blame:*)" && (name == "ask" || name == "contacts") {
                 continue;
             }
+            // The draft subagent (draft, inbox and reply run the draft steps).
+            if entry == "Agent" && ["draft", "inbox", "reply"].contains(&name) {
+                continue;
+            }
             let x = entry
                 .strip_prefix("Bash(owl ")
                 .and_then(|r| r.strip_suffix(":*)"))
@@ -1403,11 +1407,12 @@ fn inbox_command_walks_states_with_pickers() {
     ] {
         assert!(body.contains(needle), "inbox.md body lacks {needle:?}");
     }
-    // AC2: exactly the eight owl patterns, nothing else, any order.
+    // AC2: exactly the eight owl patterns plus Agent (the draft subagent), nothing else.
     let tools = fm_value(&fm, "allowed-tools").expect("inbox.md allowed-tools");
     let mut have: Vec<&str> = tools.split(',').map(str::trim).collect();
     have.sort_unstable();
     let mut want = [
+        "Agent",
         "Bash(owl inbox:*)",
         "Bash(owl show:*)",
         "Bash(owl allow:*)",
@@ -1460,7 +1465,7 @@ fn inbox_command_walks_states_with_pickers() {
 /// The step-3 picker of `commands/inbox.md`, verbatim.
 const DRAFT_PICKS: &str = "`Type draft · draft & send · reject · skip — or write your own answer.`";
 /// What the "Draft & send" option description must say.
-const DRAFT_AND_SEND_DESC: &str = "human's explicit approval to send whatever the harness produced";
+const DRAFT_AND_SEND_DESC: &str = "human's explicit approval to send whatever the subagent produced";
 /// The amended ground rule, one line, stated in SKILL.md, inbox.md and draft.md.
 const NEVER_CHAIN: &str = "Never chain `owl draft` and `owl send` unless the human picked \"Draft & send\" (or passed `--send`); the draft is still printed in full before `owl send` runs.";
 /// The two absolute forms the rule replaced.
@@ -1501,7 +1506,7 @@ fn inbox_offers_draft_and_send_in_one_pick() {
         .join(" ");
     for needle in [
         DRAFT_AND_SEND_DESC,
-        "run `owl draft <id>`",
+        "do the **draft** steps",
         "print the draft verbatim in a code block",
         "then run `owl send <id>` at once, without a second picker",
         "non-zero `owl draft` exit",
@@ -1537,7 +1542,7 @@ fn inbox_offers_draft_and_send_in_one_pick() {
             .find(needle)
             .unwrap_or_else(|| panic!("no {needle:?}"))
     };
-    assert!(at("run `owl draft <id>`") < at("print the draft verbatim"));
+    assert!(at("do the **draft** steps") < at("print the draft verbatim"));
     assert!(at("print the draft verbatim") < at("then run `owl send <id>`"));
 }
 
@@ -1566,7 +1571,7 @@ fn draft_command_accepts_send_flag() {
     have.sort_unstable();
     assert_eq!(
         have,
-        ["Bash(owl draft:*)", "Bash(owl send:*)"],
+        ["Agent", "Bash(owl draft:*)", "Bash(owl send:*)"],
         "draft.md allowed-tools"
     );
 }

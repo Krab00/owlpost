@@ -1,14 +1,33 @@
 ---
-description: Run the responder harness against this checkout and store a draft answer
+description: Draft an answer to a question — the Agent tool answers read-only from this checkout (a configured headless harness with --harness) and the draft is stored on the record
 argument-hint: "<id> [--harness <name>] [--send]"
-allowed-tools: Bash(owl draft:*), Bash(owl send:*)
+allowed-tools: Agent, Bash(owl draft:*), Bash(owl send:*)
 ---
 
 Arguments: "$ARGUMENTS"
 
-Run `owl draft $ARGUMENTS` (`--harness <name>` picks another configured harness) and show
-its output. Then show the stored draft verbatim, in a code block; do not paraphrase,
-shorten or "improve" it. On a non-zero exit, show the error line and stop.
+Draft the answer to record `<id>`:
+
+1. Without `--harness`: run `owl draft <id> --prompt` — it prints the responder prompt for the
+   record and changes nothing. Call the `Agent` tool with `subagent_type: general-purpose`,
+   `model: sonnet` and that prompt followed by one line: "Use only Read, Grep and Glob; never
+   edit or write files, never run commands; reply with the answer text only." Store the
+   subagent's reply byte for byte, through a quoted heredoc so no shell character is
+   interpreted:
+
+   ```
+   owl draft <id> --agent --text "$(cat <<'OWL_ANSWER'
+   <the subagent's reply>
+   OWL_ANSWER
+   )"
+   ```
+
+   `--agent` stores it as `harness: agent`, redacted like a harness answer.
+   With `--harness <name>`: run `owl draft <id> --harness <name>` instead (a configured
+   headless harness against this checkout, what the daemon runs in auto mode) and show its
+   output.
+2. Show the stored draft verbatim, in a code block; do not paraphrase, shorten or "improve"
+   it. On a non-zero `owl draft` exit show the error line and stop.
 
 Offer `/owlpost:send <id>` to sign and send it, `/owlpost:edit <id>` to change it, or
 `/owlpost:reject <id>` to discard the record.
