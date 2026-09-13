@@ -18,7 +18,10 @@ you sent or an answer you received; the peer's agent sees the thread), `--contex
 attaches that file (a diff, an error, an excerpt; at most 8192 bytes) as the question's
 context so the peer's agent answers the question actually being asked.
 
-1. Resolve the peer with `owl contact show <peer>`.
+1. Resolve the peer with `owl contact show <peer>`. The peer may be an `@owl:to://` mention
+   the user picked from the `@` typeahead, which arrives here as plain text: hand it to
+   `owl contact show` and `owl ask` verbatim, as one shell-quoted word (the `@` and the `:`
+   are part of the argument), never rewritten into a name, e-mail or fingerprint.
 2. Do not ask for confirmation: the command is the approval. Run at once. With a path, run
    `owl ask --file <path> --peer <peer> "<question>"`; without one, run
    `owl ask <peer> "<question>"`; append `--reply-to <id>` and `--context <path>` when given.

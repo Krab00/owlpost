@@ -2308,3 +2308,47 @@ fn identity_rule_sits_in_the_skill_consent_step() {
     );
     assert!(rule < pending, "the rule block must precede the next step");
 }
+
+/// OWL-037 AC5: `commands/ask.md` says the peer may arrive as an `@owl:to://` mention and is
+/// passed on untouched (each literal on one line), and the skill's "Mentioned contact"
+/// section carries the text-mention rule inside its own paragraph — after the attached-resource
+/// sentence, before the bullet list that follows it.
+#[test]
+fn the_mention_is_a_peer_in_the_command_and_the_skill() {
+    let (_, ask) = frontmatter("commands/ask.md");
+    for needle in [
+        "The peer may be an `@owl:to://` mention",
+        "verbatim, as one shell-quoted word",
+        "never rewritten into a name, e-mail or fingerprint",
+    ] {
+        assert!(
+            ask.lines().any(|l| l.contains(needle)),
+            "ask.md lacks {needle:?} on one line"
+        );
+    }
+
+    let (_, skill) = frontmatter("skills/owlpost/SKILL.md");
+    let mentioned = section(&skill, "## Mentioned contact");
+    let at = |needle: &str| {
+        mentioned
+            .find(needle)
+            .unwrap_or_else(|| panic!("Mentioned contact lacks {needle:?}"))
+    };
+    let attached = at("An attached `@owl:to://…` resource");
+    let as_text = at("the text itself is the peer");
+    let bullets = at("\n- The rest of the prompt is");
+    assert!(
+        attached < as_text,
+        "the text-mention rule must follow the attached-resource sentence"
+    );
+    assert!(
+        as_text < bullets,
+        "the text-mention rule must sit before the bullet list"
+    );
+    assert!(
+        mentioned
+            .lines()
+            .any(|l| l.contains("the text itself is the peer")),
+        "the rule must be on one line"
+    );
+}

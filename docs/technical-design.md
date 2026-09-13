@@ -164,8 +164,11 @@ book for every repository:
   (respond `unavailable`). Absent policy = consent required on first question.
 - Local contacts may be set to `auto`; global contacts may be set to `auto` only with
   `owl allow <peer> --always --i-verified-the-fingerprint`.
-- `ContactBook::resolve(query)` matches, in order: exact fingerprint, exact email, unique
-  case-insensitive name prefix. Ambiguity is an error listing candidates.
+- `ContactBook::resolve(query)` matches, in order: exact fingerprint, exact email, the exact
+  `owl mcp` resource URI of the contact (`@owl:to://…` with the mention prefix or bare
+  `to://…`, §9 — a URI is exact by construction, so there is no prefix fallback; a miss falls
+  through to the name arm), unique case-insensitive name prefix. Ambiguity is an error listing
+  candidates.
 - `owl contact export` prints this machine's own peer file (from config + key) so the person
   can commit it or send it. `owl contact list [--global|--local]` shows the merged book (or one
   scope) with `SOURCE` = `global` / `local` and policy; both flags together is a usage error.
@@ -358,6 +361,10 @@ Global flags: `--home <dir>` (overrides `$OWLPOST_HOME`), `--json` (machine outp
 `-q/--quiet`. Exit codes: `0` ok, `1` user/data error (message on stderr), `2` peer offline or
 unavailable, `3` rate limited, `4` nothing to do (e.g. `watch` timeout).
 
+A `<peer>` argument in any row below takes four forms, resolved in this order (§5): exact
+fingerprint, exact e-mail, the contact's `owl mcp` resource URI (`@owl:to://…` / `to://…`),
+unique case-insensitive name prefix.
+
 | Command | Behaviour |
 |---|---|
 | `owl init [--name] [--email …]` | create home, key, config; print fingerprint |
@@ -381,7 +388,7 @@ unavailable, `3` rate limited, `4` nothing to do (e.g. `watch` timeout).
 | `owl watch [--id <id>] [--timeout <secs>]` | block until a matching inbox record arrives; exit 4 on timeout |
 | `owl daemon [--foreground]` | run the listener + loops |
 | `owl install \| uninstall` | launchd plist (`~/Library/LaunchAgents/dev.owlpost.owl.plist`) or systemd user unit; start/stop |
-| `owl mcp` | MCP server over stdio (JSON-RPC 2.0, one object per line): the merged contact book as resources only (no tools, no prompts), one per contact, URI `to://<name-slug>.<first e-mail>` (`to://<name-slug>` without e-mail, `.<fingerprint without owl:>` appended on a collision), `resources/read` → `{"name","fingerprint","emails"}`; the book is re-read per request; registered in Claude Code at user scope by `owl setup` / `owl update` (`claude mcp add --scope user owl -- owl mcp`, skipped with `mcp server owl already registered` when `claude mcp get owl` succeeds) for `@owl:to://…` mentions, checked by `owl doctor` |
+| `owl mcp` | MCP server over stdio (JSON-RPC 2.0, one object per line): the merged contact book as resources only (no tools, no prompts), one per contact, URI `to://<name-slug>.<first e-mail>` (`to://<name-slug>` without e-mail, `.<fingerprint without owl:>` appended on a collision), `resources/read` → `{"name","fingerprint","emails"}`; the book is re-read per request; registered in Claude Code at user scope by `owl setup` / `owl update` (`claude mcp add --scope user owl -- owl mcp`, skipped with `mcp server owl already registered` when `claude mcp get owl` succeeds) for `@owl:to://…` mentions, checked by `owl doctor`; the same URI is accepted wherever a `<peer>` argument is (`owl ask`, `owl allow`, `owl deny`, `owl card`, `owl contact show`, `owl contact remove`), matched exactly — so the mention a slash command passes as plain text needs no lookup |
 | `owl doctor` | check key, config, endpoints resolve (`ok endpoints: none configured (peers reach this daemon over iroh)` when empty), harness binaries present, daemon reachable, iroh (`ok iroh: <id short>, relay <url>` when the card reports a connected relay, `warn iroh: bound, no relay` when it does not, `warn iroh: unknown (daemon unreachable)` without a card), mcp (`ok mcp: owl registered in Claude Code (user scope)` when `claude mcp get owl` exits 0, `warn mcp: claude not on PATH`, else `warn` ending with the fix `claude mcp add --scope user owl -- owl mcp`; never `fail`); binary (OWL-029: `ok binary: <path>` when the first `owl` on `PATH`, canonicalised, is the running file and the daemon unit — when installed — names it; otherwise one `warn` per mismatch, `warn binary: PATH resolves <p>, this owl is <q>` / `warn binary: no owl on PATH, this owl is <q>` and `warn binary: daemon unit runs <r>`; never `fail`) |
 
 Hook injection formats for `owl inbox --count --format …` (exact):
