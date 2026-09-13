@@ -615,7 +615,7 @@ fn format_claude_docs_pin_the_cli_renders_the_model_pastes() {
     assert!(cli.contains("markers.json"));
     assert!(cli.contains("`$OWLPOST_HOME/markers.json`"));
     for needle in [
-        "`| 🦉 **<peer name>** · HH:MM · <project or -> · <path or whole repository> |`",
+        "`| 🦉 #N **<peer name>** · HH:MM · <project or -> · <path or whole repository> |`",
         "row 2 is exactly `|---|`",
         "verbatim except `|` escaped as `\\|`, an empty line rendered as `|  |`",
         "`| ↩ follow-up in thread <short id> |` as its first body row",
@@ -1006,9 +1006,9 @@ fn skill_and_commands_carry_the_no_commentary_rule() {
     }
     // The table's own shape, each literal on one line.
     for needle in [
-        "| 🦉 **Krzysztof Abramczyk** · 09:08 · github.com/Krab00/owlpost · whole repository |",
+        "| 🦉 #3 **Krzysztof Abramczyk** · 09:08 · github.com/Krab00/owlpost · whole repository |",
         "|---|",
-        "Header row: `| 🦉 **<peer>** · HH:MM · <project> · <path or \"whole repository\"> |`",
+        "Header row: `| 🦉 #N **<peer>** · HH:MM · <project> · <path or \"whole repository\"> |`",
         "an empty line is the row `|  |`",
         "`↩ follow-up in thread <short id>` as its first body row",
         "the row `| **context:** |` plus one row per snippet line",

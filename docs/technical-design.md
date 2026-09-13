@@ -95,7 +95,7 @@ of `owl inbox --format claude`).
     "timeout_secs": 180
   },
   "harnesses": {
-    "claude":   { "cmd": ["claude", "-p", "--allowed-tools", "Read,Grep,Glob", "--output-format", "json", "{prompt}"], "answer_path": "result" },
+    "claude":   { "cmd": ["claude", "-p", "--allowed-tools", "Read,Grep,Glob", "--output-format", "json", "{prompt}"], "answer_path": "result", "model": "sonnet" },
     "codex":    { "cmd": ["codex", "exec", "--sandbox", "read-only", "--ephemeral", "--json", "{prompt}"], "answer_path": "last_message" },
     "opencode": { "cmd": ["opencode", "run", "--format", "json", "--agent", "owl-readonly", "{prompt}"], "answer_path": "last_text" },
     "kimi":     { "cmd": ["kimi", "-p", "{prompt}", "--output-format", "stream-json"], "answer_path": "last_text", "enabled": false,
@@ -110,6 +110,8 @@ of `owl inbox --format claude`).
 
 - `{prompt}` is replaced by the full responder prompt as one argument. `{prompt_file}` is also
   supported for harnesses that prefer reading from a file.
+- `model` (optional, per harness) is appended to `cmd` as `--model <model>`, so the responder
+  runs on a cheaper model than the harness's default; absent = the harness's own default.
 - `answer_path` selects how the answer is extracted from the harness output: `raw` (whole
   stdout), `result` (JSON field on the last JSON object), `last_message` / `last_text` (last
   assistant text in a JSONL stream). Extraction failures store the raw output and mark the draft
@@ -460,8 +462,9 @@ describes a layout the model would have to reproduce.
 - `owl show <id> --format claude` on a question record (any state) and on an answer record
   prints the message table — one column, because a table is the only Markdown Claude Code
   highlights as a box (OWL-035). Row 1 is the header
-  `| 🦉 **<peer name>** · HH:MM · <project or -> · <path or whole repository> |`, on a
-  `consent` record `| 🦉 **<peer name>** (<fingerprint>) · HH:MM · … |` (the fingerprint
+  `| 🦉 #N **<peer name>** · HH:MM · <project or -> · <path or whole repository> |` (`#N` is
+  the record's `owl inbox` row number, absent once the record has left the inbox), on a
+  `consent` record `| 🦉 #N **<peer name>** (<fingerprint>) · HH:MM · … |` (the fingerprint
   carries its `owl:` prefix); row 2 is exactly `|---|`; then one row per line of the message
   text, `| <line> |`, verbatim except `|` escaped as `\|`, an empty line rendered as `|  |`
   and a trailing `\r` (a CRLF text) dropped — leading and inner whitespace is kept, trailing
