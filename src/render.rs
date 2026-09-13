@@ -84,21 +84,35 @@ pub fn message_table(
     rows.join("\n")
 }
 
-/// `🦉 **<name>** · HH:MM · <project or "-"> · <path or "whole repository">`; with a
+/// `🦉 #N **<name>** · HH:MM · <project or "-"> · <path or "whole repository">`; `#N` is the
+/// record's `owl inbox` row number (absent for a record no longer in the inbox); with a
 /// fingerprint (a `consent` record) ` (<fingerprint>)` follows the bold name.
 pub fn header(
+    n: Option<usize>,
     peer_name: &str,
     fingerprint: Option<&str>,
     hh_mm: &str,
     project: &str,
     path: Option<&str>,
 ) -> String {
+    let n = n.map_or(String::new(), |n| format!("#{n} "));
     let fp = fingerprint.map_or(String::new(), |f| format!(" ({f})"));
     let project = if project.is_empty() { "-" } else { project };
     format!(
-        "🦉 **{peer_name}**{fp} · {hh_mm} · {project} · {}",
+        "🦉 {n}**{peer_name}**{fp} · {hh_mm} · {project} · {}",
         path.unwrap_or("whole repository")
     )
+}
+
+/// The `#N` of an inbox record: its 1-based position in the id-sorted inbox, the same number
+/// `owl inbox` prints; `None` when the record is not in the inbox.
+pub fn inbox_n(spool: &Spool, id: &str) -> Option<usize> {
+    spool
+        .list(Dir::Inbox, |_| true)
+        .ok()?
+        .iter()
+        .position(|(x, _)| x == id)
+        .map(|p| p + 1)
 }
 
 /// Local wall-clock `HH:MM` of an RFC 3339 timestamp; `--:--` when it does not parse.
@@ -339,6 +353,7 @@ pub fn record_block(
     let name = peer_name(book, &payload.from);
     let hh_mm = local_hh_mm(&rec.received_at);
     let fingerprint = (rec.state == "consent").then_some(payload.from.as_str());
+    let n = inbox_n(spool, &payload.id);
     match &payload.body {
         Body::Question {
             project,
@@ -346,7 +361,7 @@ pub fn record_block(
             question,
             context,
         } => {
-            let head = header(&name, fingerprint, &hh_mm, project, path.as_deref());
+            let head = header(n, &name, fingerprint, &hh_mm, project, path.as_deref());
             // The follow-up line only when this thread has an earlier exchange of ours in
             // `done/` (never trusting the payload's word for it).
             let thread = payload
@@ -375,7 +390,7 @@ pub fn record_block(
                 _ => ("-", None),
             };
             message_table(
-                &header(&name, fingerprint, &hh_mm, project, path),
+                &header(n, &name, fingerprint, &hh_mm, project, path),
                 answer,
                 None,
                 None,
@@ -412,19 +427,22 @@ mod tests {
     /// fence anywhere.
     #[test]
     fn message_table_is_header_rule_and_one_row_per_line() {
-        let h = header("Ana", None, "09:08", "github.com/x/y", None);
-        assert_eq!(h, "🦉 **Ana** · 09:08 · github.com/x/y · whole repository");
+        let h = header(Some(3), "Ana", None, "09:08", "github.com/x/y", None);
+        assert_eq!(
+            h,
+            "🦉 #3 **Ana** · 09:08 · github.com/x/y · whole repository"
+        );
         assert_eq!(
             message_table(&h, "Jaki masz ostatni commit?", None, None),
             format!("| {h} |\n|---|\n| Jaki masz ostatni commit? |")
         );
         assert_eq!(TABLE_RULE, "|---|");
         assert_eq!(
-            header("Ana", Some("owl:abc"), "09:08", "p", Some("src/a.rs")),
+            header(None, "Ana", Some("owl:abc"), "09:08", "p", Some("src/a.rs")),
             "🦉 **Ana** (owl:abc) · 09:08 · p · src/a.rs"
         );
         assert_eq!(
-            header("Ana", None, "09:08", "", None),
+            header(None, "Ana", None, "09:08", "", None),
             "🦉 **Ana** · 09:08 · - · whole repository"
         );
         let t = message_table(&h, "a\n\nb", None, None);

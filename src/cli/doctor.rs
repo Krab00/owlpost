@@ -706,6 +706,7 @@ mod tests {
                 enabled: true,
                 disabled_reason: None,
                 env: Default::default(),
+                model: None,
             },
         );
         let checks = harness_checks(&cfg, Some(&path_var), &user_home);

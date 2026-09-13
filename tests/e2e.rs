@@ -211,6 +211,7 @@ fn fake_harness() -> Harness {
         enabled: true,
         disabled_reason: None,
         env: Default::default(),
+        model: None,
     }
 }
 
