@@ -797,6 +797,52 @@ fn draft_text_stores_the_humans_answer() {
     assert_eq!(h.outbox().len(), 1);
 }
 
+/// `--prompt` prints the responder prompt and changes nothing; `--agent --text` stores the
+/// in-session agent's answer under harness `agent`, redacted like a harness answer.
+#[test]
+fn draft_prompt_and_agent_text() {
+    let h = Home::new();
+    let qid = h.put(&h.maciek, "Where is the retry policy defined?", "pending");
+    let out = h.ok(&["draft", &qid, "--prompt"]);
+    for needle in [
+        "Where is the retry policy defined?",
+        &format!("Project: {PROJECT}"),
+        &format!("File: {PATH}"),
+    ] {
+        assert!(out.contains(needle), "{out}");
+    }
+    assert_eq!(h.inbox(&qid).unwrap().state, "pending", "nothing changes");
+    let v = h.json(&["draft", &qid, "--prompt", "--json"]);
+    assert_eq!(v["id"], qid);
+    assert!(v["prompt"].as_str().unwrap().contains("Project:"));
+    let out = h.ok(&[
+        "draft",
+        &qid,
+        "--agent",
+        "--text",
+        "api_key = sk-test-123456 lives in src/retry.rs",
+    ]);
+    assert!(
+        out.starts_with("[redacted] lives in src/retry.rs\nharness: agent\nredactions: 1\n"),
+        "{out}"
+    );
+    let rec = h.inbox(&qid).unwrap();
+    assert_eq!(rec.state, "drafted");
+    let d = rec.draft.as_ref().unwrap();
+    assert_eq!(
+        (&d["harness"], &d["redactions"]),
+        (&json!("agent"), &json!(1))
+    );
+    // `--agent` needs `--text`; `--prompt` excludes both.
+    let (code, _, err) = h.run(&["draft", &qid, "--agent"]);
+    assert!(code == 2 && err.contains("required"), "{code} {err}");
+    let (code, _, err) = h.run(&["draft", &qid, "--prompt", "--text", "x"]);
+    assert!(
+        code == 2 && err.contains("cannot be used with"),
+        "{code} {err}"
+    );
+}
+
 /// `#N` (or `N`) from the listing is accepted wherever a record id is; the number is the
 /// row's position in the full inbox, oldest first, and `--new` keeps the same numbers.
 #[test]
