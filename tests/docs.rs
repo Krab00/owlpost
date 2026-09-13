@@ -1121,3 +1121,54 @@ fn render_rs_has_no_frame_left() {
         assert!(render.contains(needle), "src/render.rs lacks {needle:?}");
     }
 }
+
+/// OWL-037 AC6: the §9 `owl mcp` row states that the resource URI is accepted wherever a
+/// `<peer>` argument is, the §9 preamble and the §5 `resolve` line name the four forms in
+/// order, and `owl ask --help` lists them on the `--peer` line.
+#[test]
+fn design_doc_and_ask_help_name_the_uri_as_a_peer_form() {
+    let design = repo_file("docs/technical-design.md");
+    let row = design
+        .lines()
+        .find(|l| l.starts_with("| `owl mcp` |"))
+        .expect("§9 owl mcp row");
+    for needle in [
+        "the same URI is accepted wherever a `<peer>` argument is",
+        "`owl ask`, `owl allow`, `owl deny`, `owl card`, `owl contact show`, `owl contact remove`",
+        "matched exactly",
+    ] {
+        assert!(
+            row.contains(needle),
+            "the §9 `owl mcp` row lacks {needle:?}"
+        );
+    }
+    // The §9 preamble's `<peer>` definition and the §5 resolve order, each on one line.
+    for needle in [
+        "A `<peer>` argument in any row below takes four forms, resolved in this order (§5): exact",
+        "the contact's `owl mcp` resource URI (`@owl:to://…` / `to://…`),",
+        "`owl mcp` resource URI of the contact (`@owl:to://…` with the mention prefix or bare",
+        "through to the name arm), unique case-insensitive name prefix. Ambiguity is an error listing",
+    ] {
+        assert!(
+            design.lines().any(|l| l.contains(needle)),
+            "technical-design.md lacks {needle:?} on one line"
+        );
+    }
+
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_owl"))
+        .args(["ask", "--help"])
+        .output()
+        .expect("owl ask --help");
+    assert!(out.status.success());
+    let help = String::from_utf8_lossy(&out.stdout);
+    let peer = help
+        .lines()
+        .find(|l| l.trim_start().starts_with("--peer "))
+        .expect("`--peer` line in `owl ask --help`");
+    assert!(
+        peer.contains(
+            "Peer to ask (fingerprint, e-mail, name prefix, or an `@owl:to://…` / `to://…` resource"
+        ),
+        "the --peer help must list the four forms: {peer}"
+    );
+}
