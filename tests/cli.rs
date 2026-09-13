@@ -10,7 +10,7 @@ fn owl() -> Command {
 fn version() {
     let out = owl().arg("--version").output().unwrap();
     assert!(out.status.success());
-    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "owl 0.1.0");
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "owl 0.2.0");
 }
 
 #[test]
