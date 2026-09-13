@@ -296,6 +296,7 @@ mod tests {
                     enabled: true,
                     disabled_reason: None,
                     env: Default::default(),
+                    model: None,
                 },
             );
             config.responder.harness = "fake".into();

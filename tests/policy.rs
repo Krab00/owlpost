@@ -179,6 +179,7 @@ fn responder_config(cfg: &mut Config, checkout: &Path) {
             enabled: true,
             disabled_reason: None,
             env: Default::default(),
+            model: None,
         },
     );
     cfg.responder.harness = "fake".into();

@@ -74,6 +74,7 @@ async fn daemon_notifies_auto_answered() {
                     enabled: true,
                     disabled_reason: None,
                     env: Default::default(),
+                    model: None,
                 },
             );
             cfg.responder.harness = "fake".into();

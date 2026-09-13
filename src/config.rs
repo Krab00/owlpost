@@ -57,6 +57,10 @@ pub struct Harness {
     pub disabled_reason: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
+    /// Appended to `cmd` as `--model <model>` when set, so the responder need not run on the
+    /// harness's default (most expensive) model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 fn yes() -> bool {
@@ -96,6 +100,7 @@ fn harness(cmd: &[&str], answer_path: &str) -> Harness {
         enabled: true,
         disabled_reason: None,
         env: BTreeMap::new(),
+        model: None,
     }
 }
 
@@ -237,6 +242,10 @@ mod tests {
         assert!(!cfg.harnesses["kimi"].enabled);
         assert!(cfg.harnesses["kimi"].disabled_reason.is_some());
         assert!(cfg.harnesses["claude"].enabled);
+        assert_eq!(
+            cfg.harnesses["claude"].model, None,
+            "no model flag by default"
+        );
         assert_eq!(cfg.outbox_ttl_days, 14);
         assert!(cfg.notify);
         assert_eq!(cfg.responder.harness, "claude");

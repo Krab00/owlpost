@@ -123,6 +123,7 @@ async fn spawn_responder_with(
                 enabled: true,
                 disabled_reason: None,
                 env: Default::default(),
+                model: None,
             },
         );
         cfg.projects.insert(PROJECT.into(), checkout);
