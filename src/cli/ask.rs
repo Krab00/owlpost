@@ -234,15 +234,18 @@ pub fn run(home: &Path, args: AskArgs, json: bool, quiet: bool) -> anyhow::Resul
             )?;
             let mut done_meta = meta.clone();
             done_meta["answer"] = json!(answer.id);
-            spool.put(
-                Dir::Done,
-                &payload.id,
-                &record(&envelope, "answered", done_meta),
-            )?;
+            let mut asked = record(&envelope, "answered", done_meta);
+            // Record birth (OWL-038): asked and answered in the same call.
+            owlpost::events::push(&mut asked, "asked", Some("human"), None);
+            owlpost::events::push(&mut asked, "answer-received", None, None);
+            spool.put(Dir::Done, &payload.id, &asked)?;
             print_answer(&answer, json)
         }
         SendOutcome::Accepted { id, state } => {
-            spool.put(Dir::Asks, &id, &record(&envelope, "waiting", meta))?;
+            let mut asked = record(&envelope, "waiting", meta);
+            // Record birth (OWL-038).
+            owlpost::events::push(&mut asked, "asked", Some("human"), None);
+            spool.put(Dir::Asks, &id, &asked)?;
             let text = state.as_deref().and_then(envelope::state_text);
             let accepted = match text {
                 Some(t) => format!("accepted {id} — {t}"),
@@ -394,6 +397,7 @@ fn wait_for_answer(
         }
         // A peer without the route (404) or unreachable this tick: nothing to report.
         if let Ok(Some(task)) = client::fetch_task(identity, contact, iroh, &ask.id) {
+            pull::note_task_state(spool, &ask.id, &task);
             if task.rejected() {
                 pull::close_declined(spool, &ask.id)?;
                 return Err(ExitError::error(

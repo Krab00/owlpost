@@ -6,6 +6,7 @@
 use std::path::Path;
 
 use owlpost::contacts::{Mode, Policy, Scope};
+use owlpost::events::Ev;
 use owlpost::spool::{Dir, Spool};
 use serde_json::json;
 
@@ -24,6 +25,7 @@ pub fn deny_held(spool: &Spool, fingerprint: &str) -> anyhow::Result<Vec<String>
             rec,
             "denied",
             &[("previous_state", json!("consent"))],
+            Ev::by("denied", "human"),
         )?;
         denied.push(id);
     }

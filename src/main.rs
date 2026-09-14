@@ -128,6 +128,14 @@ enum Cmd {
     Reject { id: String },
     /// Route an inbox record to one live Claude Code session (what the daemon does on arrival)
     Route { id: String },
+    /// The whole conversation with one person (no peer: one row per person)
+    Thread {
+        peer: Option<String>,
+        #[arg(long)]
+        since: Option<String>,
+        #[arg(long)]
+        context: Option<String>,
+    },
     /// Finished exchanges
     History {
         #[arg(long)]
@@ -438,6 +446,16 @@ fn main() -> ExitCode {
         Cmd::Route { id } => {
             cli::resolve_id(&home, &id).and_then(|id| cli::route::run(&home, &id, cli.json))
         }
+        Cmd::Thread {
+            peer,
+            since,
+            context,
+        } => cli::thread::run(
+            &home,
+            peer.as_deref(),
+            cli::thread::Filters { since, context },
+            cli.json,
+        ),
         Cmd::History { peer, path, since } => {
             cli::history::run(&home, cli::history::Filters { peer, path, since }, cli.json)
         }

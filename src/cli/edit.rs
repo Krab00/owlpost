@@ -64,6 +64,7 @@ pub fn run(home: &Path, id: &str, json: bool) -> anyhow::Result<()> {
         m.insert("edited_at".into(), json!(envelope::rfc3339_now()));
     }
     rec.draft = Some(v);
+    owlpost::events::push(&mut rec, "edited", Some("human"), None);
     spool.put(Dir::Inbox, id, &rec)?;
     // Being handled: no session needs to wake for it (OWL-033).
     route::release(home, id);

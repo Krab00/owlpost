@@ -20,6 +20,7 @@ pub mod send;
 pub mod setup;
 pub mod show;
 pub mod status;
+pub mod thread;
 pub mod update;
 pub mod watch;
 
@@ -146,6 +147,8 @@ pub fn summary(id: &str, rec: &Record, payload: &Payload, book: &ContactBook, no
         "age": format_age(age),
         "has_draft": rec.draft.as_ref().is_some_and(|d| !d.is_null()),
         "summary": first_line(match &payload.body { Body::Question { question, .. } => question, Body::Answer { answer, .. } => answer }, SUMMARY_CHARS),
+        // OWL-038: the payload's thread id, `null` when the record is not threaded.
+        "context_id": payload.context_id,
     })
 }
 

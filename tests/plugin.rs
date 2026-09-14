@@ -1465,7 +1465,8 @@ fn inbox_command_walks_states_with_pickers() {
 /// The step-3 picker of `commands/inbox.md`, verbatim.
 const DRAFT_PICKS: &str = "`Type draft · draft & send · reject · skip — or write your own answer.`";
 /// What the "Draft & send" option description must say.
-const DRAFT_AND_SEND_DESC: &str = "human's explicit approval to send whatever the subagent produced";
+const DRAFT_AND_SEND_DESC: &str =
+    "human's explicit approval to send whatever the subagent produced";
 /// The amended ground rule, one line, stated in SKILL.md, inbox.md and draft.md.
 const NEVER_CHAIN: &str = "Never chain `owl draft` and `owl send` unless the human picked \"Draft & send\" (or passed `--send`); the draft is still printed in full before `owl send` runs.";
 /// The two absolute forms the rule replaced.

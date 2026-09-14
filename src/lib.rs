@@ -7,6 +7,7 @@ pub mod config;
 pub mod contacts;
 pub mod daemon;
 pub mod envelope;
+pub mod events;
 pub mod identity;
 pub mod iroh;
 pub mod notify;
