@@ -81,7 +81,7 @@ fn put(home: &Path, from: &Identity, to: &Identity, text: &str, state: &str) -> 
             question,
             ..
         } => envelope::question_hash(project, path.as_deref(), question),
-        Body::Answer { .. } => unreachable!(),
+        _ => unreachable!("the fixture signs a question"),
     };
     Spool::new(home)
         .unwrap()
@@ -155,7 +155,7 @@ fn answer_text(p: &Payload) -> (String, String, u32) {
             redactions,
             ..
         } => (answer.clone(), harness.clone(), *redactions),
-        Body::Question { .. } => panic!("expected an answer"),
+        _ => panic!("expected an answer"),
     }
 }
 

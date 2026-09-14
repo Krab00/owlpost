@@ -557,12 +557,17 @@ fn validate_request(value: &Value, caller: &str, me: &str, config: &Config) -> A
         if question.trim().is_empty() {
             return Err(ApiError::bad_request("body.question is empty"));
         }
-        // OWL-034: the asker's snippet is bounded in bytes after trimming; a non-string is a
-        // schema error below.
-        if let Some(Value::String(c)) = body.get("context")
-            && envelope::check_context(c).is_err()
-        {
-            return Err(ApiError::bad_request("context too long"));
+        // OWL-034: the asker's snippet is bounded in bytes after trimming. A non-string
+        // `context` is named here rather than left to the typed parse: `Body::Content` has
+        // only optional fields, so an untagged parse would now fit such a body into it and
+        // the question would be refused for the wrong reason.
+        match body.get("context") {
+            None | Some(Value::Null) => {}
+            Some(Value::String(c)) if envelope::check_context(c).is_ok() => {}
+            Some(Value::String(_)) => return Err(ApiError::bad_request("context too long")),
+            Some(_) => {
+                return Err(ApiError::bad_request("bad schema: body.context is not a string"));
+            }
         }
     }
     let payload: Payload = serde_json::from_value(value.clone())
@@ -1192,14 +1197,14 @@ mod tests {
     }
 
     fn err_of(v: Value) -> String {
-        validate_question(&v, "owl:aaaa", "owl:bbbb")
+        validate_request(&v, "owl:aaaa", "owl:bbbb", &Config::default())
             .unwrap_err()
             .error
     }
 
     #[test]
-    fn validate_question_names_every_problem() {
-        assert!(validate_question(&valid(), "owl:aaaa", "owl:bbbb").is_ok());
+    fn validate_request_names_every_problem() {
+        assert!(validate_request(&valid(), "owl:aaaa", "owl:bbbb", &Config::default()).is_ok());
         assert_eq!(err_of(json!([1])), "payload must be a JSON object");
         assert_eq!(err_of(json!("x")), "payload must be a JSON object");
         let mut v = valid();
@@ -1241,7 +1246,7 @@ mod tests {
         // OWL-018: a repo-level question has no path; a non-string path is still a bad schema.
         let mut v = valid();
         v["body"].as_object_mut().unwrap().remove("path");
-        let p = validate_question(&v, "owl:aaaa", "owl:bbbb").unwrap();
+        let p = validate_request(&v, "owl:aaaa", "owl:bbbb", &Config::default()).unwrap();
         assert!(matches!(
             p.body,
             envelope::Body::Question { path: None, .. }

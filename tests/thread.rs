@@ -587,7 +587,9 @@ fn unknown_event_kind_passes_through_and_renders() {
             .state("pending")
             .events(json!([
                 ev("2026-09-14T10:00:00Z", "received"),
-                { "ts": "2026-09-14T10:01:00Z", "kind": "content-requested", "by": "peer",
+                // OWL-039 gave `content-requested` a meaning; this fixture needs a kind no
+                // version of the renderer knows.
+                { "ts": "2026-09-14T10:01:00Z", "kind": "parcel-requested", "by": "peer",
                   "detail": { "files": 2 } },
                 ev("2026-09-14T10:02:00Z", "held"),
             ])),
@@ -599,14 +601,14 @@ fn unknown_event_kind_passes_through_and_renders() {
         .iter()
         .map(|r| r["kind"].as_str().unwrap())
         .collect();
-    assert_eq!(kinds, ["received", "content-requested", "held"]);
+    assert_eq!(kinds, ["received", "parcel-requested", "held"]);
     assert_eq!(rows[1]["detail"]["files"], 2);
     assert_eq!(rows[1]["by"], "peer");
 
     let text = h.ok(&["thread", "Ania"]);
     assert!(
         text.lines()
-            .any(|l| l.contains("content-requested") && l.contains("by peer")),
+            .any(|l| l.contains("parcel-requested") && l.contains("by peer")),
         "the unknown kind prints by name: {text}"
     );
     assert!(
