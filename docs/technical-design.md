@@ -92,7 +92,8 @@ of `owl inbox --format claude`).
       "(?i)(api[_-]?key|secret|token|password)\\s*[:=]\\s*\\S+",
       "-----BEGIN [A-Z ]*PRIVATE KEY-----[\\s\\S]*?-----END [A-Z ]*PRIVATE KEY-----"
     ],
-    "timeout_secs": 180
+    "timeout_secs": 180,
+    "memory_root": "/Users/krzysiek/notes/owlpost"
   },
   "harnesses": {
     "claude":   { "cmd": ["claude", "-p", "--allowed-tools", "Read,Grep,Glob", "--output-format", "json", "{prompt}"], "answer_path": "result", "model": "sonnet" },
@@ -116,6 +117,12 @@ of `owl inbox --format claude`).
   stdout), `result` (JSON field on the last JSON object), `last_message` / `last_text` (last
   assistant text in a JSONL stream). Extraction failures store the raw output and mark the draft
   `extract_failed` rather than sending nothing.
+- `responder.memory_root` (optional, OWL-039) is the root of the memory store a peer may ask
+  one entry of with `owl request <peer> --memory <key>`. Absent by default (`owl init` writes
+  nothing for it) and canonicalised on load, so `owl draft` compares two resolved paths and
+  refuses a key that leaves the store through a symlink. `scope.private_memory` must be `true`
+  as well: `memory_root` says *where*, `private_memory` says *whether*. With either missing
+  every `memory` request is refused `400 memory store not configured`.
 - `projects` maps the `project` identifier used in questions (the normalised git remote, or a
   plain name) to a local checkout. A question for an unknown project is stored but `draft`
   refuses with `unknown project`.
@@ -241,6 +248,29 @@ the hash function is unchanged for the rest.
 
 Answer body: `{ "answer": "…", "harness": "claude", "redactions": 0, "cached": false }`.
 
+Two more `type` values carry a **content request** and its reply (OWL-039). They are `Kind`
+variants, not a discriminator inside the body: `Body` is `#[serde(untagged)]`, so a field
+inside the body could silently select the wrong variant, while a new kind turns every `match`
+into a compile error someone has to answer.
+
+| `type` | body |
+|---|---|
+| `content` | `{ "project": "github.com/company/monorepo", "ref": "main", "path": "src/auth/session.rs" }` or `{ "memory": "decisions/2026-08-refresh-token.md" }` |
+| `content-reply` | `{ "content": "…", "sha256": "<hex>", "ref_resolved": "<40 hex>", "truncated": false, "redactions": 0, "harness": "human" }` |
+
+- Exactly one of `path` (with `project`) and `memory` is present; both or neither is a `400`.
+  `ref` defaults to the owner's current branch and is reported back resolved to a commit in
+  `ref_resolved` (absent for a `memory` request).
+- `MAX_CONTENT_BYTES = 262144` (256 KiB) bounds the content after redaction. Beyond it the
+  content is cut at the last complete UTF-8 character and `truncated: true` goes out, while
+  `sha256` stays the digest of the **whole** redacted content, so the asker can tell it holds
+  a prefix. A file that is not valid UTF-8, or that carries a `NUL` byte, is never served.
+- `harness` is always `"human"`: no harness and no model run on this path.
+- `context_id` behaves exactly as for a question, and `envelope::a2a_state` gains no row —
+  it keys on the spool state string, which the new kind shares with a question.
+- Neither cache is read or written for a content request: content is keyed by ref and by the
+  owner's consent, not by question text, so the record carries no question hash at all.
+
 The `202` body of `POST /v1/questions` is
 `{"status":"accepted","id":"…","state":"TASK_STATE_SUBMITTED"}` (`TASK_STATE_WORKING` for a
 peer with policy `manual`/`auto`); the `403` body is
@@ -273,7 +303,7 @@ listener.
 | Method + path | Auth | Request | Response |
 |---|---|---|---|
 | `GET /.well-known/agent-card.json` (and `/.well-known/agent.json`) | any TLS client | — | the A2A 1.0 `AgentCard` (OWL-034): `name`, `description`, `version`, `provider {organization: <name>, url: mailto:<email> or ""}`, `supportedInterfaces` (`https://<host>/` always, `owl-iroh://<key>` inside the daemon; both `protocolBinding: "owlpost-v1"`, `protocolVersion: "1"` — a custom binding, since our routes are not the A2A routes), `capabilities {streaming: false, pushNotifications: false, extendedAgentCard: false, extensions: [...]}` with three required extensions — `urn:owlpost:ext:identity:v1` (`params: {fingerprint, pubkey, relay}`), `urn:owlpost:ext:repo-question:v1` (`params: {projects}`), `urn:owlpost:ext:human-gate:v1` (`params: {responds, harness}`; SUBMITTED = waiting for consent, WORKING = drafting or under review) — `securitySchemes.owl-mtls.mtlsSecurityScheme`, `securityRequirements`, `defaultInputModes`/`defaultOutputModes: ["text/plain"]`, `skills: [{id: "ask-about-repo", …}]`. No top-level `url`, `protocolVersion`, `owlpost` or `iroh` key any more; `owl doctor` reads fingerprint and relay from the identity extension params |
-| `POST /v1/questions` | pinned | payload body + signature header | `200` answer payload + signature header (responder cache hit); `202 {"status":"accepted","id","state"}` (§6); `400` bad signature/schema/stale/`context too long`; `403 {"error":"unavailable","state":"TASK_STATE_REJECTED"}` (never, responder disabled); `409` duplicate id; `429` rate limited (`Retry-After`) |
+| `POST /v1/questions` | pinned | payload body + signature header, `type` ∈ `question`, `content` | `200` answer payload + signature header (responder cache hit, questions only); `202 {"status":"accepted","id","state"}` (§6; always `TASK_STATE_SUBMITTED` for a content request, which is held for **consent whatever the policy** and never offered to the scheduler); `400` bad signature/schema/stale/`context too long`/`type must be question or content` and, for a content request, the allowlist table below; `403 {"error":"unavailable","state":"TASK_STATE_REJECTED"}` (never, responder disabled); `409` duplicate id; `429` rate limited (`Retry-After`) |
 | `GET /v1/questions/{id}` | pinned | — | the A2A `Task` of a question whose `from` is the caller (OWL-034), looked up in `inbox/`, `outbox/` (by `in_reply_to`) and `done/`: `{ "id", "contextId", "status": { "state", "timestamp", "message": { "messageId": "<id>-status", "role": "ROLE_AGENT", "parts": [ { "text": "…" } ] } }, "metadata": { "owlpost": { from, to, project, path } } }` — no `artifacts`, the answer keeps travelling through `GET /v1/outbox`. State table (`envelope::a2a_state`): inbox `consent` → `TASK_STATE_SUBMITTED` "waiting for the owner's consent"; inbox `pending` → `TASK_STATE_WORKING` "the owner's agent is answering" (with `auto_error` — a draft timeout or runner error in auto mode — "the owner's agent could not answer; waiting for the owner"); inbox `drafted` → `TASK_STATE_WORKING` "the owner is reviewing the answer"; outbox (any), done `acked`/`expired`/`answered` → `TASK_STATE_COMPLETED` "answered"; done `denied`/`rejected` → `TASK_STATE_REJECTED` "the owner declined"; no record with policy `never` or responder disabled → `TASK_STATE_REJECTED` "unavailable". `INPUT_REQUIRED`, `AUTH_REQUIRED`, `CANCELED`, `FAILED` are never produced. Another caller's question or an unknown id → `404 {"error":"not found"}`. Not rate limited. Served over iroh too and through the forward route |
 | `GET /v1/outbox` | pinned | — | `200 [ {raw, sig}, … ]` answers addressed to the caller |
 | `POST /v1/outbox/{id}/ack` | pinned | — | `204`; `404` if not the caller's |
@@ -283,6 +313,25 @@ Transport order for `owl ask`, `owl ask --wait` and the daemon's pull loop: iroh
 (the CLI through the forward route, the daemon from its own endpoint), then the contact's
 `endpoints` in order; a contact with empty `endpoints` is valid. Offline is reported only
 when every transport failed, with one `transport: reason` per attempt (`iroh: …` first).
+
+Content request allowlist (OWL-039), checked in this order after the shared shape checks:
+
+| Check | Response |
+|---|---|
+| both or neither of `body.path` and `body.memory` | `400 body must carry exactly one of path and memory` |
+| `body.path` without `body.project` | `400 missing body.project` |
+| `body.project` not a key of `config.projects` | `400 unknown project` |
+| `body.path` absolute, empty, or with a `..` segment (after `\` → `/`) | `400 path escapes the project` |
+| `body.memory` absolute, empty, or with a `..` segment | `400 memory key escapes the memory store` |
+| `body.memory` with no `responder.memory_root` or `scope.private_memory == false` | `400 memory store not configured` |
+| `body.ref` over 200 bytes or with a byte outside `[A-Za-z0-9._/-]` | `400 malformed ref` |
+| the `type` tag and the body it parsed into disagree | `400 body does not match type` |
+
+The daemon does **not** stat or read the file here: a path inside the allowlist that does not
+exist reaches consent and fails at `owl draft` (`unknown path <p> at <ref>`, exit 1). Reading
+the disk at arrival would let an unanswered peer probe for file existence by timing, which the
+consent gate exists to prevent. Binary and oversize are refused at `owl draft` for the same
+reason, not with a `4xx`.
 
 Rate limiting: token bucket per peer fingerprint, capacity and refill from the contact's
 `rate_limit_per_hour` or the global default. Card and outbox routes are not rate limited.
@@ -301,9 +350,15 @@ inbox (answers we received via pull)
 asks (questions we sent)
   waiting ──pull got answer──▶ done(state=answered)
   waiting ──peer's Task REJECTED (pull loop, owl status, owl ask --wait)──▶ done(state=declined)
+inbox (content requests we received, OWL-039)
+  consent ──owl allow──▶ pending ──owl draft (no harness)──▶ drafted ──owl send──▶ (content-reply to outbox, request to done)
+  consent ──owl deny───▶ done(state=denied)          drafted ──owl reject─▶ done(state=rejected)
 outbox (answers we produced)
   unacked ──ack / TTL──▶ done
 ```
+
+A content request always enters at `consent`, whatever the peer's policy says, and the
+scheduler is never offered it (`server::record_state_for`, `auto::not_a_candidate`).
 
 `owl inbox --json` and `owl history --json` each carry `context_id`, the payload's thread id
 (`null` when the record is not threaded).
@@ -346,6 +401,10 @@ kind passes it through `--json` untouched and prints it by name.
 | `asked` | `cli::ask` on the new `asks/` record |
 | `answer-received` | `pull::store_answer` on the answer, and on the ask it closes |
 | `declined`, `expired` | `pull::close_declined` and `pull::expire_outbox` |
+| `content-requested` | OWL-039: `server::post_question` on the arriving request, and `cli::request` on the `asks/` record it sends |
+| `content-drafted` | `cli::draft` on a content record (`by: "human"`, `detail: {bytes, redactions, truncated}`) |
+| `content-sent` | `answer::send` for a content record, the closing event into `done/` |
+| `content-received` | `pull::store_answer` when what came back is a `content-reply` |
 
 A record written before OWL-038 has no log; `events::of` derives one on read and never writes
 it back: one event at `received_at` (`asked` in `asks/`, `received` elsewhere) plus, when
@@ -421,13 +480,14 @@ unique case-insensitive name prefix.
 | `owl allow <peer> [--once \| --always] [--i-verified-the-fingerprint]` | set policy `manual` (once = release the held question only) or `auto` |
 | `owl deny <peer>` | policy `never` |
 | `owl ask <peer> [path] "<question>" [--project <id>] [--wait <secs>] [--no-cache] [--reply-to <id>] [--context <file\|->]` | send a question; the path is optional (a repo-level question sends no `body.path`); prints answer (cache/`200`/`--wait`) or `accepted <id> — <state text>` (`waiting for the owner's consent` / `the owner's agent is answering`, from the `202` body's `state`; `--json` adds `"state"`). `--reply-to <id>` continues an exchange: the `context_id` of that `asks/` or `done/` question or received answer is reused (unknown id: exit 1 `no exchange <id>`; another peer's: exit 1 `<id> was asked to <name>, not <peer>`). `--context <file>` (`-` = stdin) sends the trimmed file as `body.context` (over 8192 bytes: exit 1 `context is <n> bytes, max 8192`). A question with `--context` or `--reply-to` skips the asker cache both ways. `--wait <secs>` polls the peer's outbox **and** `GET /v1/questions/{id}` on the same tick; whenever the Task's text changes it prints one line `<HH:MM> <state text>` to stderr (quiet: nothing); a `TASK_STATE_REJECTED` Task ends the wait at once with `declined by <name>: <text>`, exit 2, and the ask moves to `done/` as `declined` |
+| `owl request <peer> <project> <path> [--ref <ref>] [--reply-to <id>]` / `owl request <peer> --memory <key> [--reply-to <id>]` | ask a peer for one file at a ref of a named project, or for one entry of their memory store (OWL-039). Prints `accepted <id> — waiting for the owner's consent` (`--json` adds `"state"`); exit 2 offline or unavailable, exit 3 rate limited, as `owl ask`. No `--wait`: every content request is held for a human on the peer's side, whatever policy they set, so the wait is human-scale and `owl status` reports it. No asker cache in either direction |
 | `owl status [<id>]` | for every `asks/` record (or the one id) fetch the peer's Task and print `ID  PEER  PATH  STATE  SINCE` with the state text; a peer that cannot be reached prints `offline`, one without a record `not found`; `--json` prints the Task objects; a `REJECTED` Task moves the ask to `done/declined`. Exit 0 always, exit 4 `no open questions` with nothing open |
 | `owl ask --file <path> "<question>"` | propose peers from `git blame` (top 3 by line share matched to contact emails); interactive pick, or `--json` list |
 | `owl inbox [--count] [--new] [--all] [--format plain\|claude\|codex\|kimi] [--follow [--session <id>]]` | list / count; `--format` emits the harness injection shape, empty output when count is 0; `--hook-event <NAME>` (default `UserPromptSubmit`) is echoed as `hookEventName`, which Claude Code requires to match the firing event; `--count --format claude` reads the hook input JSON on stdin on every event and takes the session from its `session_id` (OWL-033); `--hook-event SessionStart` writes `sessions/<sid>/marker.json`, sweeps dead session directories and the `$OWLPOST_HOME/watch/` markers, assigns the unseen backlog to the session and always prints the line (also at count 0) with `watchPaths: ["<home>/sessions/<sid>/wake"]` unless `plugin.json` says `{"watch": false}` (no usable `session_id`: no marker, no `watchPaths`); `UserPromptSubmit` and `PostToolUse` touch the heartbeat; `--hook-event SessionEnd` removes `sessions/<sid>/`, clears `current` in the routings naming it and prints nothing; `--hook-event FileChanged` exits 2 with the wake file's content on stderr when `event` is `add`, `file_path` is a file directly under `<home>/sessions/<sid>/wake/` and the watch is on (else exit 0, silent; `--hook-event FileChanged` or `SessionEnd` with another format, or none, is a clap usage error); `--count --follow` (plain only) is the poll-loop fallback for hosts without a `FileChanged` hook: with `--session <id>` (`[A-Za-z0-9._-]{1,128}`, anything else is a clap usage error, exit 2) it writes its pid to `$OWLPOST_HOME/watch/<id>`, polls the count every 5 s (`OWLPOST_FOLLOW_SECS`, fractions allowed), prints the counter sentence only when it changed and nothing at zero, never marks anything seen, and ends — removing the marker — when the marker is removed from outside or its stdout is closed; `--session-start` is accepted and ignored (OWL-023 plugins not yet reinstalled); listing mode with `--format claude` (codex, kimi: the same) prints one message table per question and the answers table as Markdown for the model to paste (OWL-032, OWL-035, below), still marking the listed records seen |
-| `owl show <id\|all> [--format plain\|claude\|codex\|kimi]` | full content, marks seen; `--format claude` (codex and kimi print the same) prints the Markdown message table instead of the plain fields (OWL-032, OWL-035, below); `--json` wins over `--format` |
-| `owl draft <id> [--harness <name> \| --text <text> [--agent] \| --prompt]` | run the responder, store and print the draft; `--text` stores the human's own answer (harness `human`, no redactions); `--text --agent` stores an in-session agent's answer (harness `agent`, redacted like a harness answer); `--prompt` prints the responder prompt and stops (the plugin's Agent flow) |
+| `owl show <id\|all> [--format plain\|claude\|codex\|kimi]` | full content, marks seen; `--format claude` (codex and kimi print the same) prints the Markdown message table instead of the plain fields (OWL-032, OWL-035, below); `--json` wins over `--format`. A content record (OWL-039) prints the request (project, ref, path or memory key) and, once drafted, the content in a plain ```text block under `content:` — up to a display cap of 200 lines, beyond which the first 200 plus `… <n> more lines — <bytes> bytes, sha256 <hex>`. A received `content-reply` prints the same block and one line `sha256 <hex> — verified` or `sha256 mismatch — the content does not match its digest` (exit 1 on a mismatch); nothing is ever written into the working tree |
+| `owl draft <id> [--harness <name> \| --text <text> [--agent] \| --prompt]` | run the responder, store and print the draft; `--text` stores the human's own answer (harness `human`, no redactions); `--text --agent` stores an in-session agent's answer (harness `agent`, redacted like a harness answer); `--prompt` prints the responder prompt and stops (the plugin's Agent flow). On a **content** record (OWL-039) it takes no harness and no model: it resolves the ref in the project's checkout (`git rev-parse <ref>^{commit}`, then the blob at `<commit>:<path>`; for `memory` it reads `<memory_root>/<key>` and there is no `ref_resolved`), refuses a non-UTF-8 or `NUL`-carrying file (`<path> is not text`, exit 1) and a key resolving outside the store (`<key> is outside the memory store`, exit 1), runs the §10 redaction patterns over the content, cuts it at `MAX_CONTENT_BYTES` and prints `content: src/auth/session.rs@a1b2c3d (4821 bytes, 2 redactions)` (`, truncated, 262144 of 981233 bytes` appended when cut). `--harness`, `--text`, `--agent` and `--prompt` there are a usage error: `record <id> is a content request — run owl draft <id> with no flags`, exit 1 |
 | `owl edit <id>` | open the draft in `$EDITOR` |
-| `owl send <id>` | sign + move to outbox |
+| `owl send <id>` | sign + move to outbox; on a content record it signs a `content-reply` instead of an `answer` and writes neither a `meta.hash` nor a cache entry (OWL-039) |
 | `owl reject <id>` | discard |
 | `owl route <id>` | route one inbox record to one live Claude Code session (§8, OWL-033) — the call the daemon makes when a record is born, for scripts and the e2e test; prints `routed <id> -> <session id>` or `no live session for <id>` (exit 0 both ways; `--json`: `{"id", "session"}`, `null` for none); an unknown record is exit 1 |
 | `owl thread [<peer>] [--since <date>] [--context <id>]` | without a peer, one row per person seen in `inbox/`, `outbox/`, `asks/` or `done/` — `PEER  UNSEEN  OPEN  LAST  SUMMARY`, newest conversation first, contact name as the tiebreak, exit 4 `no threads` with nothing to show. With a peer, that person's whole conversation as one timeline: every `meta.events` entry of every record of theirs, oldest first (`record_id` then the event's index inside its record as tiebreaks), with the **full** message text. A peer message prints the `--format claude` message table; everything else prints one line `HH:MM <kind>[ · by <by>][ · <detail k=v>]` plus our own words in a ```text block. `--since` takes what `owl history --since` takes; `--context <id>` keeps one thread. Read-only: no socket, no harness, no `seen`, no write into the spool |
@@ -593,6 +653,10 @@ Answer in at most 300 words.
   (`env` map), e.g. a dedicated `KIMI_CODE_HOME` for Kimi once enabled.
 - Timeout `responder.timeout_secs` (default 180); on timeout the draft is marked `timeout`.
 - Redaction runs on the extracted answer; each match is replaced with `[redacted]` and counted.
+- The same patterns run over the content of a content request (OWL-039), with the same
+  `[redacted]` replacement and the same count — but this prompt and this runner are **not**
+  invoked for it: `owl draft` reads the named object, redacts it and stops. There is no model
+  in that path, so there is nothing to prompt.
 - The fake harness (`tests/fixtures/fake-harness.sh`) prints a canned answer that includes a
   fake secret line, so tests can assert redaction, and writes its argv/stdin to
   `$FAKE_HARNESS_LOG` for prompt assertions.
