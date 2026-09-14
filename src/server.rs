@@ -698,7 +698,13 @@ async fn post_question(
         },
     };
     // Record birth (OWL-038): the arrival, and the consent hold when the peer has no policy.
-    crate::events::push(&mut record, "received", None, None);
+    // OWL-039: a content request names its own arrival kind, so both sides of the thread
+    // show the same word for the same moment.
+    let arrival = match payload.kind {
+        Kind::Content => "content-requested",
+        _ => "received",
+    };
+    crate::events::push(&mut record, arrival, None, None);
     if record_state == "consent" {
         crate::events::push(&mut record, "held", None, None);
     }

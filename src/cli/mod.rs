@@ -15,6 +15,7 @@ pub mod inbox;
 pub mod install;
 pub mod mcp;
 pub mod reject;
+pub mod request;
 pub mod route;
 pub mod send;
 pub mod setup;
