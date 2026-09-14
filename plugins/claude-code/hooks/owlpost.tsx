@@ -258,7 +258,9 @@ export const register: Register = (on) => {
     const actions = (e: Ev) => (
       <Box flexDirection="column">
         {e.type === 'content' && (
-          <Text dimColor wrap="truncate">{`asks for ${e.text}`}</Text>
+          <Text dimColor wrap="truncate">
+            {`asks for ${e.text}${e.state === 'drafted' ? ' · Show content prints the exact bytes before Send' : ''}`}
+          </Text>
         )}
         <Box flexDirection="row" gap={1}>
           {e.state === 'consent' && <Button label={`Allow once (${openPeer})`} onPress={() => void act($, ['allow', openPeer, '--once'])} />}
@@ -268,6 +270,8 @@ export const register: Register = (on) => {
             <Button label="Draft" onPress={() => void act($, ['draft', e.record_id])} />}
           {e.type !== 'content' && e.state !== 'consent' && e.state !== 'drafted' &&
             <Button label="Draft (Claude)" onPress={() => void $.command.run({ command: 'owlpost:draft', args: e.record_id })} />}
+          {e.type === 'content' && e.state === 'drafted' &&
+            <Button label="Show content" onPress={() => void act($, ['show', e.record_id])} />}
           {e.state === 'drafted' && <Button label="Send" onPress={() => void act($, ['send', e.record_id])} />}
           {e.state !== 'consent' && <Button label="Reject" onPress={() => void act($, ['reject', e.record_id])} />}
         </Box>
