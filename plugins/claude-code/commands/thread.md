@@ -13,7 +13,7 @@ allowed-tools: Agent, Bash(owl thread:*)
 
 Arguments: "$ARGUMENTS"
 
-1. No peer in the arguments: run `owl thread` and paste its output verbatim — one row per
+1. No peer in the arguments: run `owl thread` and show its rows unchanged — one row per
    person, newest conversation first. Ask which person to open.
 2. With a peer: run `owl thread <peer>` (adding `--since <when>` or `--context <id>` when the
    arguments carry them) and paste its output verbatim. It is already formatted: the tables
