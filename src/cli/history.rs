@@ -107,6 +107,13 @@ pub fn run(home: &Path, filters: Filters, json: bool) -> anyhow::Result<()> {
                 question.as_str(),
             ),
             Body::Answer { answer, .. } => (None, "-", answer.as_str()),
+            // OWL-039: a content request lists its path, a reply the content it carried.
+            Body::Content { project, path, .. } => (
+                project.as_deref(),
+                path.as_deref().unwrap_or("-"),
+                "",
+            ),
+            Body::ContentReply { content, .. } => (None, "-", content.as_str()),
         };
         if let Some(g) = &filters.path
             && !glob_match(g, path)

@@ -61,7 +61,7 @@ use std::time::Duration;
 use anyhow::{Context, bail};
 use owlpost::answer::auto_error;
 use owlpost::contacts::ContactBook;
-use owlpost::envelope::{self, Body, Kind, Payload};
+use owlpost::envelope::{self, Body, Payload};
 use owlpost::render::{self, AnswerRow, Markers};
 use owlpost::route;
 use owlpost::spool::{Dir, Record, Spool};
@@ -197,10 +197,9 @@ pub const OPEN_SENTENCE: &str = "owlpost: run /owlpost:inbox now.";
 
 /// One session-start preview line for an unseen record.
 pub fn preview(rec: &Record, payload: &Payload, book: &ContactBook) -> String {
-    let (kind, text) = match &payload.body {
-        Body::Question { question, .. } => ("question", question),
-        Body::Answer { answer, .. } => ("answer", answer),
-    };
+    let kind = super::kind_str(payload.kind);
+    let text = super::body_text(&payload.body);
+    let text = text.as_ref();
     // ponytail: first line, 200 chars; `/owlpost:inbox` shows the rest.
     let first: String = text
         .lines()
@@ -341,10 +340,7 @@ pub fn injection(
 
 /// The §3.2 consent prompt for a held question: who, about which project, and the two commands.
 pub fn consent_prompt(book: &ContactBook, payload: &Payload) -> String {
-    let project = match &payload.body {
-        Body::Question { project, .. } => project.as_str(),
-        Body::Answer { .. } => "?",
-    };
+    let project = super::body_project(&payload.body).unwrap_or("?");
     let fp = &payload.from;
     format!(
         "{} wants to ask your agent about {project} — owl allow {fp} [--once|--always] / owl deny {fp}",
@@ -474,7 +470,9 @@ fn print_rendered(
     for (id, rec) in records {
         let payload = payload_of(id, rec)?;
         match &payload.body {
-            Body::Question { .. } => {
+            // OWL-039: a content request is held for consent and reviewed exactly like a
+            // question, so it takes the same two sections.
+            Body::Question { .. } | Body::Content { .. } => {
                 let draft = StoredDraft::from_record(id, rec)?;
                 let block = render::record_block(spool, book, rec, &payload, draft.as_ref());
                 if rec.state == "consent" {
@@ -483,21 +481,23 @@ fn print_rendered(
                     questions.push(block);
                 }
             }
-            Body::Answer { answer, .. } => {
+            Body::Answer { .. } | Body::ContentReply { .. } => {
+                let answer = super::body_text(&payload.body).into_owned();
                 let question_id = payload.in_reply_to.clone();
                 let question_first_line = question_id
                     .as_deref()
                     .and_then(|q| render::find_question(spool, q))
-                    .and_then(|q| match q.body {
-                        Body::Question { question, .. } => Some(question),
-                        Body::Answer { .. } => None,
+                    .and_then(|q| match &q.body {
+                        Body::Question { question, .. } => Some(question.clone()),
+                        Body::Content { .. } => Some(owlpost::content::body_summary(&q.body)),
+                        Body::Answer { .. } | Body::ContentReply { .. } => None,
                     })
                     .unwrap_or_default();
                 answers.push(AnswerRow {
                     received_at: rec.received_at.clone(),
                     fingerprint: payload.from.clone(),
                     peer_name: peer_name(book, &payload.from),
-                    answer: answer.clone(),
+                    answer,
                     question_id,
                     question_first_line,
                 });
@@ -530,7 +530,8 @@ fn counts(spool: &Spool, book: &ContactBook, all: bool) -> anyhow::Result<Counts
     let per_peer = per_peer(&records, book)?;
     let questions = records
         .iter()
-        .filter(|(id, r)| payload_of(id, r).is_ok_and(|p| p.kind == Kind::Question))
+        // OWL-039: a content request wants the owner's attention like a question does.
+        .filter(|(id, r)| payload_of(id, r).is_ok_and(|p| p.kind.is_request()))
         .count();
     Ok(Counts {
         records,

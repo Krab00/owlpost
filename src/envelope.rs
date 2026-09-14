@@ -15,6 +15,11 @@ pub const SEEN_IDS_TTL_SECS: u64 = 600;
 const SEEN_IDS_FILE: &str = "seen-ids.txt";
 /// Largest `body.context` (the asker's snippet) after trimming, in bytes (OWL-034).
 pub const MAX_CONTEXT_BYTES: usize = 8192;
+/// Largest `body.content` a content reply carries, in bytes after redaction (OWL-039).
+/// Beyond it the content is cut at the last complete character and `truncated` goes out
+/// `true`; `sha256` stays the digest of the whole redacted content, so the asker can tell it
+/// holds a prefix.
+pub const MAX_CONTENT_BYTES: usize = 262_144;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Payload {
@@ -38,6 +43,13 @@ pub struct Payload {
 pub enum Kind {
     Question,
     Answer,
+    /// OWL-039: a peer asks for one file at a ref of a named project, or one memory entry.
+    #[serde(rename = "content")]
+    Content,
+    /// OWL-039: the reply carrying that content. `rename_all = "lowercase"` alone would
+    /// spell it `contentreply`, hence the explicit rename.
+    #[serde(rename = "content-reply")]
+    ContentReply,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -60,6 +72,46 @@ pub enum Body {
         redactions: u32,
         cached: bool,
     },
+    /// OWL-039 reply body. Declared **before** [`Body::Content`] on purpose: every field of
+    /// `Content` is optional, so an untagged `Content` would swallow a reply body and leave
+    /// every field `None`. `ContentReply` requires five keys a request never carries, so the
+    /// order is safe in both directions.
+    ContentReply {
+        content: String,
+        sha256: String,
+        /// The commit the ref resolved to; absent for a `memory` request.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ref_resolved: Option<String>,
+        truncated: bool,
+        redactions: u32,
+        /// Always `"human"`: no harness and no model run on this path.
+        harness: String,
+    },
+    /// OWL-039 request body: exactly one of `path` (with `project`) and `memory`. Every
+    /// field is optional on the wire so the server can name the missing one itself
+    /// (`validate_request`) instead of returning a serde schema error.
+    Content {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project: Option<String>,
+        #[serde(rename = "ref", default, skip_serializing_if = "Option::is_none")]
+        git_ref: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        memory: Option<String>,
+    },
+}
+
+impl Kind {
+    /// A kind a peer sends *to* us: it earns a spool record and an A2A `Task` (OWL-039).
+    pub fn is_request(self) -> bool {
+        matches!(self, Kind::Question | Kind::Content)
+    }
+
+    /// A kind we send *back*: what `GET /v1/outbox` serves and a pull ingests (OWL-039).
+    pub fn is_reply(self) -> bool {
+        matches!(self, Kind::Answer | Kind::ContentReply)
+    }
 }
 
 impl Payload {
@@ -111,6 +163,65 @@ impl Payload {
                 harness: harness.into(),
                 redactions,
                 cached,
+            },
+        }
+    }
+
+    /// New content request payload (OWL-039). Exactly one of `path` (with `project`) and
+    /// `memory` is meant to be `Some`; the responder's `validate_request` is what enforces
+    /// it, so this constructor stays a plain carrier.
+    pub fn content(
+        from: &str,
+        to: &str,
+        project: Option<&str>,
+        git_ref: Option<&str>,
+        path: Option<&str>,
+        memory: Option<&str>,
+    ) -> Payload {
+        Payload {
+            v: 1,
+            id: uuid::Uuid::now_v7().to_string(),
+            kind: Kind::Content,
+            from: from.into(),
+            to: to.into(),
+            ts: rfc3339_now(),
+            in_reply_to: None,
+            context_id: None,
+            body: Body::Content {
+                project: project.map(str::to_string),
+                git_ref: git_ref.map(str::to_string),
+                path: path.map(str::to_string),
+                memory: memory.map(str::to_string),
+            },
+        }
+    }
+
+    /// New content reply payload replying to `request` (OWL-039), mirroring [`Payload::answer`]:
+    /// the thread id is copied from the request, `harness` is always `"human"`.
+    pub fn content_reply(
+        request: &Payload,
+        content: &str,
+        sha256: &str,
+        ref_resolved: Option<&str>,
+        truncated: bool,
+        redactions: u32,
+    ) -> Payload {
+        Payload {
+            v: 1,
+            id: uuid::Uuid::now_v7().to_string(),
+            kind: Kind::ContentReply,
+            from: request.to.clone(),
+            to: request.from.clone(),
+            ts: rfc3339_now(),
+            in_reply_to: Some(request.id.clone()),
+            context_id: request.context_id.clone(),
+            body: Body::ContentReply {
+                content: content.into(),
+                sha256: sha256.into(),
+                ref_resolved: ref_resolved.map(str::to_string),
+                truncated,
+                redactions,
+                harness: "human".into(),
             },
         }
     }

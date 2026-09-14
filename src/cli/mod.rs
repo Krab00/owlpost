@@ -114,6 +114,9 @@ pub fn kind_str(kind: Kind) -> &'static str {
     match kind {
         Kind::Question => "question",
         Kind::Answer => "answer",
+        // OWL-039 wire names, so `owl inbox --json`'s `type` is the payload's own `type`.
+        Kind::Content => "content",
+        Kind::ContentReply => "content-reply",
     }
 }
 
@@ -124,7 +127,15 @@ pub fn body_path(body: &Body) -> &str {
         Body::Question {
             path: Some(path), ..
         } => path,
-        Body::Question { path: None, .. } | Body::Answer { .. } => "-",
+        // OWL-039: a content request is about one path too; a memory request and both
+        // replies are about no file of ours.
+        Body::Content {
+            path: Some(path), ..
+        } => path,
+        Body::Question { path: None, .. }
+        | Body::Answer { .. }
+        | Body::Content { path: None, .. }
+        | Body::ContentReply { .. } => "-",
     }
 }
 
@@ -141,15 +152,37 @@ pub fn summary(id: &str, rec: &Record, payload: &Payload, book: &ContactBook, no
         "state": rec.state,
         "seen": rec.seen,
         "path": body_path(&payload.body),
-        "project": match &payload.body { Body::Question { project, .. } => Some(project.as_str()), Body::Answer { .. } => None },
+        "project": body_project(&payload.body),
         "received_at": rec.received_at,
         "age_secs": age,
         "age": format_age(age),
         "has_draft": rec.draft.as_ref().is_some_and(|d| !d.is_null()),
-        "summary": first_line(match &payload.body { Body::Question { question, .. } => question, Body::Answer { answer, .. } => answer }, SUMMARY_CHARS),
+        "summary": first_line(&body_text(&payload.body), SUMMARY_CHARS),
         // OWL-038: the payload's thread id, `null` when the record is not threaded.
         "context_id": payload.context_id,
     })
+}
+
+/// The project a body names: a question's or a content request's own, `None` for a reply
+/// (which borrows its request's).
+pub fn body_project(body: &Body) -> Option<&str> {
+    match body {
+        Body::Question { project, .. } => Some(project.as_str()),
+        Body::Content { project, .. } => project.as_deref(),
+        Body::Answer { .. } | Body::ContentReply { .. } => None,
+    }
+}
+
+/// The text a listing or a timeline shows for a body: a question's or an answer's own words,
+/// a content request's `<path>@<ref>` / `memory:<key>`, a content reply's content (OWL-039).
+pub fn body_text(body: &Body) -> std::borrow::Cow<'_, str> {
+    use std::borrow::Cow;
+    match body {
+        Body::Question { question, .. } => Cow::Borrowed(question),
+        Body::Answer { answer, .. } => Cow::Borrowed(answer),
+        Body::ContentReply { content, .. } => Cow::Borrowed(content),
+        Body::Content { .. } => Cow::Owned(owlpost::content::body_summary(body)),
+    }
 }
 
 /// Width of the `summary` listing field.

@@ -5,6 +5,7 @@ pub mod auto;
 pub mod client;
 pub mod config;
 pub mod contacts;
+pub mod content;
 pub mod daemon;
 pub mod envelope;
 pub mod events;

@@ -425,13 +425,16 @@ pub fn sweep_sessions(home: &Path) {
 fn project_of(spool: &Spool, payload: &Payload) -> Option<String> {
     let project = match &payload.body {
         Body::Question { project, .. } => project.clone(),
-        Body::Answer { .. } => match payload
+        // OWL-039: a content request names its project too; a reply borrows the request's.
+        Body::Content { project, .. } => project.clone().unwrap_or_default(),
+        Body::Answer { .. } | Body::ContentReply { .. } => match payload
             .in_reply_to
             .as_deref()
             .and_then(|q| render::find_question(spool, q))
             .map(|q| q.body)
         {
             Some(Body::Question { project, .. }) => project,
+            Some(Body::Content { project, .. }) => project.unwrap_or_default(),
             _ => return None,
         },
     };
