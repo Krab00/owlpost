@@ -41,6 +41,7 @@ patterns of the next steps a file runs itself); `tests/plugin.rs` pins the rule.
 | `/owlpost:edit <id>` | `commands/edit.md` | `owl edit` opens `$EDITOR`, which cannot run in a session; explains the alternatives |
 | `/owlpost:send <id>` | `commands/send.md` | `owl send` — sign and move to outbox (confirms first) |
 | `/owlpost:reject <id>` | `commands/reject.md` | `owl reject` — discard a record (confirms first) |
+| `/owlpost:thread [<peer>]` | `commands/thread.md` | `owl thread` — one person's whole conversation |
 | `/owlpost:history [--peer] [--path] [--since]` | `commands/history.md` | `owl history` — finished exchanges |
 | `/owlpost:watch [on\|off\|status]` | `commands/watch.md` | event-driven inbox watch, nothing to arm: the `SessionStart` hook registers this session's wake directory (`$OWLPOST_HOME/sessions/<session_id>/wake`) as a watch path and the `FileChanged` hook wakes the session with the message table when the daemon routes a record to it; `off` stores `{"watch": false}` in `$OWLPOST_HOME/plugin.json` (the hook stops waking at once, new sessions do not watch), `on` restores it from the next session start, `status` reports the stored default |
 | `/owlpost:setup [--name] [--email] [--plugin-source] [--dry-run]` | `commands/setup.md` | `owl setup` — init, daemon, plugin in one go |
@@ -81,6 +82,10 @@ With mods on, `hooks/owlpost.tsx` adds:
 - a pane opened by `/owlpost:contacts` or `/owlpost:ask` with no arguments. You can search
   contacts, send a question and walk the inbox there. It runs `owl` directly, with no model
   turn and no tokens.
+
+In the pane's Inbox is a thread list: one row per person, and **Open** draws the whole
+conversation with that person oldest first, with the Allow/Deny and Draft/Send/Reject buttons
+next to the open request only. **Back** returns to the list.
 
 To close the pane, run the same command again (`/owlpost:contacts` on the Contacts view,
 `/owlpost:ask` on the Ask view) or press **Close**. Esc only returns focus to the prompt.

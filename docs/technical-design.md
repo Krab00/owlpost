@@ -305,9 +305,53 @@ outbox (answers we produced)
   unacked ──ack / TTL──▶ done
 ```
 
+`owl inbox --json` and `owl history --json` each carry `context_id`, the payload's thread id
+(`null` when the record is not threaded).
+
 `owl inbox --count` counts inbox records with `seen == false`. `owl inbox` sets `seen = true`
 on everything it lists. `--new` lists only unseen. `history` lists `done/`; a `declined` ask
 shows there like a `denied` question (OWL-034).
+
+### Per-record event log (OWL-038)
+
+Every spool record carries its own history under the existing `meta` object — no sidecar file,
+no new wire field, nothing that changes what `Spool::move_to` renames:
+
+```json
+"meta": { "peer": "owl:…", "hash": "…", "events": [
+  { "ts": "2026-09-14T10:00:00Z", "kind": "received" },
+  { "ts": "2026-09-14T10:00:00Z", "kind": "held" },
+  { "ts": "2026-09-14T10:04:11Z", "kind": "allowed", "by": "human", "detail": { "scope": "once" } },
+  { "ts": "2026-09-14T10:04:40Z", "kind": "drafted", "by": "claude", "detail": { "redactions": 1 } },
+  { "ts": "2026-09-14T10:05:02Z", "kind": "sent", "by": "human", "detail": { "answer_id": "0191…" } }
+] }
+```
+
+| Key | Rule |
+|---|---|
+| `meta.events` | the log itself: `events::push` appends, `events::of` reads it or derives one for a record written before this log existed |
+| `EVENTS_MAX` | 200 events per record; `push` drops the oldest event *after* the first, so the `received`/`asked` anchor always stays |
+| `state-seen` | the peer's A2A Task state on an open ask, pushed by `owl status`, `owl ask --wait` and the daemon's `pull_once`; a repeat whose `detail.state` is unchanged is dropped, so polling cannot fill the log |
+
+`kind` is an **open string**, never an enum matched exhaustively: a reader that does not know a
+kind passes it through `--json` untouched and prints it by name.
+
+| Kind | Written where |
+|---|---|
+| `received`, `held` | `server::post_question` — the question arrives, and is held when the peer has no policy |
+| `allowed` | `cli::allow::release` (`detail.scope` = `once`, `always` or `manual`), through `Spool::set_state_with_event` |
+| `drafted` | `answer::draft` / `draft_text` / `draft_agent` (`by` = the harness, `human` or `agent`) |
+| `edited` | `cli::edit` |
+| `sent`, `rejected`, `denied` | `answer::finish`, the one closing event a record carries into `done/` |
+| `asked` | `cli::ask` on the new `asks/` record |
+| `answer-received` | `pull::store_answer` on the answer, and on the ask it closes |
+| `declined`, `expired` | `pull::close_declined` and `pull::expire_outbox` |
+
+A record written before OWL-038 has no log; `events::of` derives one on read and never writes
+it back: one event at `received_at` (`asked` in `asks/`, `received` elsewhere) plus, when
+`meta.done_at` is set, one at that timestamp whose kind comes from the state — `answered` →
+`sent` (`answer-received` on an ask), `rejected` → `rejected`, `denied` → `denied`, `declined`
+→ `denied` with `detail.by = peer`, `acked`/`expired` → `sent`, anything else → nothing.
 
 ### Session wake routing (OWL-033)
 
@@ -386,6 +430,7 @@ unique case-insensitive name prefix.
 | `owl send <id>` | sign + move to outbox |
 | `owl reject <id>` | discard |
 | `owl route <id>` | route one inbox record to one live Claude Code session (§8, OWL-033) — the call the daemon makes when a record is born, for scripts and the e2e test; prints `routed <id> -> <session id>` or `no live session for <id>` (exit 0 both ways; `--json`: `{"id", "session"}`, `null` for none); an unknown record is exit 1 |
+| `owl thread [<peer>] [--since <date>] [--context <id>]` | without a peer, one row per person seen in `inbox/`, `outbox/`, `asks/` or `done/` — `PEER  UNSEEN  OPEN  LAST  SUMMARY`, newest conversation first, contact name as the tiebreak, exit 4 `no threads` with nothing to show. With a peer, that person's whole conversation as one timeline: every `meta.events` entry of every record of theirs, oldest first (`record_id` then the event's index inside its record as tiebreaks), with the **full** message text. A peer message prints the `--format claude` message table; everything else prints one line `HH:MM <kind>[ · by <by>][ · <detail k=v>]` plus our own words in a ```text block. `--since` takes what `owl history --since` takes; `--context <id>` keeps one thread. Read-only: no socket, no harness, no `seen`, no write into the spool |
 | `owl history [--peer <p>] [--path <glob>] [--since <date>]` | finished exchanges |
 | `owl watch [--id <id>] [--timeout <secs>]` | block until a matching inbox record arrives; exit 4 on timeout |
 | `owl daemon [--foreground]` | run the listener + loops |
