@@ -306,7 +306,13 @@ const OUR_TEXT: [&str; 3] = ["drafted", "sent", "asked"];
 /// everything else as one line plus, when the event carries our own text, that text in a
 /// plain ```` ```text ```` block.
 fn block(spool: &Spool, book: &ContactBook, e: &Entry) -> String {
-    if e.dir == "in" && matches!(e.event.kind.as_str(), "received" | "answer-received") {
+    // OWL-039: a content request and a content reply are peer messages too.
+    if e.dir == "in"
+        && matches!(
+            e.event.kind.as_str(),
+            "received" | "answer-received" | "content-requested" | "content-received"
+        )
+    {
         // Byte-for-byte what `owl show <id> --format claude` prints for this record.
         return render::record_block(spool, book, &e.rec, &e.payload, None);
     }
