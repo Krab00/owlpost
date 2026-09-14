@@ -287,14 +287,11 @@ fn rev_parse(checkout: &Path, git_ref: &str) -> anyhow::Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
-/// `git show <commit>:<path>`, but only when the object is a blob: `git show` on a tree
-/// prints a directory listing, which would turn the allowlist into a file browser.
+/// The blob at `<commit>:<path>`. `cat-file blob`, never `git show`: `git show` on a tree
+/// prints a directory listing, which would turn the allowlist into a file browser, while
+/// `cat-file blob` refuses anything that is not a blob itself.
 fn git_blob(checkout: &Path, commit: &str, path: &str, git_ref: &str) -> anyhow::Result<Vec<u8>> {
     let spec = format!("{commit}:{path}");
-    let kind = git(checkout, &["cat-file", "-t", &spec])?;
-    if !kind.status.success() || String::from_utf8_lossy(&kind.stdout).trim() != "blob" {
-        bail!("unknown path {path} at {git_ref}");
-    }
     let out = git(checkout, &["cat-file", "blob", &spec])?;
     if !out.status.success() {
         bail!("unknown path {path} at {git_ref}");
