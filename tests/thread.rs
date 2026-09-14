@@ -407,21 +407,7 @@ fn thread_timeline_merges_four_directories_in_order() {
               "detail": { "answer_id": "0191" } },
         ])),
     );
-    // outbox/: our answer to her, sharing a second with the asks/ record below.
-    let outbox = put(
-        &s,
-        Fx::q(
-            Dir::Outbox,
-            &h.me,
-            &h.ania,
-            "our answer text",
-            "2026-09-14T09:30:00Z",
-        )
-        .state("unacked")
-        .answer()
-        .events(json!([ev("2026-09-14T09:30:00Z", "received")])),
-    );
-    // asks/: our own question to her, same second as the outbox event.
+    // asks/: our own question to her, same second as the outbox event below.
     let ask = put(
         &s,
         Fx::q(
@@ -435,6 +421,21 @@ fn thread_timeline_merges_four_directories_in_order() {
         .events(json!([
             { "ts": "2026-09-14T09:30:00Z", "kind": "asked", "by": "human" },
         ])),
+    );
+    // outbox/: our answer to her, sharing a second with the asks/ record above — and
+    // written after it, so its id sorts after the ask's while `records()` walks it first.
+    let outbox = put(
+        &s,
+        Fx::q(
+            Dir::Outbox,
+            &h.me,
+            &h.ania,
+            "our answer text",
+            "2026-09-14T09:30:00Z",
+        )
+        .state("unacked")
+        .answer()
+        .events(json!([ev("2026-09-14T09:30:00Z", "received")])),
     );
     // inbox/: the newest, threaded, with a context snippet and a draft.
     let inbox = put(
@@ -474,10 +475,15 @@ fn thread_timeline_merges_four_directories_in_order() {
         ("received", "held"),
         "same-second events keep their order inside a record"
     );
-    assert!(
-        rows.iter().all(|r| r["record_id"] != json!(null)),
-        "every row names its record"
-    );
+    // The two records stamped in the same second order by `record_id`, not by insertion.
+    let same: Vec<&str> = rows
+        .iter()
+        .filter(|r| r["ts"] == "2026-09-14T09:30:00Z")
+        .map(|r| r["record_id"].as_str().unwrap())
+        .collect();
+    let mut want = vec![outbox.as_str(), ask.as_str()];
+    want.sort();
+    assert_eq!(same, want, "same-second events order by record_id");
     assert!(
         !rows
             .iter()
@@ -530,6 +536,12 @@ fn thread_timeline_merges_four_directories_in_order() {
     assert!(
         !sent.contains_key("harness"),
         "no draft, no harness: {sent:?}"
+    );
+    // The peer's own message never carries our harness, even on a record that has a draft.
+    let received = inbox_rows[0].as_object().unwrap();
+    assert!(
+        !received.contains_key("harness"),
+        "a `received` row is the peer's message, not our reply: {received:?}"
     );
 }
 
@@ -615,6 +627,8 @@ fn unknown_event_kind_passes_through_and_renders() {
 fn thread_human_format_tables_peer_messages_and_fences_ours() {
     let h = Home::new();
     let s = h.spool();
+    // A draftless record: `owl show --format claude` renders the bare table, so the thread's
+    // block for it must match byte-for-byte.
     let qid = put(
         &s,
         Fx::q(
@@ -625,19 +639,31 @@ fn thread_human_format_tables_peer_messages_and_fences_ours() {
             "2026-09-14T10:00:00Z",
         )
         .state("pending")
+        .events(json!([ev("2026-09-14T10:00:00Z", "received")])),
+    );
+    // A second record of hers that we have drafted an answer to: our words, never a table.
+    put(
+        &s,
+        Fx::q(
+            Dir::Inbox,
+            &h.ania,
+            &h.me,
+            "and what about the refresh window?",
+            "2026-09-14T10:02:00Z",
+        )
+        .state("drafted")
+        .draft("our draft answer")
         .events(json!([
-            ev("2026-09-14T10:00:00Z", "received"),
+            ev("2026-09-14T10:02:00Z", "received"),
             { "ts": "2026-09-14T10:04:40Z", "kind": "drafted", "by": "fake" },
         ])),
     );
-    // The `drafted` row's own words come from the stored draft; the record itself carries no
-    // draft here, so `owl show --format claude` renders the bare table.
     let thread = h.ok(&["thread", "Ania"]);
     let show = h.ok(&["show", &qid, "--format", "claude"]);
 
     let header = thread.lines().next().unwrap();
     assert!(header.starts_with(&fp(&h.ania)), "{header}");
-    assert!(header.contains("— Ania · 2 events · last "), "{header}");
+    assert!(header.contains("— Ania · 3 events · last "), "{header}");
     assert!(
         thread.contains(show.trim_end()),
         "the peer's message table must be byte-identical to `owl show --format claude`\n\
@@ -647,7 +673,7 @@ fn thread_human_format_tables_peer_messages_and_fences_ours() {
         thread.lines().any(|l| l.starts_with("| 🦉 ")),
         "a table always means from a peer: {thread}"
     );
-    // Our own side: one line, and its text fenced, never a table row.
+    // Our own side: one line, and the draft fenced, never a table row.
     let ours = thread
         .lines()
         .find(|l| l.contains("drafted"))
@@ -658,8 +684,16 @@ fn thread_human_format_tables_peer_messages_and_fences_ours() {
         "our own event is never a table row: {ours}"
     );
     assert!(
-        thread.contains("```text\nwhy is the token rotated?\n```"),
-        "our own words come fenced: {thread}"
+        thread.contains("```text\nour draft answer\n```"),
+        "our own draft comes fenced: {thread}"
+    );
+    assert!(
+        !thread.contains("| our draft answer |"),
+        "our draft is never a table row: {thread}"
+    );
+    assert!(
+        !thread.contains("```text\nand what about the refresh window?"),
+        "the fence holds our draft, not the peer's question: {thread}"
     );
 }
 
@@ -888,6 +922,16 @@ fn thread_is_read_only() {
         harness_log.display()
     );
     assert_eq!(count.load(Ordering::SeqCst), 0, "no socket was opened");
+    assert!(
+        !h.path().join(owlpost::render::MARKERS_FILE).exists(),
+        "no per-peer marker was assigned: `owl thread` stays out of markers.json"
+    );
+    // Positive control: a command that does dial the contact increments the same counter.
+    let _ = h.run(&["card", "Ania"]);
+    assert!(
+        count.load(Ordering::SeqCst) > 0,
+        "the connection counter works — the zero above means nothing was dialled"
+    );
     assert!(
         !s.get(Dir::Inbox, &id).unwrap().unwrap().seen,
         "seen stays false"
