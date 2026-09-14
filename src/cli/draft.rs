@@ -18,6 +18,7 @@ use std::path::Path;
 
 use owlpost::answer;
 use owlpost::config::Config;
+use owlpost::content;
 use owlpost::envelope::Kind;
 use owlpost::route;
 use owlpost::runner::DraftStatus;
@@ -46,10 +47,22 @@ pub fn run(home: &Path, id: &str, opts: Opts<'_>, json: bool) -> anyhow::Result<
     let spool = Spool::new(home)?;
     let rec = inbox_record(&spool, id)?;
     let payload = payload_of(id, &rec)?;
-    if payload.kind != Kind::Question {
-        return Err(user_error(format!(
-            "record {id} is an answer, not a question — nothing to draft"
-        )));
+    match payload.kind {
+        Kind::Question => {}
+        // OWL-039: a content request is drafted with no harness and no model, so every flag
+        // that picks or replaces one is a usage error rather than a silently ignored word.
+        Kind::Content => {
+            if harness.is_some() || text.is_some() || agent || prompt {
+                return Err(user_error(format!(
+                    "record {id} is a content request — run owl draft {id} with no flags"
+                )));
+            }
+        }
+        Kind::Answer | Kind::ContentReply => {
+            return Err(user_error(format!(
+                "record {id} is an answer, not a question — nothing to draft"
+            )));
+        }
     }
     match rec.state.as_str() {
         "pending" | "drafted" => {}
@@ -69,6 +82,9 @@ pub fn run(home: &Path, id: &str, opts: Opts<'_>, json: bool) -> anyhow::Result<
         return Err(user_error(format!(
             "record {id} already has its answer spooled as outbox/{aid}.json — run `owl send {id}` to finish it (drafting again would not change what is sent)"
         )));
+    }
+    if payload.kind == Kind::Content {
+        return draft_content(&config, &spool, home, id, rec, &payload, json);
     }
     if prompt {
         if json {
@@ -117,4 +133,50 @@ pub fn run(home: &Path, id: &str, opts: Opts<'_>, json: bool) -> anyhow::Result<
         }
         .into()),
     }
+}
+
+/// `owl draft <id>` on a content record (OWL-039): resolve the ref, read the one object the
+/// peer named, refuse anything that is not text, redact, cut, store. No harness, no model.
+fn draft_content(
+    config: &Config,
+    spool: &Spool,
+    home: &Path,
+    id: &str,
+    mut rec: owlpost::spool::Record,
+    payload: &owlpost::envelope::Payload,
+    json: bool,
+) -> anyhow::Result<()> {
+    let request = content::request_of(id, payload).map_err(|e| user_error(e.to_string()))?;
+    let resolved = content::resolve(config, &request).map_err(|e| user_error(format!("{e:#}")))?;
+    let label = match &request {
+        content::Request::Path { path, .. } => (*path).to_string(),
+        content::Request::Memory { key } => format!("memory:{key}"),
+    };
+    rec.state = "drafted".into();
+    rec.draft = Some(resolved.to_draft());
+    owlpost::events::push(
+        &mut rec,
+        "content-drafted",
+        Some("human"),
+        Some(json!({
+            "bytes": resolved.text.len(),
+            "redactions": resolved.redactions,
+            "truncated": resolved.truncated,
+        })),
+    );
+    spool.put(Dir::Inbox, id, &rec)?;
+    // Being handled: no session needs to wake for it (OWL-033).
+    route::release(home, id);
+    if json {
+        let mut v = rec.draft.clone().unwrap_or_default();
+        if let Some(obj) = v.as_object_mut() {
+            obj.insert("id".into(), json!(id));
+            obj.insert("state".into(), json!("drafted"));
+        }
+        print_json(&v)?;
+    } else {
+        println!("{}", resolved.draft_line(&label));
+        println!("state: drafted ({id})");
+    }
+    Ok(())
 }

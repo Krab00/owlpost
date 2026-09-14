@@ -19,7 +19,7 @@ use reqwest::header::RETRY_AFTER;
 use serde_json::Value;
 
 use crate::contacts::Contact;
-use crate::envelope::{Envelope, Kind, Payload};
+use crate::envelope::{Envelope, Payload};
 use crate::identity::{self, Identity};
 use crate::server::{AppState, SIGNATURE_HEADER};
 use crate::tls;
@@ -375,7 +375,8 @@ pub fn verify_answer(
     let payload = envelope
         .verify(&key)
         .with_context(|| format!("answer from {} does not verify", contact.name))?;
-    if payload.kind != Kind::Answer {
+    // OWL-039: a content reply is the other shape a peer may reply with.
+    if !payload.kind.is_reply() {
         bail!(
             "peer replied with a {:?} payload, not an answer",
             payload.kind

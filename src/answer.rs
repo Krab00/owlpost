@@ -182,7 +182,8 @@ pub fn question_body<'a>(
 pub fn question_context(payload: &Payload) -> Option<&str> {
     match &payload.body {
         Body::Question { context, .. } => context.as_deref(),
-        Body::Answer { .. } => None,
+        // A content request carries no snippet, and a reply is not a question at all.
+        Body::Answer { .. } | Body::Content { .. } | Body::ContentReply { .. } => None,
     }
 }
 
@@ -238,7 +239,10 @@ pub fn thread_history(spool: &Spool, context_id: &str, except: &str) -> Vec<(Str
                     .find_map(|d| spool.get(d, answer_id).ok().flatten())
                     .and_then(|a| match payload_of(answer_id, &a).ok()?.body {
                         Body::Answer { answer, .. } => Some(answer),
-                        Body::Question { .. } => None,
+                        // Only an answer's words belong in the responder prompt's history.
+                        Body::Question { .. }
+                        | Body::Content { .. }
+                        | Body::ContentReply { .. } => None,
                     })?;
                 Some((rec.received_at.clone(), id, question.to_string(), answer))
             })
@@ -462,7 +466,7 @@ pub fn send(
     mode: SendMode,
 ) -> anyhow::Result<Sent> {
     let question = payload_of(id, &rec)?;
-    if question.kind != Kind::Question {
+    if !question.kind.is_request() {
         bail!("record {id} is an answer, not a question — nothing to send");
     }
     let draft = StoredDraft::from_record(id, &rec)?;
@@ -481,11 +485,19 @@ pub fn send(
             question.to
         );
     }
-    let (project, path, text) = question_body(id, &question)?;
-    let hash = envelope::question_hash(project, path, text);
+    // OWL-039: content is keyed by ref and by consent, not by question text — it has no
+    // question hash, so no `meta.hash` on the outbox record and no cache entry either way.
+    let hash = match question.kind {
+        Kind::Content => None,
+        _ => {
+            let (project, path, text) = question_body(id, &question)?;
+            Some(envelope::question_hash(project, path, text))
+        }
+    };
     // A question with a context snippet, or one continuing a thread we already hold, is
     // answered for that thread only: it never feeds the responder cache (OWL-034).
-    let cacheable = question_context(&question).is_none()
+    let cacheable = hash.is_some()
+        && question_context(&question).is_none()
         && !question
             .context_id
             .as_deref()
@@ -494,14 +506,33 @@ pub fn send(
     let (answer_id, answer_to) = match existing_answer(spool, id)? {
         Some((aid, ato)) => (aid, ato),
         None => {
-            let answer = Payload::answer(
-                &question,
-                &draft.text,
-                &draft.harness,
-                draft.redactions,
-                false,
-            );
+            let answer = match question.kind {
+                Kind::Content => {
+                    let c = crate::content::stored(&rec).with_context(|| {
+                        format!("record {id} has no content draft — run `owl draft {id}` first")
+                    })?;
+                    Payload::content_reply(
+                        &question,
+                        &c.text,
+                        &c.sha256,
+                        c.ref_resolved.as_deref(),
+                        c.truncated,
+                        c.redactions,
+                    )
+                }
+                _ => Payload::answer(
+                    &question,
+                    &draft.text,
+                    &draft.harness,
+                    draft.redactions,
+                    false,
+                ),
+            };
             let env = Envelope::sign(&answer, &identity);
+            let mut meta = json!({ "peer": question.from, "question_id": id });
+            if let Some(h) = &hash {
+                meta["hash"] = json!(h);
+            }
             let out = Record {
                 raw: env.raw,
                 sig: env.sig,
@@ -509,11 +540,11 @@ pub fn send(
                 seen: false,
                 received_at: envelope::rfc3339_now(),
                 draft: None,
-                meta: json!({ "peer": question.from, "question_id": id, "hash": hash }),
+                meta,
             };
             spool.put(Dir::Outbox, &answer.id, &out)?;
-            if cacheable {
-                spool.cache_put(&hash, &out)?;
+            if let (true, Some(h)) = (cacheable, &hash) {
+                spool.cache_put(h, &out)?;
             }
             (answer.id, answer.to)
         }
@@ -538,7 +569,11 @@ pub fn send(
         "answered",
         &[("answer_id", json!(answer_id))],
         Ev {
-            kind: "sent",
+            // OWL-039: the content timeline names its own kinds.
+            kind: match question.kind {
+                Kind::Content => "content-sent",
+                _ => "sent",
+            },
             by: Some(match mode {
                 SendMode::Manual => "human",
                 SendMode::Auto => "auto",

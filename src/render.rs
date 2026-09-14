@@ -387,6 +387,33 @@ pub fn record_block(
             }
             out
         }
+        // OWL-039: a content request and its reply are rendered by `owl show` itself (the
+        // request head, the content in a plain text block), never squeezed into the message
+        // table, so the table here shows the request's own summary line.
+        Body::Content { .. } | Body::ContentReply { .. } => {
+            let text = match &payload.body {
+                Body::Content { path, memory, git_ref, .. } => match (path, memory) {
+                    (Some(p), _) => format!("asks for {p}@{}", git_ref.as_deref().unwrap_or("HEAD")),
+                    (_, Some(k)) => format!("asks for memory:{k}"),
+                    _ => "asks for content".to_string(),
+                },
+                Body::ContentReply { content, .. } => content.clone(),
+                _ => unreachable!("outer match selected a content body"),
+            };
+            let (project, path) = match &payload.body {
+                Body::Content { project, path, .. } => (
+                    project.as_deref().unwrap_or("-"),
+                    path.as_deref(),
+                ),
+                _ => ("-", None),
+            };
+            message_table(
+                &header(n, &name, fingerprint, &hh_mm, project, path),
+                &text,
+                None,
+                None,
+            )
+        }
         Body::Answer { answer, .. } => {
             let question = payload
                 .in_reply_to
