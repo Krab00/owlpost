@@ -1256,3 +1256,128 @@ fn a_content_reply_never_enters_the_askers_cache() {
         "an ordinary answer still feeds the asker cache"
     );
 }
+
+/// The four event kinds are written by the code, not only rendered: this walks the whole
+/// exchange over two daemons again and reads `owl thread` on both sides. Nothing here builds
+/// an event by hand, so a typo in any of the four writers fails it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_exchange_writes_all_four_event_kinds() {
+    let (repo, _) = fixture_repo();
+    let a = id(1);
+    let b = responder(
+        repo.path(),
+        &[Peer::new(&a, "Ana", Some(policy(Mode::Manual, None)))],
+    )
+    .await;
+    let a_home = tempfile::tempdir().unwrap();
+    prepare_home_with(a_home.path(), &a, &[], |_| {});
+    write_contact_full(
+        a_home.path(),
+        &Peer::new(&b.id, "Bea", None),
+        &[&b.addr.to_string()],
+        &["bea@example.org"],
+    );
+    owl_ok(
+        a_home.path(),
+        &["request", "Bea", PROJECT, FILE, "--ref", "main"],
+    );
+    let rid = only_id(&b.spool(), Dir::Inbox);
+    owl_ok(b.home(), &["allow", &fp(&a), "--once"]);
+    owl_ok(b.home(), &["draft", &rid]);
+    owl_ok(b.home(), &["send", &rid]);
+    let a_path = a_home.path().to_path_buf();
+    tokio::task::spawn_blocking(move || pull_once(&id(1), &a_path))
+        .await
+        .unwrap();
+
+    let kinds = |home: &Path, peer: &str| -> Vec<String> {
+        let out = owl_ok(home, &["--json", "thread", peer]);
+        serde_json::from_str::<Vec<Value>>(&out)
+            .unwrap()
+            .iter()
+            .map(|r| r["kind"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let responder_side = kinds(b.home(), "Ana");
+    for want in ["content-requested", "content-drafted", "content-sent"] {
+        assert!(
+            responder_side.iter().any(|k| k == want),
+            "the responder's thread lacks {want}: {responder_side:?}"
+        );
+    }
+    // Order: the request arrives, is drafted, then sent.
+    let at = |k: &str| responder_side.iter().position(|x| x == k).unwrap();
+    assert!(at("content-requested") < at("content-drafted"));
+    assert!(at("content-drafted") < at("content-sent"));
+
+    let asker_side = kinds(a_home.path(), "Bea");
+    for want in ["content-requested", "content-received"] {
+        assert!(
+            asker_side.iter().any(|k| k == want),
+            "the asker's thread lacks {want}: {asker_side:?}"
+        );
+    }
+    // The drafted event carries what the human needs to judge it.
+    let out = owl_ok(b.home(), &["--json", "thread", "Ana"]);
+    let rows: Vec<Value> = serde_json::from_str(&out).unwrap();
+    let drafted = rows
+        .iter()
+        .find(|r| r["kind"] == "content-drafted")
+        .expect("the drafted row");
+    assert_eq!(drafted["by"], "human", "no model drafted it");
+    assert_eq!(drafted["detail"]["redactions"], 1);
+    assert_eq!(drafted["detail"]["truncated"], false);
+    assert!(drafted["detail"]["bytes"].as_u64().unwrap() > 0);
+}
+
+/// `owl edit` refuses a content draft: rewriting the bytes while the signed `sha256` still
+/// described the file would reach the asker as a tamper. The twin: it still edits a question.
+#[test]
+fn edit_refuses_a_content_draft() {
+    let d = drafting(|_| {}, content_at(Some("main")));
+    owl_ok(d.home.path(), &["draft", &d.id]);
+    let before = Spool::new(d.home.path())
+        .unwrap()
+        .get(Dir::Inbox, &d.id)
+        .unwrap()
+        .unwrap();
+    let (code, _, err) = owl(d.home.path(), &["edit", &d.id]);
+    assert_eq!(code, 1, "edit must refuse a content record: {err}");
+    assert!(
+        err.contains("is a content request — its draft is the file itself and cannot be edited"),
+        "stderr: {err}"
+    );
+    let after = Spool::new(d.home.path())
+        .unwrap()
+        .get(Dir::Inbox, &d.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(after.draft, before.draft, "the draft is untouched");
+}
+
+/// `owl show --format claude` — what the wake file and the mod's Show button print — carries
+/// the drafted content, so the human reads the exact bytes before `owl send`.
+#[test]
+fn the_claude_format_shows_the_drafted_content() {
+    let d = drafting(|_| {}, content_at(Some("main")));
+    let redacted = TIP.replace("api_key: hunter2", "[redacted]");
+    // Before the draft: the request only, no content anywhere.
+    let before = owl_ok(d.home.path(), &["show", &d.id, "--format", "claude"]);
+    assert!(before.contains("asks for"), "show: {before}");
+    assert!(
+        !before.contains(&redacted),
+        "nothing is read before draft: {before}"
+    );
+
+    owl_ok(d.home.path(), &["draft", &d.id]);
+    let after = owl_ok(d.home.path(), &["show", &d.id, "--format", "claude"]);
+    assert!(after.contains("content:"), "show: {after}");
+    assert!(after.contains(&redacted), "the exact bytes: {after}");
+    assert!(
+        after.contains(&format!(
+            "sha256: {}",
+            hex(&Sha256::digest(redacted.as_bytes()))
+        )),
+        "show: {after}"
+    );
+}

@@ -12,11 +12,19 @@ use owlpost::route;
 use owlpost::spool::{Dir, Spool};
 use serde_json::json;
 
-use super::{StoredDraft, existing_answer, inbox_record, print_json, user_error};
+use super::{StoredDraft, existing_answer, inbox_record, payload_of, print_json, user_error};
 
 pub fn run(home: &Path, id: &str, json: bool) -> anyhow::Result<()> {
     let spool = Spool::new(home)?;
     let mut rec = inbox_record(&spool, id)?;
+    // OWL-039: editing a content draft would change the bytes while `draft.sha256` — the
+    // digest `owl send` signs — kept describing the file, and the asker's `owl show` would
+    // report a tamper. Content is the file or it is nothing.
+    if payload_of(id, &rec)?.kind == owlpost::envelope::Kind::Content {
+        return Err(user_error(format!(
+            "record {id} is a content request — its draft is the file itself and cannot be edited; `owl reject {id}` declines it"
+        )));
+    }
     let mut draft = StoredDraft::from_record(id, &rec)?.ok_or_else(|| {
         user_error(format!(
             "record {id} has no draft — run `owl draft {id}` first"
