@@ -339,17 +339,40 @@ fn thread_list_rows_and_sort_order() {
     assert_eq!(rows[2]["unseen"], 0, "Bartek's one record is seen");
     assert_eq!(rows[0]["open"], 1, "a consent record is open");
 
-    // Human format: the §9 columns, same order.
+    // Human format: the §9 columns, same order, and every cell of every row in place.
+    // `print_table` pads each cell and joins with two spaces, so a run of two or more
+    // spaces separates cells while the single spaces inside a summary are kept.
     let table = h.ok(&["thread"]);
+    let cells = |line: &str| -> Vec<String> {
+        line.split("  ")
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+            .map(str::to_string)
+            .collect()
+    };
     let mut lines = table.lines();
     assert_eq!(
-        lines.next().unwrap().split_whitespace().collect::<Vec<_>>(),
+        cells(lines.next().unwrap()),
         ["PEER", "UNSEEN", "OPEN", "LAST", "SUMMARY"]
     );
-    let peers: Vec<&str> = lines
-        .map(|l| l.split_whitespace().next().unwrap())
-        .collect();
-    assert_eq!(peers, ["Cezary", "Ania", "Bartek"]);
+    let rows: Vec<Vec<String>> = lines.map(cells).collect();
+    let row = |cs: [&str; 5]| -> Vec<String> { cs.iter().map(|c| c.to_string()).collect() };
+    // Ania is 3 unseen / 2 open and Bartek 0 / 1, so swapping the two columns is visible.
+    assert_eq!(
+        rows,
+        vec![
+            row(["Cezary", "1", "1", "2026-09-14T11:00:00Z", "cezary asks"]),
+            row([
+                "Ania",
+                "3",
+                "2",
+                "2026-09-14T10:00:00Z",
+                "why is the token rotated?"
+            ]),
+            row(["Bartek", "0", "1", "2026-09-14T10:00:00Z", "bartek asks"]),
+        ],
+        "table:\n{table}"
+    );
 }
 
 /// AC4 negative twin: nothing in any of the four directories is exit 4 `no threads`.
@@ -992,14 +1015,17 @@ fn inbox_and_history_json_carry_context_id() {
     );
 
     let inbox = h.json(&["inbox"]);
-    let ctx: Vec<&Value> = inbox
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|r| &r["context_id"])
-        .collect();
-    assert!(ctx.contains(&&json!("ctx-9")), "{inbox:#}");
-    assert!(ctx.contains(&&json!(null)), "{inbox:#}");
+    // Row by row: the threaded record carries its own thread id, the plain one carries null.
+    let row_for = |v: &Value, text: &str| -> Value {
+        v.as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["summary"] == text || r["text"] == text)
+            .unwrap_or_else(|| panic!("no row for {text:?}: {v:#}"))
+            .clone()
+    };
+    assert_eq!(row_for(&inbox, "threaded")["context_id"], "ctx-9");
+    assert_eq!(row_for(&inbox, "plain")["context_id"], json!(null));
     // Every pre-existing key still there, on every row.
     for row in inbox.as_array().unwrap() {
         for key in [
@@ -1042,15 +1068,13 @@ fn inbox_and_history_json_carry_context_id() {
             assert!(row.get(key).is_some(), "history row lost {key}: {row:#}");
         }
     }
-    let hctx: Vec<&Value> = history
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|r| &r["context_id"])
-        .collect();
-    assert!(
-        hctx.contains(&&json!("ctx-9")) && hctx.contains(&&json!(null)),
-        "{history:#}"
+    assert_eq!(
+        row_for(&history, "finished threaded")["context_id"],
+        "ctx-9"
+    );
+    assert_eq!(
+        row_for(&history, "finished plain")["context_id"],
+        json!(null)
     );
 
     // The human tables are the §9 ones, unchanged by the additive key.
