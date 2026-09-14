@@ -105,7 +105,8 @@ fn signed_content(from: &Identity, to: &Identity, git_ref: Option<&str>) -> Enve
 async fn responder(repo: &Path, peers: &[Peer<'_>]) -> TestDaemon {
     let repo = repo.to_path_buf();
     spawn_daemon_with(2, peers, move |cfg| {
-        cfg.projects.insert(PROJECT.into(), repo.display().to_string());
+        cfg.projects
+            .insert(PROJECT.into(), repo.display().to_string());
     })
     .await
 }
@@ -135,7 +136,13 @@ fn owl_ok(home: &Path, args: &[&str]) -> String {
 
 fn only_id(spool: &Spool, dir: Dir) -> String {
     let all = spool.list(dir, |_| true).unwrap();
-    assert_eq!(all.len(), 1, "expected one record in {:?}, got {}", dir.name(), all.len());
+    assert_eq!(
+        all.len(),
+        1,
+        "expected one record in {:?}, got {}",
+        dir.name(),
+        all.len()
+    );
     all[0].0.clone()
 }
 
@@ -154,16 +161,25 @@ fn content_and_reply_round_trip_with_their_wire_keys() {
     let v: Value = serde_json::from_slice(&req.to_signed_bytes()).unwrap();
     assert_eq!(v["type"], "content");
     assert_eq!(v["body"]["project"], PROJECT);
-    assert_eq!(v["body"]["ref"], "main", "the wire key is `ref`, not `git_ref`");
+    assert_eq!(
+        v["body"]["ref"], "main",
+        "the wire key is `ref`, not `git_ref`"
+    );
     assert_eq!(v["body"]["path"], FILE);
-    assert!(v["body"].get("memory").is_none(), "absent memory is omitted");
+    assert!(
+        v["body"].get("memory").is_none(),
+        "absent memory is omitted"
+    );
     let back: Payload = serde_json::from_value(v).unwrap();
     assert_eq!(back, req);
     assert!(matches!(back.body, Body::Content { .. }), "body variant");
 
     let reply = Payload::content_reply(&req, "hello", "abc", Some("deadbeef"), true, 2);
     let v: Value = serde_json::from_slice(&reply.to_signed_bytes()).unwrap();
-    assert_eq!(v["type"], "content-reply", "lowercase alone would say contentreply");
+    assert_eq!(
+        v["type"], "content-reply",
+        "lowercase alone would say contentreply"
+    );
     for (k, want) in [
         ("content", json!("hello")),
         ("sha256", json!("abc")),
@@ -234,7 +250,11 @@ async fn validation_table_answers_400_and_spools_nothing() {
     let a = id(1);
     let memories = tempfile::tempdir().unwrap();
     std::fs::write(memories.path().join("note.md"), "hi\n").unwrap();
-    let d = responder(repo.path(), &[Peer::new(&a, "Ana", Some(policy(Mode::Manual, None)))]).await;
+    let d = responder(
+        repo.path(),
+        &[Peer::new(&a, "Ana", Some(policy(Mode::Manual, None)))],
+    )
+    .await;
     let c = client(Some(&a), &d.id);
 
     // `body` overrides applied to a valid content request.
@@ -269,7 +289,10 @@ async fn validation_table_answers_400_and_spools_nothing() {
             "memory key escapes the memory store",
         ),
         // No `memory_root` on this daemon at all.
-        (json!({ "memory": "note.md" }), "memory store not configured"),
+        (
+            json!({ "memory": "note.md" }),
+            "memory store not configured",
+        ),
         (
             json!({ "project": PROJECT, "path": FILE, "ref": "main;rm -rf /" }),
             "malformed ref",
@@ -298,10 +321,14 @@ async fn validation_table_answers_400_and_spools_nothing() {
     }
     // `private_memory` is false by default even when a root is configured.
     let root = memories.path().display().to_string();
-    let d2 = spawn_daemon_with(3, &[Peer::new(&a, "Ana", Some(policy(Mode::Manual, None)))], {
-        let root = root.clone();
-        move |cfg| cfg.responder.memory_root = Some(root)
-    })
+    let d2 = spawn_daemon_with(
+        3,
+        &[Peer::new(&a, "Ana", Some(policy(Mode::Manual, None)))],
+        {
+            let root = root.clone();
+            move |cfg| cfg.responder.memory_root = Some(root)
+        },
+    )
     .await;
     let c2 = client(Some(&a), &d2.id);
     let mem = Payload::content(&fp(&a), &d2.fp(), None, None, None, Some("note.md"));
@@ -318,7 +345,10 @@ async fn validation_table_answers_400_and_spools_nothing() {
     assert_eq!(body["state"], "TASK_STATE_SUBMITTED");
     let spool = d.spool();
     let rid = only_id(&spool, Dir::Inbox);
-    assert_eq!(spool.get(Dir::Inbox, &rid).unwrap().unwrap().state, "consent");
+    assert_eq!(
+        spool.get(Dir::Inbox, &rid).unwrap().unwrap().state,
+        "consent"
+    );
 }
 
 /// A path inside the allowlist that does not exist still reaches consent: the daemon never
@@ -327,7 +357,11 @@ async fn validation_table_answers_400_and_spools_nothing() {
 async fn a_missing_path_inside_the_allowlist_still_reaches_consent() {
     let (repo, _) = fixture_repo();
     let a = id(1);
-    let d = responder(repo.path(), &[Peer::new(&a, "Ana", Some(policy(Mode::Manual, None)))]).await;
+    let d = responder(
+        repo.path(),
+        &[Peer::new(&a, "Ana", Some(policy(Mode::Manual, None)))],
+    )
+    .await;
     let c = client(Some(&a), &d.id);
     let p = Payload::content(
         &fp(&a),
@@ -355,7 +389,12 @@ async fn a_missing_path_inside_the_allowlist_still_reaches_consent() {
 /// AC3: the state table is explicit about the kind, and only about the kind.
 #[test]
 fn record_state_for_holds_content_in_every_mode() {
-    for mode in [None, Some(Mode::Manual), Some(Mode::Auto), Some(Mode::Never)] {
+    for mode in [
+        None,
+        Some(Mode::Manual),
+        Some(Mode::Auto),
+        Some(Mode::Never),
+    ] {
         assert_eq!(
             record_state_for(Kind::Content, mode),
             ("consent", false),
@@ -372,7 +411,11 @@ fn record_state_for_holds_content_in_every_mode() {
 async fn auto_peer_is_held_for_content_and_not_for_a_question() {
     let (repo, _) = fixture_repo();
     let a = id(1);
-    let d = responder(repo.path(), &[Peer::new(&a, "Ana", Some(policy(Mode::Auto, None)))]).await;
+    let d = responder(
+        repo.path(),
+        &[Peer::new(&a, "Ana", Some(policy(Mode::Auto, None)))],
+    )
+    .await;
     let c = client(Some(&a), &d.id);
 
     let env = signed_content(&a, &d.id, Some("main"));
@@ -380,7 +423,10 @@ async fn auto_peer_is_held_for_content_and_not_for_a_question() {
     let spool = d.spool();
     let cid = only_id(&spool, Dir::Inbox);
     let crec = spool.get(Dir::Inbox, &cid).unwrap().unwrap();
-    assert_eq!(crec.state, "consent", "auto policy does not apply to content");
+    assert_eq!(
+        crec.state, "consent",
+        "auto policy does not apply to content"
+    );
 
     // The positive twin: a question from the very same peer is `pending` (auto candidate).
     let q = signed(&a, &d.id, "why?");
@@ -392,7 +438,10 @@ async fn auto_peer_is_held_for_content_and_not_for_a_question() {
         .map(|(i, _)| i)
         .find(|i| *i != cid)
         .expect("the question record");
-    assert_eq!(spool.get(Dir::Inbox, &qid).unwrap().unwrap().state, "pending");
+    assert_eq!(
+        spool.get(Dir::Inbox, &qid).unwrap().unwrap().state,
+        "pending"
+    );
 
     // The scheduler refuses the content record by name, even once it is `pending`.
     let cfg = Config::load(d.home()).unwrap();
@@ -400,12 +449,18 @@ async fn auto_peer_is_held_for_content_and_not_for_a_question() {
     let out = owlpost::auto::attempt(d.home(), d.home(), &cfg, &spool, &cid).unwrap();
     assert_eq!(
         out,
-        owlpost::auto::Outcome::Skipped(format!("record {cid} is a content request — consent only"))
+        owlpost::auto::Outcome::Skipped(format!(
+            "record {cid} is a content request — consent only"
+        ))
     );
 
     // A `never` peer is still refused at the API, unchanged.
     let e = id(9);
-    let d2 = responder(repo.path(), &[Peer::new(&e, "Eve", Some(policy(Mode::Never, None)))]).await;
+    let d2 = responder(
+        repo.path(),
+        &[Peer::new(&e, "Eve", Some(policy(Mode::Never, None)))],
+    )
+    .await;
     let c2 = client(Some(&e), &d2.id);
     let resp = post_envelope(&c2, &d2, &signed_content(&e, &d2.id, None)).await;
     assert_eq!(resp.status().as_u16(), 403);
@@ -423,7 +478,11 @@ async fn auto_peer_is_held_for_content_and_not_for_a_question() {
 async fn no_cache_entry_is_read_or_written_for_content() {
     let (repo, _) = fixture_repo();
     let a = id(1);
-    let d = responder(repo.path(), &[Peer::new(&a, "Ana", Some(policy(Mode::Manual, None)))]).await;
+    let d = responder(
+        repo.path(),
+        &[Peer::new(&a, "Ana", Some(policy(Mode::Manual, None)))],
+    )
+    .await;
     let c = client(Some(&a), &d.id);
     let spool = d.spool();
 
@@ -458,7 +517,11 @@ async fn no_cache_entry_is_read_or_written_for_content() {
     owl_ok(d.home(), &["draft", &rid]);
     owl_ok(d.home(), &["send", &rid]);
     let cached = spool.list(Dir::Cache, |_| true).unwrap();
-    assert_eq!(cached.len(), 1, "only the planted entry, never a content one");
+    assert_eq!(
+        cached.len(),
+        1,
+        "only the planted entry, never a content one"
+    );
     assert_eq!(cached[0].0, hash);
     // The outbox reply carries no hash either.
     let oid = only_id(&spool, Dir::Outbox);
@@ -507,7 +570,14 @@ fn drafting(tweak: impl FnOnce(&mut Config), payload: Payload) -> Drafting {
 }
 
 fn content_at(git_ref: Option<&str>) -> Payload {
-    Payload::content(&fp(&id(1)), &fp(&id(2)), Some(PROJECT), git_ref, Some(FILE), None)
+    Payload::content(
+        &fp(&id(1)),
+        &fp(&id(2)),
+        Some(PROJECT),
+        git_ref,
+        Some(FILE),
+        None,
+    )
 }
 
 /// AC5: the draft reads the file at the resolved ref, redacts it, prints the documented line
@@ -517,12 +587,7 @@ fn draft_reads_the_file_at_the_ref_and_redacts_it() {
     let d = drafting(|_| {}, content_at(Some("main")));
     let out = owl_ok(d.home.path(), &["draft", &d.id]);
     let redacted = TIP.replace("api_key: hunter2", "[redacted]");
-    assert!(
-        out.contains(&format!(
-            "content: {FILE}@",
-        )),
-        "stdout: {out}"
-    );
+    assert!(out.contains(&format!("content: {FILE}@",)), "stdout: {out}");
     assert!(
         out.contains(&format!("({} bytes, 1 redactions)", redacted.len())),
         "stdout: {out}"
@@ -563,7 +628,11 @@ fn draft_at_an_older_ref_serves_that_commits_content() {
     };
     // The two fixtures are separate repos, so compare the content, not the sha.
     assert_eq!(at(&d).text, TIP.replace("api_key: hunter2", "[redacted]"));
-    assert_eq!(at(&d2).text, FIRST, "the first commit's content, not the tip's");
+    assert_eq!(
+        at(&d2).text,
+        FIRST,
+        "the first commit's content, not the tip's"
+    );
     assert_eq!(at(&d2).redactions, 0);
 }
 
@@ -641,7 +710,10 @@ fn oversize_content_is_cut_on_a_character_boundary() {
     );
     assert_eq!(c.full_bytes, big.len());
     assert!(
-        out.contains(&format!("truncated, {MAX_CONTENT_BYTES} of {} bytes", big.len())),
+        out.contains(&format!(
+            "truncated, {MAX_CONTENT_BYTES} of {} bytes",
+            big.len()
+        )),
         "stdout: {out}"
     );
 }
@@ -674,7 +746,10 @@ fn binary_and_nul_carrying_files_are_refused() {
             .unwrap();
         let (code, out, err) = owl(d.home.path(), &["draft", &p.id]);
         assert_eq!(code, 1, "{name} must be refused");
-        assert!(err.contains(&format!("{name} is not text")), "stderr: {err}");
+        assert!(
+            err.contains(&format!("{name} is not text")),
+            "stderr: {err}"
+        );
         assert!(out.is_empty(), "{name} printed {out}");
         let rec = spool.get(Dir::Inbox, &p.id).unwrap().unwrap();
         assert!(rec.draft.is_none(), "{name} stored a draft");
@@ -705,7 +780,10 @@ fn a_directory_is_not_served_as_content() {
         .unwrap();
     let (code, _, err) = owl(d.home.path(), &["draft", &p.id]);
     assert_eq!(code, 1, "a tree must be refused");
-    assert!(err.contains("unknown path src/auth at main"), "stderr: {err}");
+    assert!(
+        err.contains("unknown path src/auth at main"),
+        "stderr: {err}"
+    );
 }
 
 /// AC8: a memory request serves `<memory_root>/<key>`, carries no `ref_resolved`, and a key
@@ -717,12 +795,14 @@ fn memory_requests_serve_the_store_and_refuse_an_escape() {
     std::fs::create_dir_all(store.path().join("decisions")).unwrap();
     std::fs::write(store.path().join("decisions/a.md"), "a decision\n").unwrap();
     std::fs::write(outside.path().join("secret.md"), "not yours\n").unwrap();
-    std::os::unix::fs::symlink(outside.path().join("secret.md"), store.path().join("out.md"))
-        .unwrap();
+    std::os::unix::fs::symlink(
+        outside.path().join("secret.md"),
+        store.path().join("out.md"),
+    )
+    .unwrap();
     let root = store.path().display().to_string();
-    let memory = |key: &str| {
-        Payload::content(&fp(&id(1)), &fp(&id(2)), None, None, None, Some(key))
-    };
+    let memory =
+        |key: &str| Payload::content(&fp(&id(1)), &fp(&id(2)), None, None, None, Some(key));
 
     let d = drafting(
         {
@@ -735,7 +815,10 @@ fn memory_requests_serve_the_store_and_refuse_an_escape() {
         memory("decisions/a.md"),
     );
     let out = owl_ok(d.home.path(), &["draft", &d.id]);
-    assert!(out.contains("content: memory:decisions/a.md ("), "stdout: {out}");
+    assert!(
+        out.contains("content: memory:decisions/a.md ("),
+        "stdout: {out}"
+    );
     let spool = Spool::new(d.home.path()).unwrap();
     let c = content::stored(&spool.get(Dir::Inbox, &d.id).unwrap().unwrap()).unwrap();
     assert_eq!(c.text, "a decision\n");
@@ -754,7 +837,10 @@ fn memory_requests_serve_the_store_and_refuse_an_escape() {
     );
     let (code, _, err) = owl(d2.home.path(), &["draft", &d2.id]);
     assert_eq!(code, 1, "a symlink out of the store must be refused");
-    assert!(err.contains("out.md is outside the memory store"), "stderr: {err}");
+    assert!(
+        err.contains("out.md is outside the memory store"),
+        "stderr: {err}"
+    );
     let rec = Spool::new(d2.home.path())
         .unwrap()
         .get(Dir::Inbox, &d2.id)
@@ -786,7 +872,11 @@ fn inbox_summarises_a_content_request() {
 async fn end_to_end_request_consent_draft_send_and_verify() {
     let (repo, _) = fixture_repo();
     let a = id(1);
-    let b = responder(repo.path(), &[Peer::new(&a, "Ana", Some(policy(Mode::Manual, None)))]).await;
+    let b = responder(
+        repo.path(),
+        &[Peer::new(&a, "Ana", Some(policy(Mode::Manual, None)))],
+    )
+    .await;
     let a_home = tempfile::tempdir().unwrap();
     prepare_home_with(a_home.path(), &a, &[], |_| {});
     write_contact_full(
@@ -796,7 +886,10 @@ async fn end_to_end_request_consent_draft_send_and_verify() {
         &["bea@example.org"],
     );
 
-    let out = owl_ok(a_home.path(), &["request", "Bea", PROJECT, FILE, "--ref", "main"]);
+    let out = owl_ok(
+        a_home.path(),
+        &["request", "Bea", PROJECT, FILE, "--ref", "main"],
+    );
     assert!(
         out.contains("— waiting for the owner's consent"),
         "stdout: {out}"
@@ -807,7 +900,10 @@ async fn end_to_end_request_consent_draft_send_and_verify() {
     let b_spool = b.spool();
     let rid = only_id(&b_spool, Dir::Inbox);
     assert_eq!(rid, ask_id, "the responder keeps the request's own id");
-    assert_eq!(b_spool.get(Dir::Inbox, &rid).unwrap().unwrap().state, "consent");
+    assert_eq!(
+        b_spool.get(Dir::Inbox, &rid).unwrap().unwrap().state,
+        "consent"
+    );
 
     owl_ok(b.home(), &["allow", &fp(&a), "--once"]);
     owl_ok(b.home(), &["draft", &rid]);
@@ -827,7 +923,10 @@ async fn end_to_end_request_consent_draft_send_and_verify() {
         .await
         .unwrap();
     let shown = owl_ok(a_home.path(), &["show", &pulled]);
-    assert!(shown.contains(&redacted), "the content, byte-identical: {shown}");
+    assert!(
+        shown.contains(&redacted),
+        "the content, byte-identical: {shown}"
+    );
     let sha = hex(&Sha256::digest(redacted.as_bytes()));
     assert!(
         shown.contains(&format!("sha256 {sha} — verified")),
@@ -892,8 +991,18 @@ fn thread_shows_the_content_events_on_both_sides() {
     let mut rec = common::record(&Envelope::sign(&req, &a), "answered");
     rec.meta = json!({ "peer": fp(&a) });
     push_at(&mut rec, "2026-09-01T10:00:00Z", "content-requested", None);
-    push_at(&mut rec, "2026-09-01T10:05:00Z", "content-drafted", Some("human"));
-    push_at(&mut rec, "2026-09-01T10:09:00Z", "content-sent", Some("human"));
+    push_at(
+        &mut rec,
+        "2026-09-01T10:05:00Z",
+        "content-drafted",
+        Some("human"),
+    );
+    push_at(
+        &mut rec,
+        "2026-09-01T10:09:00Z",
+        "content-sent",
+        Some("human"),
+    );
     spool.put(Dir::Done, &req.id, &rec).unwrap();
 
     let mut q = Payload::question(&fp(&a), &fp(&b), PROJECT, Some(FILE), "why?");
@@ -949,7 +1058,12 @@ fn asker_side_carries_requested_and_received() {
     req.context_id = Some("t".into());
     let mut areq = common::record(&Envelope::sign(&req, &a), "answered");
     areq.meta = json!({ "peer": fp(&b) });
-    push_at(&mut areq, "2026-09-01T10:00:00Z", "content-requested", Some("human"));
+    push_at(
+        &mut areq,
+        "2026-09-01T10:00:00Z",
+        "content-requested",
+        Some("human"),
+    );
     spool.put(Dir::Done, &req.id, &areq).unwrap();
 
     let reply = Payload::content_reply(&req, "body\n", "deadbeef", Some("abc"), false, 0);
@@ -1003,7 +1117,10 @@ fn show_caps_the_content_at_two_hundred_lines() {
     let shown = content::display(&long, "abc");
     assert!(shown.starts_with(&short));
     assert!(
-        shown.ends_with(&format!("… 2 more lines — {} bytes, sha256 abc", long.len())),
+        shown.ends_with(&format!(
+            "… 2 more lines — {} bytes, sha256 abc",
+            long.len()
+        )),
         "shown tail: {}",
         &shown[shown.len().saturating_sub(80)..]
     );
@@ -1024,7 +1141,10 @@ fn verify_line_reports_match_mismatch_and_truncation() {
     assert_eq!(line, format!("sha256 {sha} — verified"));
     let (line, ok) = content::verify_line("hello!\n", &sha, false);
     assert!(!ok);
-    assert_eq!(line, "sha256 mismatch — the content does not match its digest");
+    assert_eq!(
+        line,
+        "sha256 mismatch — the content does not match its digest"
+    );
     // A truncated reply is a prefix by design: its digest cannot match and must not read as
     // a tamper.
     let (line, ok) = content::verify_line("hel", &sha, true);
@@ -1038,7 +1158,11 @@ fn verify_line_reports_match_mismatch_and_truncation() {
 async fn a_backslash_traversal_is_refused_too() {
     let (repo, _) = fixture_repo();
     let a = id(1);
-    let d = responder(repo.path(), &[Peer::new(&a, "Ana", Some(policy(Mode::Manual, None)))]).await;
+    let d = responder(
+        repo.path(),
+        &[Peer::new(&a, "Ana", Some(policy(Mode::Manual, None)))],
+    )
+    .await;
     let c = client(Some(&a), &d.id);
     let p = Payload::content(
         &fp(&a),
@@ -1059,7 +1183,11 @@ async fn a_backslash_traversal_is_refused_too() {
 async fn a_content_tag_with_a_question_body_is_refused() {
     let (repo, _) = fixture_repo();
     let a = id(1);
-    let d = responder(repo.path(), &[Peer::new(&a, "Ana", Some(policy(Mode::Auto, None)))]).await;
+    let d = responder(
+        repo.path(),
+        &[Peer::new(&a, "Ana", Some(policy(Mode::Auto, None)))],
+    )
+    .await;
     let c = client(Some(&a), &d.id);
     let mut v = serde_json::to_value(request(&a, &d.id, Some("main"))).unwrap();
     v["body"]["question"] = json!("why?");

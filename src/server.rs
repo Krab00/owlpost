@@ -474,15 +474,12 @@ fn escapes_root(p: &str) -> bool {
 /// stat'ed or read here: reading the disk at arrival would let an unanswered peer probe for
 /// file existence by timing, which the consent gate exists to prevent. A path inside the
 /// allowlist that does not exist reaches consent and fails at `owl draft`.
-fn validate_content_body(
-    body: &serde_json::Map<String, Value>,
-    config: &Config,
-) -> ApiResult<()> {
+fn validate_content_body(body: &serde_json::Map<String, Value>, config: &Config) -> ApiResult<()> {
     let field = |k: &str| body.get(k).and_then(Value::as_str);
     match (field("path"), field("memory")) {
         (Some(path), None) => {
-            let project = field("project")
-                .ok_or_else(|| ApiError::bad_request("missing body.project"))?;
+            let project =
+                field("project").ok_or_else(|| ApiError::bad_request("missing body.project"))?;
             if !config.projects.contains_key(project) {
                 return Err(ApiError::bad_request("unknown project"));
             }
@@ -566,7 +563,9 @@ fn validate_request(value: &Value, caller: &str, me: &str, config: &Config) -> A
             Some(Value::String(c)) if envelope::check_context(c).is_ok() => {}
             Some(Value::String(_)) => return Err(ApiError::bad_request("context too long")),
             Some(_) => {
-                return Err(ApiError::bad_request("bad schema: body.context is not a string"));
+                return Err(ApiError::bad_request(
+                    "bad schema: body.context is not a string",
+                ));
             }
         }
     }

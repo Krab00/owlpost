@@ -257,9 +257,7 @@ fn row(e: &Entry) -> Value {
         "context_id": e.payload.context_id,
         "type": kind_str(e.payload.kind),
         "state": e.rec.state,
-        "project": match &e.payload.body {
-            _ => super::body_project(&e.payload.body),
-        },
+        "project": super::body_project(&e.payload.body),
         "path": body_path(&e.payload.body),
         // The full text, never cut: the reader (or the mod) decides what to truncate.
         "text": message_text(&e.payload),

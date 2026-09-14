@@ -2438,11 +2438,13 @@ fn request_command_documents_its_invocation() {
         "request.md must name the file form on one line:\n{body}"
     );
     assert!(
-        body.lines().any(|l| l.contains("owl request <peer> --memory")),
+        body.lines()
+            .any(|l| l.contains("owl request <peer> --memory")),
         "request.md must name the memory form on one line:\n{body}"
     );
     assert!(
-        body.lines().any(|l| l.contains("Never widen what they named")),
+        body.lines()
+            .any(|l| l.contains("Never widen what they named")),
         "request.md must repeat the no-widening rule:\n{body}"
     );
     assert_eq!(

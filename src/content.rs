@@ -289,12 +289,7 @@ fn rev_parse(checkout: &Path, git_ref: &str) -> anyhow::Result<String> {
 
 /// `git show <commit>:<path>`, but only when the object is a blob: `git show` on a tree
 /// prints a directory listing, which would turn the allowlist into a file browser.
-fn git_blob(
-    checkout: &Path,
-    commit: &str,
-    path: &str,
-    git_ref: &str,
-) -> anyhow::Result<Vec<u8>> {
+fn git_blob(checkout: &Path, commit: &str, path: &str, git_ref: &str) -> anyhow::Result<Vec<u8>> {
     let spec = format!("{commit}:{path}");
     let kind = git(checkout, &["cat-file", "-t", &spec])?;
     if !kind.status.success() || String::from_utf8_lossy(&kind.stdout).trim() != "blob" {
@@ -349,7 +344,7 @@ mod tests {
         // 1 ASCII byte + 2-byte chars: every odd index above 1 is inside a character.
         for max in 0..text.len() + 3 {
             let cut = cut_at_char_boundary(&text, max);
-            assert!(cut.len() <= max.max(0) || text.len() <= max, "cut {max} grew");
+            assert!(cut.len() <= max || text.len() <= max, "cut {max} grew");
             assert!(text.starts_with(cut), "cut {max} is not a prefix");
         }
         assert_eq!(cut_at_char_boundary(&text, 2), "a");
@@ -360,12 +355,13 @@ mod tests {
     /// `body_summary` is what the inbox row, the timeline and the mod show.
     #[test]
     fn summary_names_the_path_with_its_ref_or_the_memory_key() {
-        let body = |path: Option<&str>, git_ref: Option<&str>, memory: Option<&str>| Body::Content {
-            project: Some("p".into()),
-            git_ref: git_ref.map(str::to_string),
-            path: path.map(str::to_string),
-            memory: memory.map(str::to_string),
-        };
+        let body =
+            |path: Option<&str>, git_ref: Option<&str>, memory: Option<&str>| Body::Content {
+                project: Some("p".into()),
+                git_ref: git_ref.map(str::to_string),
+                path: path.map(str::to_string),
+                memory: memory.map(str::to_string),
+            };
         assert_eq!(
             body_summary(&body(Some("src/a.rs"), Some("main"), None)),
             "src/a.rs@main"
