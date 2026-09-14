@@ -1219,7 +1219,10 @@ fn a_content_reply_never_enters_the_askers_cache() {
     let book = owlpost::contacts::ContactBook::load(home.path(), home.path()).unwrap();
     let contact = book.resolve("Bea").unwrap().clone();
     let open = owlpost::pull::open_asks(&spool).unwrap();
-    assert!(open.contains_key(&req.id), "the content ask must be an open ask");
+    assert!(
+        open.contains_key(&req.id),
+        "the content ask must be an open ask"
+    );
     let iroh = owlpost::client::Iroh::from_home(home.path());
     owlpost::pull::ingest_envelope(&a, &contact, &iroh, &spool, &open, &env).unwrap();
 
