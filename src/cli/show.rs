@@ -134,7 +134,10 @@ pub fn run(home: &Path, id: &str, json: bool, format: Option<&str>) -> anyhow::R
                         println!("ref:      {r}");
                     }
                     println!("content:");
-                    println!("{}", render::fenced_text(&content::display(content, sha256)));
+                    println!(
+                        "{}",
+                        render::fenced_text(&content::display(content, sha256))
+                    );
                     let (line, ok) = content::verify_line(content, sha256, *truncated);
                     println!("{line}");
                     if !ok {
