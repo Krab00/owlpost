@@ -1,4 +1,8 @@
 {
+  "description": "owlpost: inbox counter and wake hooks (classic), plus the owlpost.tsx UI module where function hooks are on",
+  "modules": [
+    "./owlpost.tsx"
+  ],
   "hooks": {
     "SessionStart": [
       {
