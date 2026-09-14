@@ -339,6 +339,31 @@ owl show <id>
 /owlpost:show <id>
 ```
 
+### 3.11 The whole conversation with one person
+
+The inbox is a pile of separate records; a thread is one person. `owl thread` lists everyone
+who has ever written, newest conversation first, with how many of their questions are still
+unseen and how many are still open:
+
+```
+owl thread
+/owlpost:thread
+```
+
+Naming a person prints that conversation in one chronological order, in both directions: what
+they asked you, what you asked them, and what happened to every request on the way — held for
+consent, allowed, drafted by which harness, edited, sent, rejected. Their messages come as the
+familiar table; your own words come in a plain text block.
+
+```
+owl thread Ania
+owl thread Ania --since 7d
+/owlpost:thread Ania
+```
+
+`owl thread` only reads. It never answers anything, never marks a record seen and never
+changes a policy — use `/owlpost:inbox` to act on an open question you find there.
+
 ---
 
 ## 4. History
