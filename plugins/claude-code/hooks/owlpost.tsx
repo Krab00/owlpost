@@ -7,12 +7,15 @@
 //   browses and filters contacts, sends a question and walks the inbox, all by running `owl`
 //   directly: no model turn, no tokens. Drafting an answer still goes through the model.
 //   Running the same command again (or the Close button) closes the pane.
+// The inbox is a thread list (OWL-038): one row per person, Open draws the whole conversation
+// with them oldest first, and the action buttons sit next to the open request only.
 import type { EngineInterface, Register } from 'claude-code'
 
 type $ = EngineInterface
-type View = 'contacts' | 'ask' | 'inbox'
+type View = 'contacts' | 'ask' | 'threads' | 'thread'
 type Contact = { name: string; emails: string[]; fingerprint: string; source: string; policy?: { mode: string } }
-type Row = { id: string; n: number; from: string; from_name: string; type: string; state: string; age: string; path?: string; summary: string; has_draft: boolean }
+type Thread = { from: string; from_name: string; last_ts: string; unseen: number; open: number; last_summary: string }
+type Ev = { ts: string; kind: string; dir: string; record_id: string; type: string; state: string; path?: string; text: string; by?: string; harness?: string }
 
 const PANE = 'owlpost'
 const MARK = '🦉 owlpost'
@@ -20,7 +23,9 @@ const POLL_MS = 15_000 // ponytail: polling `owl inbox --count`; the FileChanged
 
 let view: View = 'contacts'
 let contacts: Contact[] = []
-let inbox: Row[] = []
+let threads: Thread[] = []
+let timeline: Ev[] = []
+let openPeer = '' // fingerprint of the conversation the `thread` view shows
 let unseen = { count: 0, questions: 0 }
 let filter = ''
 let to: Contact | undefined
@@ -28,7 +33,6 @@ let path = ''
 let question = ''
 let reply: Record<string, string> = {}
 let note = ''
-let shown = '' // `owl show` output of the record opened in the inbox view
 let paneOpen = false
 
 async function owl($: $, args: string[]): Promise<{ ok: boolean; out: string }> {
@@ -51,12 +55,22 @@ async function json<T>($: $, args: string[], fallback: T): Promise<T> {
 }
 
 async function refresh($: $) {
-  ;[unseen, contacts, inbox] = await Promise.all([
+  ;[unseen, contacts, threads] = await Promise.all([
     json($, ['inbox', '--count'], { count: 0, questions: 0 }),
     json<Contact[]>($, ['contact', 'list'], []),
-    json<Row[]>($, ['inbox'], []),
+    // Exit 4 `no threads` is not an error here: the fallback is an empty list.
+    json<Thread[]>($, ['thread'], []),
   ])
   contacts.sort((a, b) => a.name.localeCompare(b.name))
+  if (openPeer) timeline = await json<Ev[]>($, ['thread', openPeer], [])
+  $.ui.invalidate('ui.render')
+}
+
+// Opens one person's conversation, oldest first.
+async function openThread($: $, fingerprint: string) {
+  openPeer = fingerprint
+  view = 'thread'
+  timeline = await json<Ev[]>($, ['thread', fingerprint], [])
   $.ui.invalidate('ui.render')
 }
 
@@ -131,7 +145,7 @@ export const register: Register = (on) => {
     return (
       <Box flexDirection="row" gap={2}>
         <Text color="yellow">{`${MARK}: ${parts.join(', ')}`}</Text>
-        <Button label="Inbox" onPress={() => void open($, 'inbox')} />
+        <Button label="Inbox" onPress={() => void open($, 'threads')} />
         <Button label="Contacts" onPress={() => void open($, 'contacts')} />
       </Box>
     )
@@ -204,50 +218,90 @@ export const register: Register = (on) => {
       </Box>
     )
 
-    const inboxView = () => (
+    const threadsView = () => (
       <Box flexDirection="column">
-        {inbox.length === 0 && <Text dimColor>Inbox is empty.</Text>}
-        {inbox.map((r) => (
-          <Box key={r.id} flexDirection="column" marginBottom={1}>
-            <Text wrap="truncate" color={r.type === 'question' ? 'yellow' : 'green'}>
-              {`#${r.n} ${r.type} from ${r.from_name} · ${r.age} · ${r.state}${r.path ? ` · ${r.path}` : ''}`}
-            </Text>
-            <Text wrap="wrap">{r.summary}</Text>
-            <Box flexDirection="row" gap={1}>
-              <Button label="Show" onPress={() => void owl($, ['show', r.id]).then((s) => { shown = s.out; $.ui.invalidate('ui.render') })} />
-              {r.type === 'question' && r.state === 'consent' && <Button label="Allow" onPress={() => void act($, ['allow', r.from])} />}
-              {r.type === 'question' && r.state === 'consent' && <Button label="Deny" onPress={() => void act($, ['deny', r.from])} />}
-              {r.type === 'question' && r.state !== 'consent' && !r.has_draft &&
-                <Button label="Draft (Claude)" onPress={() => void $.command.run({ command: 'owlpost:draft', args: r.id })} />}
-              {r.has_draft && <Button label="Send" onPress={() => void act($, ['send', r.id])} />}
-              <Button label="Reject" onPress={() => void act($, ['reject', r.id])} />
+        {threads.length === 0 && <Text dimColor>No conversations yet.</Text>}
+        {threads.map((t) => (
+          <Box key={t.from} flexDirection="row" gap={1} marginBottom={1}>
+            <Box flexDirection="column" flexGrow={1}>
+              <Text bold wrap="truncate" color={t.open > 0 ? 'yellow' : 'green'}>
+                {`${t.from_name} · ${t.unseen} unseen · ${t.open} open`}
+              </Text>
+              <Text dimColor wrap="truncate">{`${t.from} · ${t.last_summary}`}</Text>
             </Box>
-            {r.type === 'question' && r.state !== 'consent' && (
-              <Input key={`reply-${r.id}`} label="Own answer" placeholder="type and Enter to store it as the draft" value={reply[r.id] ?? ''}
-                submitLabel="Save draft" onInput={(v) => { reply[r.id] = v }}
-                onSubmit={(v) => { delete reply[r.id]; void act($, ['draft', r.id, '--text', v]) }} />
-            )}
+            <Button label="Open" onPress={() => void openThread($, t.from)} />
           </Box>
         ))}
-        {shown && (
-          <Box flexDirection="column" borderStyle="round" paddingX={1}>
-            <Text wrap="wrap">{shown}</Text>
-            <Button label="Close" onPress={() => { shown = ''; $.ui.invalidate('ui.render') }} />
-          </Box>
+      </Box>
+    )
+
+    // The open request of the conversation: the newest event of a question record still
+    // waiting for the owner. Only that row carries the action buttons.
+    const openRow = (() => {
+      const wanted = ['consent', 'pending', 'drafted']
+      for (let i = timeline.length - 1; i >= 0; i--) {
+        const e = timeline[i]
+        if (e.dir !== 'in' || e.type !== 'question' || !wanted.includes(e.state)) continue
+        // The newest event of that record, not an older one of the same record.
+        const last = timeline.map((x) => x.record_id).lastIndexOf(e.record_id)
+        if (last === i) return i
+      }
+      return -1
+    })()
+
+    const actions = (e: Ev) => (
+      <Box flexDirection="column">
+        <Box flexDirection="row" gap={1}>
+          {e.state === 'consent' && <Button label={`Allow once (${openPeer})`} onPress={() => void act($, ['allow', openPeer, '--once'])} />}
+          {e.state === 'consent' && <Button label={`Allow always (${openPeer})`} onPress={() => void act($, ['allow', openPeer, '--always'])} />}
+          {e.state === 'consent' && <Button label={`Deny (${openPeer})`} onPress={() => void act($, ['deny', openPeer])} />}
+          {e.state !== 'consent' && e.state !== 'drafted' &&
+            <Button label="Draft (Claude)" onPress={() => void $.command.run({ command: 'owlpost:draft', args: e.record_id })} />}
+          {e.state === 'drafted' && <Button label="Send" onPress={() => void act($, ['send', e.record_id])} />}
+          {e.state !== 'consent' && <Button label="Reject" onPress={() => void act($, ['reject', e.record_id])} />}
+        </Box>
+        {e.state !== 'consent' && (
+          <Input key={`reply-${e.record_id}`} label="Own answer" placeholder="type and Enter to store it as the draft"
+            value={reply[e.record_id] ?? ''} submitLabel="Save draft" onInput={(v) => { reply[e.record_id] = v }}
+            onSubmit={(v) => { delete reply[e.record_id]; void act($, ['draft', e.record_id, '--text', v]) }} />
         )}
       </Box>
     )
+
+    const threadView = () => {
+      const peer = threads.find((t) => t.from === openPeer)
+      return (
+        <Box flexDirection="column">
+          <Box flexDirection="row" gap={1}>
+            <Button label="Back" onPress={() => { view = 'threads'; openPeer = ''; timeline = []; $.ui.invalidate('ui.render') }} />
+            <Text bold wrap="truncate">{peer ? peer.from_name : openPeer}</Text>
+          </Box>
+          {timeline.length === 0 && <Text dimColor>Nothing in this conversation yet.</Text>}
+          {timeline.map((e, i) => (
+            <Box key={`${e.record_id}-${i}`} flexDirection="column" marginBottom={1}>
+              <Text wrap="truncate" color={e.dir === 'in' ? 'yellow' : 'green'}>
+                {`${e.ts.slice(11, 16)} ${e.kind}${e.by ? ` · by ${e.by}` : ''}${e.path && e.path !== '-' ? ` · ${e.path}` : ''}`}
+              </Text>
+              {e.text.split('\n').slice(0, 3).map((line, n) => (
+                <Text key={`${e.record_id}-${i}-${n}`} wrap="truncate">{line}</Text>
+              ))}
+              {i === openRow && actions(e)}
+            </Box>
+          ))}
+        </Box>
+      )
+    }
 
     return (
       <Box flexDirection="column">
         <Box flexDirection="row" gap={1}>
           <Button label={view === 'contacts' ? '[Contacts]' : 'Contacts'} onPress={go('contacts')} />
           <Button label={view === 'ask' ? '[Ask]' : 'Ask'} onPress={go('ask')} />
-          <Button label={`${view === 'inbox' ? '[Inbox' : 'Inbox'} ${inbox.length}${view === 'inbox' ? ']' : ''}`} onPress={go('inbox')} />
+          <Button label={`${view === 'threads' || view === 'thread' ? '[Inbox' : 'Inbox'} ${threads.length}${view === 'threads' || view === 'thread' ? ']' : ''}`} onPress={go('threads')} />
           <Button label="Close" onPress={() => void $.ui.close({ id: PANE })} />
         </Box>
         {note && <Text dimColor wrap="truncate">{note}</Text>}
-        {view === 'contacts' ? contactsView() : view === 'ask' ? askView() : inboxView()}
+        {view === 'contacts' ? contactsView() : view === 'ask' ? askView() : view === 'thread' ? threadView() : threadsView()}
       </Box>
     )
   })
