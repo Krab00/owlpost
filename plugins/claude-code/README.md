@@ -9,6 +9,7 @@ The Claude Code harness adapter for owlpost (`docs/concept.md` "Harness adapters
 | Skill | `skills/owlpost/SKILL.md` | When to ask a peer, how to run `owl ask`, the mentioned contact, how to react to the counter, the answer loop, the memory rule. |
 | MCP server | `owl mcp`, registered at user scope by `owl setup` / `owl update` | Serves every contact as an `@owl:to://…` resource in the `@` typeahead (stdio); see "Mention a contact" below. |
 | Commands | `commands/<name>.md`, one per `owl` subcommand (all except `daemon`) | `/owlpost:<name>` runs `owl <name>` with the arguments and offers the next step; see the table below. |
+| Mod (optional) | `hooks/owlpost.tsx`, listed under `modules` in `hooks/hooks.json` | Loaded only when Claude Code mods (function hooks) are on; see "Claude Code mods" below. |
 | Manifests | `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json` | Plugin metadata; a one-plugin marketplace so the directory can be added from a local path. |
 
 ## Commands
@@ -65,6 +66,24 @@ The server is registered in Claude Code at user scope by `owl setup` and `owl up
 context. `owl doctor` reports it as the `mcp` check (`warn` with the `claude mcp add` line
 when it is missing). The plugin bundles no server of its own: one bundled through a plugin
 is named `plugin:owlpost:owl`, and that prefix sinks the contacts in the typeahead ranking.
+
+## Claude Code mods
+
+The plugin also works as a Claude Code mod (function hooks, early access). Turn mods on by
+setting `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1`, either in the shell that starts Claude Code or
+under `env` in `~/.claude/settings.json`, and then restart the session. Without the variable,
+the plain plugin above keeps working unchanged.
+
+With mods on, `hooks/owlpost.tsx` adds:
+
+- a band above the prompt showing the unseen inbox count, with **Inbox** and **Contacts**
+  buttons (it replaces the counter line the classic hook injects);
+- a pane opened by `/owlpost:contacts` or `/owlpost:ask` with no arguments. You can search
+  contacts, send a question and walk the inbox there. It runs `owl` directly, with no model
+  turn and no tokens.
+
+To close the pane, run the same command again (`/owlpost:contacts` on the Contacts view,
+`/owlpost:ask` on the Ask view) or press **Close**. Esc only returns focus to the prompt.
 
 ## Requirements
 
