@@ -49,14 +49,22 @@ pub fn policy_for(contact: &Contact, opts: Opts) -> anyhow::Result<Option<Mode>>
     Ok(Some(Mode::Auto))
 }
 
-/// Moves every `consent` record from `fingerprint` to `pending`; returns their ids.
-pub fn release(spool: &Spool, fingerprint: &str) -> anyhow::Result<Vec<String>> {
+/// Moves every `consent` record from `fingerprint` to `pending`, logging one `allowed` event
+/// with the consent `scope` on each (OWL-038); returns their ids.
+pub fn release(spool: &Spool, fingerprint: &str, scope: &str) -> anyhow::Result<Vec<String>> {
     let mut released = Vec::new();
     for (id, rec) in spool.list(Dir::Inbox, |r| r.state == "consent")? {
         if payload_of(&id, &rec)?.from != fingerprint {
             continue;
         }
-        spool.set_state(Dir::Inbox, &id, "pending")?;
+        spool.set_state_with_event(
+            Dir::Inbox,
+            &id,
+            "pending",
+            "allowed",
+            Some("human"),
+            Some(json!({ "scope": scope })),
+        )?;
         released.push(id);
     }
     Ok(released)
@@ -80,7 +88,14 @@ pub fn run(home: &Path, peer: &str, opts: Opts, json: bool) -> anyhow::Result<()
         )?;
     }
     let spool = Spool::new(home)?;
-    let released = release(&spool, &fingerprint)?;
+    let scope = if opts.once {
+        "once"
+    } else if opts.always {
+        "always"
+    } else {
+        "manual"
+    };
+    let released = release(&spool, &fingerprint, scope)?;
     let policy = mode.map(Mode::as_str);
     if json {
         print_json(&json!({

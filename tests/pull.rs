@@ -779,6 +779,7 @@ async fn rejected_task_closes_the_ask_as_declined() {
         held,
         "denied",
         &[("previous_state", serde_json::json!("consent"))],
+        owlpost::events::Ev::by("denied", "human"),
     )
     .unwrap();
 
@@ -929,6 +930,7 @@ async fn each_peer_is_asked_only_about_its_own_asks() {
         held,
         "denied",
         &[("previous_state", serde_json::json!("consent"))],
+        owlpost::events::Ev::by("denied", "human"),
     )
     .unwrap();
 

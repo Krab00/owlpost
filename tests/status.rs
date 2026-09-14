@@ -413,6 +413,7 @@ async fn rejected_task_moves_the_ask_to_done_declined() {
         held,
         "denied",
         &[("previous_state", serde_json::json!("consent"))],
+        owlpost::events::Ev::by("denied", "human"),
     )
     .unwrap();
 
