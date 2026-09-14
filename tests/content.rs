@@ -1197,3 +1197,59 @@ async fn a_content_tag_with_a_question_body_is_refused() {
     assert_error(resp, 400, "body does not match type").await;
     assert!(d.spool().list(Dir::Inbox, |_| true).unwrap().is_empty());
 }
+
+/// The asker's cache is never fed by a content reply either — the guard in
+/// `pull::ingest_envelope` and not only the `meta.threaded` flag `owl request` happens to
+/// write. The fixture ask deliberately carries no `threaded`, so only the kind check stands
+/// between the reply and `cache/`.
+#[test]
+fn a_content_reply_never_enters_the_askers_cache() {
+    let home = tempfile::tempdir().unwrap();
+    let (a, b) = (id(1), id(2));
+    prepare_home_with(home.path(), &a, &[Peer::new(&b, "Bea", None)], |_| {});
+    let spool = Spool::new(home.path()).unwrap();
+    let req = request(&a, &b, Some("main"));
+    let mut rec = common::record(&Envelope::sign(&req, &a), "waiting");
+    // No `threaded`, and a non-empty hash: every flag that could shortcut the guard is off.
+    rec.meta = json!({ "peer": fp(&b), "hash": "deadbeef" });
+    spool.put(Dir::Asks, &req.id, &rec).unwrap();
+
+    let reply = Payload::content_reply(&req, "body\n", "abc", Some("c0ffee"), false, 0);
+    let env = Envelope::sign(&reply, &b);
+    let book = owlpost::contacts::ContactBook::load(home.path(), home.path()).unwrap();
+    let contact = book.resolve("Bea").unwrap().clone();
+    let open = owlpost::pull::open_asks(&spool).unwrap();
+    assert!(open.contains_key(&req.id), "the content ask must be an open ask");
+    let iroh = owlpost::client::Iroh::from_home(home.path());
+    owlpost::pull::ingest_envelope(&a, &contact, &iroh, &spool, &open, &env).unwrap();
+
+    assert!(
+        spool.get(Dir::Inbox, &reply.id).unwrap().is_some(),
+        "the reply is still stored"
+    );
+    assert!(
+        spool.list(Dir::Cache, |_| true).unwrap().is_empty(),
+        "a content reply must never be cached"
+    );
+    // The positive twin: an ordinary answer to an unthreaded ask still is.
+    let q = Payload::question(&fp(&a), &fp(&b), PROJECT, Some(FILE), "why?");
+    let mut qrec = common::record(&Envelope::sign(&q, &a), "waiting");
+    qrec.meta = json!({ "peer": fp(&b), "hash": "cafe" });
+    spool.put(Dir::Asks, &q.id, &qrec).unwrap();
+    let ans = Payload::answer(&q, "because", "claude", 0, false);
+    let open = owlpost::pull::open_asks(&spool).unwrap();
+    owlpost::pull::ingest_envelope(
+        &a,
+        &contact,
+        &iroh,
+        &spool,
+        &open,
+        &Envelope::sign(&ans, &b),
+    )
+    .unwrap();
+    assert_eq!(
+        spool.list(Dir::Cache, |_| true).unwrap().len(),
+        1,
+        "an ordinary answer still feeds the asker cache"
+    );
+}
