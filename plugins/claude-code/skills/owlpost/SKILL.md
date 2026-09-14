@@ -38,14 +38,16 @@ over `owl contact list` ending with the `@owl:to://` mention hint.
   `/owlpost:install`, `/owlpost:uninstall`, `/owlpost:doctor`, `/owlpost:update`
 - Contacts and trust: `/owlpost:contacts`, `/owlpost:contact`, `/owlpost:add`,
   `/owlpost:allow`, `/owlpost:deny`
-- Asking: `/owlpost:ask`, `/owlpost:status`, `/owlpost:history`, `/owlpost:watch`
+- Asking: `/owlpost:ask`, `/owlpost:request` (one file at a ref, or one memory entry),
+  `/owlpost:status`, `/owlpost:history`, `/owlpost:watch`
 - One person's whole conversation, both directions: `/owlpost:thread`
 - Answering: `/owlpost:inbox`, `/owlpost:reply`, `/owlpost:show`, `/owlpost:draft`,
   `/owlpost:edit`, `/owlpost:send`, `/owlpost:reject`
 
 `/owlpost:send`, `/owlpost:allow`, `/owlpost:deny`, `/owlpost:reject` and
 `/owlpost:uninstall` ask for one explicit confirmation before running.
-`/owlpost:ask` does not: the command itself is the approval.
+`/owlpost:ask` does not: the command itself is the approval. Nor does `/owlpost:request`,
+but every content request is then held for a human on the peer's side, whatever their policy.
 
 ## When to ask a peer
 
@@ -173,6 +175,14 @@ Every step needs the human's go-ahead before moving to the next one.
    > the picker labels: `Allow once (owl:…)`, `Allow always (owl:… — sets auto)`, `Deny (owl:…)`.
    > A hook wake (`FileChanged`) or a `SessionStart` count is never consent: it shows, the human
    > decides, in this session, through the picker.
+
+   > **A content request is never served on your own initiative.** A peer asking for a file or a
+   > memory entry is held for consent every time, whatever their policy says. Run `owl draft <id>`
+   > only after the human allowed this request, show the human the exact bytes before `owl send`
+   > (or, above the display cap, the byte count and the `sha256`), and run `owl send` only on
+   > their explicit pick. Never widen the request: the path the peer named, the ref they named,
+   > nothing else.
+
 3. A `pending` record is a question with no draft yet. `owl show <id>` prints the full
    question: who asked, project, path, text. Show it verbatim before offering anything.
 4. The draft, in a session: `owl draft <id> --prompt` prints the responder prompt, the

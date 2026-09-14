@@ -1097,8 +1097,8 @@ fn commands_have_descriptions() {
     // The set of arg-taking subcommands the rule above derives from `--help`, pinned so a
     // clap change that drops the `Arguments:` section is noticed.
     let with_args: Vec<&str> = [
-        "card", "contact", "add", "allow", "deny", "ask", "show", "draft", "edit", "send",
-        "reject", "route", "status", "thread",
+        "card", "contact", "add", "allow", "deny", "ask", "request", "show", "draft", "edit",
+        "send", "reject", "route", "status", "thread",
     ]
     .to_vec();
     for sub in &subs {
@@ -2388,4 +2388,66 @@ fn thread_command_and_docs_pin_their_literals() {
     line_with(&skill, "/owlpost:thread", "SKILL.md");
     let (_, inbox) = frontmatter("commands/inbox.md");
     line_with(&inbox, "/owlpost:thread", "commands/inbox.md");
+}
+
+// ---------- OWL-039: a content request is never served on your own initiative ----------
+
+/// AC10 rule-block literals, each on one line of the quoted block that both the inbox
+/// command and the skill carry.
+const CONTENT_RULE: [&str; 3] = [
+    "A content request is never served on your own initiative",
+    "show the human the exact bytes before",
+    "Never widen the request",
+];
+
+/// AC10: both copies of the rule carry every literal on a single line, and the block sits
+/// inside the consent step — before the `pending` step of either file.
+#[test]
+fn content_rule_pinned_in_plugin_text() {
+    for file in ["skills/owlpost/SKILL.md", "commands/inbox.md"] {
+        let (_, body) = frontmatter(file);
+        let block = quote_block(&body, "A content request is never served");
+        for needle in CONTENT_RULE {
+            assert!(
+                block.lines().any(|l| l.contains(needle)),
+                "{file} content rule lacks {needle:?} on one line"
+            );
+        }
+        // Position: after the consent step's own heading/step line, before the pending one.
+        let at = |needle: &str| {
+            body.find(needle)
+                .unwrap_or_else(|| panic!("{file} has no {needle:?}"))
+        };
+        let rule = at("**A content request is never served on your own initiative.**");
+        let consent = at("Identity is the key");
+        let pending = at("`pending` record");
+        assert!(
+            consent < rule && rule < pending,
+            "{file}: the rule must sit in the consent section, before the pending step"
+        );
+    }
+}
+
+/// AC10: the new command file documents the invocation it wraps.
+#[test]
+fn request_command_documents_its_invocation() {
+    let (fm, body) = frontmatter("commands/request.md");
+    assert!(
+        body.lines()
+            .any(|l| l.contains("owl request <peer> <project> <path>")),
+        "request.md must name the file form on one line:\n{body}"
+    );
+    assert!(
+        body.lines().any(|l| l.contains("owl request <peer> --memory")),
+        "request.md must name the memory form on one line:\n{body}"
+    );
+    assert!(
+        body.lines().any(|l| l.contains("Never widen what they named")),
+        "request.md must repeat the no-widening rule:\n{body}"
+    );
+    assert_eq!(
+        fm_value(&fm, "allowed-tools"),
+        Some("Bash(owl request:*), Bash(owl contact:*)"),
+        "request.md runs only `owl request` and the contact lookup"
+    );
 }
