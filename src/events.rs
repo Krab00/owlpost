@@ -49,15 +49,6 @@ pub struct Ev<'a> {
 }
 
 impl<'a> Ev<'a> {
-    /// An event with no `by` and no `detail`.
-    pub fn new(kind: &'a str) -> Ev<'a> {
-        Ev {
-            kind,
-            by: None,
-            detail: None,
-        }
-    }
-
     pub fn by(kind: &'a str, by: &'a str) -> Ev<'a> {
         Ev {
             kind,

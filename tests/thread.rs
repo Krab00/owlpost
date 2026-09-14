@@ -44,7 +44,9 @@ impl Home {
     fn with(tweak: impl FnOnce(&mut owlpost::config::Config)) -> Home {
         let dir = tempfile::tempdir().unwrap();
         let checkout = tempfile::tempdir().unwrap();
-        let (me, ania, bartek, cezary) = (id(2), id(1), id(3), id(5));
+        // Ania's fingerprint sorts AFTER Bartek's while her name sorts before his: the
+        // `last_ts` tie in the peer list can then only be broken by `from_name` (OWL-007).
+        let (me, ania, bartek, cezary) = (id(2), id(3), id(1), id(5));
         let peers = [
             Peer::new(&ania, "Ania", None),
             Peer::new(&bartek, "Bartek", None),
