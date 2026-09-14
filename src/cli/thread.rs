@@ -286,10 +286,15 @@ fn row(e: &Entry) -> Value {
     v
 }
 
-/// The harness behind a row: the answer payload's own, else the record's stored draft.
+/// The harness behind a row: an answer payload names its own, and on a question record only
+/// the events that are about our reply (`drafted`, `sent`) carry the stored draft's — a
+/// `received` row is the peer's message and has no harness.
 fn harness_of(e: &Entry) -> Option<String> {
     if let Body::Answer { harness, .. } = &e.payload.body {
         return Some(harness.clone());
+    }
+    if !matches!(e.event.kind.as_str(), "drafted" | "sent") {
+        return None;
     }
     owlpost::answer::StoredDraft::from_record(&e.record_id, &e.rec)
         .ok()
