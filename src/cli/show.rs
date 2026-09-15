@@ -5,7 +5,10 @@
 //! `draft:`, the draft in a plain text block, `harness: <name>` and the language note when the
 //! draft's language differs from the question's; an answer as the same table, project and path
 //! taken from the question it replies to. The wake's instruction line (`owlpost::route`) is
-//! never printed here. `--json` wins over `--format`. Every shown record is released from the
+//! never printed here. `--json` wins over `--format`. A received content reply carries its
+//! digest verdict in every mode (OWL-039): the `sha256 … — verified` / `sha256 mismatch …`
+//! line in plain and `--format claude|codex|kimi`, `sha256_verified` under `--json`, and a
+//! mismatch exits 1 whichever mode printed it. Every shown record is released from the
 //! session wake routing (`owlpost::route`, OWL-033).
 
 use std::path::Path;
@@ -43,10 +46,27 @@ pub fn run(home: &Path, id: &str, json: bool, format: Option<&str>) -> anyhow::R
     for (i, (id, rec)) in records.iter().enumerate() {
         let payload = payload_of(id, rec)?;
         let draft = StoredDraft::from_record(id, rec)?;
+        // OWL-039: the digest verdict is computed once, before the format branch — every
+        // mode says the same thing about the same bytes, and a mismatch exits 1 in all three.
+        let verdict = match &payload.body {
+            Body::ContentReply {
+                content,
+                sha256,
+                truncated,
+                ..
+            } => Some(content::verify_line(content, sha256, *truncated)),
+            _ => None,
+        };
+        if let Some((_, false)) = &verdict {
+            mismatch = true;
+        }
         if json {
             let mut v = summary(id, rec, &payload, &book, now);
             v["payload"] = serde_json::to_value(&payload)?;
             v["draft"] = draft.as_ref().map_or(Value::Null, StoredDraft::to_value);
+            if let Some((_, ok)) = &verdict {
+                v["sha256_verified"] = json!(ok);
+            }
             out.push(v);
         } else if rendered {
             if i > 0 {
@@ -56,6 +76,9 @@ pub fn run(home: &Path, id: &str, json: bool, format: Option<&str>) -> anyhow::R
                 "{}",
                 render::record_block(&spool, &book, rec, &payload, draft.as_ref())
             );
+            if let Some((line, _)) = &verdict {
+                println!("{line}");
+            }
         } else {
             if i > 0 {
                 println!();
@@ -121,7 +144,7 @@ pub fn run(home: &Path, id: &str, json: bool, format: Option<&str>) -> anyhow::R
                     content,
                     sha256,
                     ref_resolved,
-                    truncated,
+                    truncated: _,
                     redactions,
                     harness,
                 } => {
@@ -138,11 +161,8 @@ pub fn run(home: &Path, id: &str, json: bool, format: Option<&str>) -> anyhow::R
                         "{}",
                         render::fenced_text(&content::display(content, sha256))
                     );
-                    let (line, ok) = content::verify_line(content, sha256, *truncated);
+                    let (line, _) = verdict.as_ref().expect("a content reply has a verdict");
                     println!("{line}");
-                    if !ok {
-                        mismatch = true;
-                    }
                 }
             }
             // OWL-039: our own drafted content goes in a plain text block under

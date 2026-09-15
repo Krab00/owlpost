@@ -2428,6 +2428,23 @@ fn content_rule_pinned_in_plugin_text() {
     }
 }
 
+/// AC10: `/owlpost:request` is listed among the asking commands of the skill, on the
+/// `- Asking:` line itself. `readme_and_skill_list_every_command` only asks for the token
+/// somewhere in SKILL.md, and the confirmation paragraph names it too — so without this the
+/// list entry can be deleted unnoticed.
+#[test]
+fn skill_lists_request_among_the_asking_commands() {
+    let (_, skill) = frontmatter("skills/owlpost/SKILL.md");
+    let asking = skill
+        .lines()
+        .find(|l| l.trim_start().starts_with("- Asking:"))
+        .expect("SKILL.md has no `- Asking:` line");
+    assert!(
+        asking.contains("`/owlpost:request`"),
+        "the asking list must name /owlpost:request: {asking}"
+    );
+}
+
 /// AC10: the new command file documents the invocation it wraps.
 #[test]
 fn request_command_documents_its_invocation() {
