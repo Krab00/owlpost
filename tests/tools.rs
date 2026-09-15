@@ -1839,6 +1839,54 @@ fn stdout_and_stderr_are_joined_under_the_marker_in_order() {
     );
 }
 
+/// AC7, the newline the join inserts: the marker always starts its own line and never sits
+/// after a blank one. `echo` can only ever produce stdout that already ends in `\n`, so the
+/// branch only shows itself on stdout the fixture writes with `printf '%s'` or not at all.
+/// The twin with a trailing newline is
+/// [`stdout_and_stderr_are_joined_under_the_marker_in_order`].
+#[test]
+fn the_stderr_marker_is_joined_on_exactly_one_newline() {
+    let logs = tempfile::tempdir().unwrap();
+    // Nothing in these knobs matches a default redaction pattern, so the output is verbatim.
+    let output_of = |name: &str, knobs: &[&str]| -> String {
+        let d = drafting(fake(&logs.path().join(name), knobs), input(&[]));
+        owl_ok(d.home.path(), &["draft", &d.id]);
+        let rec = Spool::new(d.home.path())
+            .unwrap()
+            .get(Dir::Inbox, &d.id)
+            .unwrap()
+            .unwrap();
+        tools::stored(&rec).unwrap().output
+    };
+
+    // Stdout without a trailing newline: exactly one newline is inserted before the marker.
+    assert_eq!(
+        output_of(
+            "raw.log",
+            &["FAKE_TOOL_RAW=no newline here", "FAKE_TOOL_STDERR=warning"]
+        ),
+        "no newline here\n--- stderr ---\nwarning\n",
+        "one newline inserted, never two"
+    );
+
+    // Genuinely empty stdout: the marker opens the output, with no newline in front of it.
+    assert_eq!(
+        output_of(
+            "silent.log",
+            &["FAKE_TOOL_NO_STDOUT=1", "FAKE_TOOL_STDERR=warning"]
+        ),
+        "--- stderr ---\nwarning\n",
+        "an empty stdout adds no leading newline"
+    );
+
+    // No stderr at all: stdout stays exactly as the tool wrote it, unterminated and bare.
+    assert_eq!(
+        output_of("bare.log", &["FAKE_TOOL_RAW=no newline here"]),
+        "no newline here",
+        "no stderr, no marker and no newline of ours"
+    );
+}
+
 /// The inbox summary's **width**: a tool-call row whose compact JSON is exactly
 /// `SUMMARY_CHARS` long is kept whole, one character more is cut with `…`, and a row whose
 /// cut lands inside a two-byte character is cut on the character — never on the byte.
