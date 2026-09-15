@@ -1098,7 +1098,7 @@ fn commands_have_descriptions() {
     // clap change that drops the `Arguments:` section is noticed.
     let with_args: Vec<&str> = [
         "card", "contact", "add", "allow", "deny", "ask", "show", "draft", "edit", "send",
-        "reject", "route", "status",
+        "reject", "route", "status", "thread",
     ]
     .to_vec();
     for sub in &subs {
@@ -1465,7 +1465,8 @@ fn inbox_command_walks_states_with_pickers() {
 /// The step-3 picker of `commands/inbox.md`, verbatim.
 const DRAFT_PICKS: &str = "`Type draft · draft & send · reject · skip — or write your own answer.`";
 /// What the "Draft & send" option description must say.
-const DRAFT_AND_SEND_DESC: &str = "human's explicit approval to send whatever the subagent produced";
+const DRAFT_AND_SEND_DESC: &str =
+    "human's explicit approval to send whatever the subagent produced";
 /// The amended ground rule, one line, stated in SKILL.md, inbox.md and draft.md.
 const NEVER_CHAIN: &str = "Never chain `owl draft` and `owl send` unless the human picked \"Draft & send\" (or passed `--send`); the draft is still printed in full before `owl send` runs.";
 /// The two absolute forms the rule replaced.
@@ -2359,4 +2360,32 @@ fn the_mention_is_a_peer_in_the_command_and_the_skill() {
             .any(|l| l.contains("the text itself is the peer")),
         "the rule must be on one line"
     );
+}
+
+// ---------- OWL-038: /owlpost:thread ----------
+
+/// AC10. The four literals the thread view depends on, each pinned on the one line that
+/// carries it: the README's mods sentence, the two instructions of `commands/thread.md`,
+/// the skill's command mention and the pointer `commands/inbox.md` gained. A positional pin
+/// would slice to the next heading of any level, so each is a single-line `contains`.
+#[test]
+fn thread_command_and_docs_pin_their_literals() {
+    let line_with = |text: &str, needle: &str, what: &str| {
+        assert!(
+            text.lines().any(|l| l.contains(needle)),
+            "{what} lacks {needle:?} on one line"
+        );
+    };
+    line_with(
+        &read("README.md"),
+        "the pane's Inbox is a thread list",
+        "plugins/claude-code/README.md",
+    );
+    let (_, thread) = frontmatter("commands/thread.md");
+    line_with(&thread, "owl thread <peer>", "commands/thread.md");
+    line_with(&thread, "paste its output verbatim", "commands/thread.md");
+    let (_, skill) = frontmatter("skills/owlpost/SKILL.md");
+    line_with(&skill, "/owlpost:thread", "SKILL.md");
+    let (_, inbox) = frontmatter("commands/inbox.md");
+    line_with(&inbox, "/owlpost:thread", "commands/inbox.md");
 }

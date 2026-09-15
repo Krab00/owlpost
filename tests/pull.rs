@@ -28,6 +28,7 @@ use owlpost::envelope::{self, Envelope, Kind, Payload};
 use owlpost::identity::Identity;
 use owlpost::pull::{self, PullStatus, STATUS_FILE, read_status};
 use owlpost::spool::{Dir, Record, Spool};
+use serde_json::Value;
 use tracing_subscriber::fmt::MakeWriter;
 
 use common::{Peer, TestDaemon, fp, id, policy, question, record, spawn_daemon_with};
@@ -76,6 +77,16 @@ fn log_text() -> String {
 }
 
 /// Bounded wait for `pred` (checked every 25 ms); panics with `what` on timeout.
+/// True once B has finished acking `answer_id`. `close_acked` moves the record to `done/`
+/// and only then sets the state, so waiting for the file alone wins the race by one step and
+/// `assert_ingested`'s `acked` assertion can fire against a record still marked `unacked`.
+fn acked_on(b: &TestDaemon, answer_id: &str) -> bool {
+    b.spool()
+        .get(Dir::Done, answer_id)
+        .unwrap()
+        .is_some_and(|r| r.state == "acked")
+}
+
 fn wait_until(limit: Duration, what: &str, mut pred: impl FnMut() -> bool) -> Duration {
     let start = Instant::now();
     while !pred() {
@@ -203,7 +214,7 @@ async fn answer_is_pulled_and_acked() {
     let ans = outbox_answer(&b, &b.id, &q, ANSWER, None);
 
     let took = wait_until(Duration::from_secs(5), "answer acked on B", || {
-        b.spool().get(Dir::Done, &ans.id).unwrap().is_some()
+        acked_on(&b, &ans.id)
     });
     // The ack is the last step of the ingestion, so everything else is already in place.
     assert_ingested(&a, &b, &q, &ans, "why does session expiry drift?");
@@ -394,7 +405,7 @@ async fn offline_responder_is_skipped_then_retried() {
     wait_until(
         Duration::from_secs(7),
         "answer ingested after B came up",
-        || b.spool().get(Dir::Done, &ans.id).unwrap().is_some(),
+        || acked_on(&b, &ans.id),
     );
     assert!(
         started.elapsed() < Duration::from_secs(10),
@@ -680,7 +691,7 @@ async fn pulled_answer_wakes_the_affine_live_session() {
     assert_eq!(r.current.as_deref(), Some("S1"));
     assert_eq!(r.tried, vec!["S1".to_string()]);
     wait_until(Duration::from_secs(5), "answer acked on B", || {
-        b.spool().get(Dir::Done, &ans.id).unwrap().is_some()
+        acked_on(&b, &ans.id)
     });
     assert_ingested(&a, &b, &q, &ans, "why does session expiry drift?");
     a.running.shutdown();
@@ -779,6 +790,7 @@ async fn rejected_task_closes_the_ask_as_declined() {
         held,
         "denied",
         &[("previous_state", serde_json::json!("consent"))],
+        owlpost::events::Ev::by("denied", "human"),
     )
     .unwrap();
 
@@ -929,6 +941,7 @@ async fn each_peer_is_asked_only_about_its_own_asks() {
         held,
         "denied",
         &[("previous_state", serde_json::json!("consent"))],
+        owlpost::events::Ev::by("denied", "human"),
     )
     .unwrap();
 
@@ -1081,4 +1094,130 @@ async fn failing_task_route_leaves_the_ask_open_and_is_logged() {
     assert!(line.contains(&fp(&peer.id)), "{line}");
     assert!(line.contains(TASK_FAILURE), "{line}");
     peer.shutdown();
+}
+
+// ---- OWL-038: the events the pull path writes ------------------------------------------------
+
+/// The `(kind, by, detail.by)` triples of a record's stored log, or a panic naming it.
+fn events_of(spool: &Spool, dir: Dir, id: &str) -> Vec<(String, Option<String>, Value)> {
+    let rec = spool
+        .get(dir, id)
+        .unwrap()
+        .unwrap_or_else(|| panic!("no {id} in {}", dir.name()));
+    rec.meta["events"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no meta.events on {id}: {}", rec.meta))
+        .iter()
+        .map(|e| {
+            assert!(e["ts"].as_str().is_some_and(|t| t.ends_with('Z')), "{e}");
+            (
+                e["kind"].as_str().unwrap().to_string(),
+                e["by"].as_str().map(str::to_string),
+                e.get("detail").cloned().unwrap_or(Value::Null),
+            )
+        })
+        .collect()
+}
+
+/// OWL-038: ingesting a pulled answer writes `answer-received` twice — once on the answer
+/// record it spools and once on the ask it closes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pulled_answer_writes_answer_received_on_both_records() {
+    logs();
+    let a = id(41);
+    let b = common::spawn_daemon(42, true, &[Peer::new(&a, "Ana", None)]).await;
+    let home = asker_home(&a, &b.id, &b.addr.to_string());
+    let q = file_ask(home.path(), &a, &b.id, "why does the token rotate?");
+    let ans = outbox_answer(&b, &b.id, &q, ANSWER, None);
+
+    let (status, _) = pull_now(home.path(), 41).await;
+    assert_eq!(status.open_asks, 0, "the ask was closed by the answer");
+    let spool = Spool::new(home.path()).unwrap();
+    assert_eq!(
+        events_of(&spool, Dir::Inbox, &ans.id),
+        [("answer-received".to_string(), None, Value::Null)],
+        "the spooled answer is born with its event"
+    );
+    assert_eq!(
+        spool.get(Dir::Done, &q.id).unwrap().unwrap().state,
+        "answered"
+    );
+    assert_eq!(
+        events_of(&spool, Dir::Done, &q.id),
+        [("answer-received".to_string(), None, Value::Null)],
+        "the ask it closed carries the same event"
+    );
+    b.running.shutdown();
+}
+
+/// OWL-038: a `REJECTED` Task closes the ask with a `declined` event naming the peer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn declined_ask_carries_a_declined_event() {
+    logs();
+    let a = id(43);
+    let b = common::spawn_daemon(44, true, &[Peer::new(&a, "Ana", None)]).await;
+    let home = asker_home(&a, &b.id, &b.addr.to_string());
+    let q = file_ask(home.path(), &a, &b.id, "may I have an answer?");
+    post_ask(&b, &a, home.path(), &q).await;
+    let bs = b.spool();
+    let held = bs.get(Dir::Inbox, &q.id).unwrap().unwrap();
+    owlpost::answer::finish(
+        &bs,
+        &q.id,
+        held,
+        "denied",
+        &[("previous_state", serde_json::json!("consent"))],
+        owlpost::events::Ev::by("denied", "human"),
+    )
+    .unwrap();
+
+    pull_now(home.path(), 43).await;
+    let spool = Spool::new(home.path()).unwrap();
+    assert_eq!(
+        spool.get(Dir::Done, &q.id).unwrap().unwrap().state,
+        "declined"
+    );
+    let log = events_of(&spool, Dir::Done, &q.id);
+    assert_eq!(log.len(), 1, "{log:?}");
+    assert_eq!(log[0].0, "declined");
+    assert_eq!(
+        log[0].1.as_deref(),
+        Some("peer"),
+        "the peer declined, not us"
+    );
+    b.running.shutdown();
+}
+
+/// OWL-038: expiring an outbox entry leaves an `expired` event on the record it moves.
+#[test]
+fn expired_outbox_entry_carries_an_expired_event() {
+    let home = tempfile::tempdir().unwrap();
+    let spool = Spool::new(home.path()).unwrap();
+    let (a, b) = (id(45), id(46));
+    let q = question(&a, &b, "an old question");
+    let now = envelope::now_unix();
+    let old = Payload::answer(&q, "stale", "fake", 0, false);
+    let mut rec = record(&Envelope::sign(&old, &b), "unacked");
+    rec.received_at = envelope::unix_to_rfc3339(now - 86_400);
+    spool.put(Dir::Outbox, &old.id, &rec).unwrap();
+    // A second entry inside the TTL: it must keep its (absent) log untouched.
+    let fresh = Payload::answer(&q, "fresh", "fake", 0, false);
+    let mut rec = record(&Envelope::sign(&fresh, &b), "unacked");
+    rec.received_at = envelope::unix_to_rfc3339(now);
+    spool.put(Dir::Outbox, &fresh.id, &rec).unwrap();
+
+    assert_eq!(pull::expire_outbox(&spool, 0, now).unwrap(), 1);
+    assert_eq!(
+        spool.get(Dir::Done, &old.id).unwrap().unwrap().state,
+        "expired"
+    );
+    assert_eq!(
+        events_of(&spool, Dir::Done, &old.id),
+        [("expired".to_string(), None, Value::Null)]
+    );
+    assert_eq!(
+        spool.get(Dir::Outbox, &fresh.id).unwrap().unwrap().meta["events"],
+        Value::Null,
+        "a record that did not expire gained no event"
+    );
 }

@@ -604,7 +604,7 @@ async fn post_question(
         .and_then(|v| v.to_str().ok())
         .unwrap_or_default()
         .to_string();
-    let record = Record {
+    let mut record = Record {
         raw: String::from_utf8_lossy(&body).into_owned(),
         sig: sig_text,
         state: record_state.to_string(),
@@ -613,6 +613,11 @@ async fn post_question(
         draft: None,
         meta: json!({ "peer": caller, "hash": hash }),
     };
+    // Record birth (OWL-038): the arrival, and the consent hold when the peer has no policy.
+    crate::events::push(&mut record, "received", None, None);
+    if record_state == "consent" {
+        crate::events::push(&mut record, "held", None, None);
+    }
     state
         .spool
         .put(Dir::Inbox, &payload.id, &record)

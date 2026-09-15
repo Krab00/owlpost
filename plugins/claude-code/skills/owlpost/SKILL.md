@@ -39,6 +39,7 @@ over `owl contact list` ending with the `@owl:to://` mention hint.
 - Contacts and trust: `/owlpost:contacts`, `/owlpost:contact`, `/owlpost:add`,
   `/owlpost:allow`, `/owlpost:deny`
 - Asking: `/owlpost:ask`, `/owlpost:status`, `/owlpost:history`, `/owlpost:watch`
+- One person's whole conversation, both directions: `/owlpost:thread`
 - Answering: `/owlpost:inbox`, `/owlpost:reply`, `/owlpost:show`, `/owlpost:draft`,
   `/owlpost:edit`, `/owlpost:send`, `/owlpost:reject`
 

@@ -14,6 +14,7 @@ use sha2::{Digest, Sha256};
 
 use crate::config::Config;
 use crate::envelope::{self, Body, Envelope, Kind, Payload};
+use crate::events::{self, Ev};
 use crate::identity::{self, Identity};
 use crate::runner;
 use crate::spool::{Dir, Record, Spool};
@@ -128,6 +129,7 @@ pub fn finish(
     mut rec: Record,
     state: &str,
     extra: &[(&str, Value)],
+    event: Ev<'_>,
 ) -> anyhow::Result<()> {
     rec.state = state.to_string();
     let meta = meta_object(&mut rec);
@@ -135,6 +137,8 @@ pub fn finish(
     for (k, v) in extra {
         meta.insert((*k).to_string(), v.clone());
     }
+    // The closing event is the last thing the record carries into `done/` (OWL-038).
+    events::push_ev(&mut rec, event);
     spool
         .put(Dir::Done, id, &rec)
         .with_context(|| format!("finishing record {id}"))?;
@@ -274,6 +278,12 @@ pub fn draft(
     rec.state = "drafted".into();
     // A fresh draft supersedes whatever the scheduler failed on; the inbox stops nagging.
     meta_object(&mut rec).remove(AUTO_ERROR);
+    events::push(
+        &mut rec,
+        "drafted",
+        Some(&d.harness),
+        Some(json!({ "redactions": d.redactions, "status": d.status.as_str() })),
+    );
     Ok((rec, d))
 }
 
@@ -332,6 +342,12 @@ fn store_text(mut rec: Record, text: String, harness: &str, redactions: u32) -> 
     rec.draft = Some(stored.to_value());
     rec.state = "drafted".into();
     meta_object(&mut rec).remove(AUTO_ERROR);
+    events::push(
+        &mut rec,
+        "drafted",
+        Some(harness),
+        Some(json!({ "redactions": redactions, "status": "ok" })),
+    );
     rec
 }
 
@@ -521,6 +537,14 @@ pub fn send(
         rec,
         "answered",
         &[("answer_id", json!(answer_id))],
+        Ev {
+            kind: "sent",
+            by: Some(match mode {
+                SendMode::Manual => "human",
+                SendMode::Auto => "auto",
+            }),
+            detail: Some(json!({ "answer_id": answer_id })),
+        },
     )?;
     Ok(Sent {
         outbox: spool.path(Dir::Outbox, &answer_id),

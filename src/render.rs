@@ -128,10 +128,17 @@ pub fn local_hh_mm(rfc3339: &str) -> String {
 /// longer than the longest backtick run inside the text (three at least), so a draft
 /// containing three backticks is fenced with four; trailing line breaks are dropped.
 pub fn draft_block(text: &str) -> String {
+    format!("draft:\n{}", fenced_text(text))
+}
+
+/// `text` in a plain ```` ```text ```` block — our own words, so never a table. The fence is
+/// one backtick longer than the longest backtick run inside the text (three at least), so a
+/// text containing three backticks is fenced with four; trailing line breaks are dropped.
+pub fn fenced_text(text: &str) -> String {
     let longest = text.split(|c| c != '`').map(str::len).max().unwrap_or(0);
     let fence = "`".repeat(longest.max(2) + 1);
     let body = text.trim_end_matches(['\r', '\n']);
-    format!("draft:\n{fence}text\n{body}\n{fence}")
+    format!("{fence}text\n{body}\n{fence}")
 }
 
 // ponytail: Polish/English stopwords only — swap for a real detector when a third language
