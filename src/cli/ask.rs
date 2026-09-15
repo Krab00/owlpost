@@ -347,7 +347,11 @@ fn print_answer(answer: &Payload, json: bool) -> anyhow::Result<()> {
     }
     match &answer.body {
         Body::Answer { answer, .. } => println!("{answer}"),
-        Body::Question { .. } | Body::Content { .. } | Body::ContentReply { .. } => {
+        Body::Question { .. }
+        | Body::Content { .. }
+        | Body::ContentReply { .. }
+        | Body::ToolCall { .. }
+        | Body::ToolReply { .. } => {
             bail!("payload {} is not an answer", answer.id)
         }
     }

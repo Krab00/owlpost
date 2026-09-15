@@ -1097,8 +1097,8 @@ fn commands_have_descriptions() {
     // The set of arg-taking subcommands the rule above derives from `--help`, pinned so a
     // clap change that drops the `Arguments:` section is noticed.
     let with_args: Vec<&str> = [
-        "card", "contact", "add", "allow", "deny", "ask", "request", "show", "draft", "edit",
-        "send", "reject", "route", "status", "thread",
+        "card", "contact", "add", "allow", "deny", "ask", "request", "call", "show", "draft",
+        "edit", "send", "reject", "route", "status", "thread",
     ]
     .to_vec();
     for sub in &subs {
@@ -2468,5 +2468,108 @@ fn request_command_documents_its_invocation() {
         fm_value(&fm, "allowed-tools"),
         Some("Bash(owl request:*), Bash(owl contact:*)"),
         "request.md runs only `owl request` and the contact lookup"
+    );
+}
+
+// ---------- OWL-040: a tool-call request runs nothing until the human says so ----------
+
+/// AC10 rule-block literals, each on one line of the quoted block that both the inbox
+/// command and the skill carry.
+const TOOL_RULE: [&str; 3] = [
+    "A tool-call request runs nothing until the human says so",
+    "owl draft <id> is what executes the tool",
+    "Never invent a tool name, never edit the input",
+];
+
+/// AC10: both copies of the rule carry every literal on a single line, and the block sits
+/// inside the consent section — after the identity rule and before the next heading of any
+/// level, whatever that heading is.
+#[test]
+fn tool_rule_pinned_in_plugin_text() {
+    for file in ["skills/owlpost/SKILL.md", "commands/inbox.md"] {
+        let (_, body) = frontmatter(file);
+        let block = quote_block(&body, "A tool-call request runs nothing");
+        for needle in TOOL_RULE {
+            assert!(
+                block.lines().any(|l| l.contains(needle)),
+                "{file} tool rule lacks {needle:?} on one line"
+            );
+        }
+        let at = |needle: &str| {
+            body.find(needle)
+                .unwrap_or_else(|| panic!("{file} has no {needle:?}"))
+        };
+        let consent = at("Identity is the key");
+        let rule = at("**A tool-call request runs nothing until the human says so.**");
+        assert!(
+            consent < rule,
+            "{file}: the rule must follow the consent rule"
+        );
+        // Bounded by the next heading of any level after the consent section starts.
+        let next_heading = body[consent..]
+            .find("\n#")
+            .map(|i| consent + i)
+            .unwrap_or(body.len());
+        assert!(
+            rule < next_heading,
+            "{file}: the rule must sit inside the consent section, before the next heading"
+        );
+    }
+}
+
+/// AC10: the new command file documents the invocation it wraps and runs nothing else.
+#[test]
+fn call_command_documents_its_invocation() {
+    let (fm, body) = frontmatter("commands/call.md");
+    assert!(
+        body.lines()
+            .any(|l| l.contains("owl call <peer> <tool> --input")),
+        "call.md must name the invocation on one line:\n{body}"
+    );
+    assert!(
+        body.lines().any(|l| l.contains("Never invent a tool name")),
+        "call.md must repeat the no-invention rule:\n{body}"
+    );
+    assert_eq!(
+        fm_value(&fm, "allowed-tools"),
+        Some("Bash(owl call:*)"),
+        "call.md runs only `owl call`"
+    );
+}
+
+/// AC10: `/owlpost:call` is listed among the asking commands of the skill, on the
+/// `- Asking:` line itself.
+#[test]
+fn skill_lists_call_among_the_asking_commands() {
+    let (_, skill) = frontmatter("skills/owlpost/SKILL.md");
+    let asking = skill
+        .lines()
+        .find(|l| l.trim_start().starts_with("- Asking:"))
+        .expect("SKILL.md has no `- Asking:` line");
+    assert!(
+        asking.contains("`/owlpost:call`"),
+        "the asking list must name /owlpost:call: {asking}"
+    );
+}
+
+/// AC12's text half: the mod's Run button goes straight to `owl draft`, with no model turn,
+/// and the README says so.
+#[test]
+fn the_mod_runs_a_tool_call_without_a_model_turn() {
+    let tsx = read("hooks/owlpost.tsx");
+    assert!(
+        tsx.lines()
+            .any(|l| l.contains("Run (owl draft)") && l.contains("act($, ['draft'")),
+        "the Run button must call act() with owl draft, never a slash command"
+    );
+    assert!(
+        tsx.contains("e.type !== 'tool-call'"),
+        "a tool-call request must not offer the model draft path or the own-answer input"
+    );
+    assert!(
+        read("README.md")
+            .lines()
+            .any(|l| l.contains("**Run (owl draft)**")),
+        "plugins/claude-code/README.md must name the Run button"
     );
 }

@@ -34,6 +34,7 @@ patterns of the next steps a file runs itself); `tests/plugin.rs` pins the rule.
 | `/owlpost:deny <peer>` | `commands/deny.md` | `owl deny` — policy never (confirms first) |
 | `/owlpost:ask <peer> [path] <question>` | `commands/ask.md` | `owl ask` — send a question at once; the command is the approval, no confirmation step; `--reply-to <id>` continues a thread, `--context <path>` attaches a snippet |
 | `/owlpost:request <peer> <project> <path>` | `commands/request.md` | `owl request` — ask for one file at a ref, or one memory entry (`--memory <key>`); always held for the owner's consent |
+| `/owlpost:call <peer> <tool> --input <file>` | `commands/call.md` | `owl call` — ask a peer to run one tool of their registry; nothing runs there until a human allows it and runs `owl draft` |
 | `/owlpost:status [id]` | `commands/status.md` | `owl status` — where every open question stands, in the peer's words (`waiting for the owner's consent`, …) |
 | `/owlpost:inbox` | `commands/inbox.md` | `owl inbox --json` — walk the records: question verbatim, consent picker (allow once/always, deny), draft / draft & send / reject / skip picker, verbatim draft, send/edit/reject picker |
 | `/owlpost:show <id>` | `commands/show.md` | `owl show` — full record, offer draft/send/reject |
@@ -86,7 +87,9 @@ With mods on, `hooks/owlpost.tsx` adds:
 
 In the pane's Inbox is a thread list: one row per person, and **Open** draws the whole
 conversation with that person oldest first, with the Allow/Deny and Draft/Send/Reject buttons
-next to the open request only. **Back** returns to the list.
+next to the open request only. A tool-call request gets **Run (owl draft)** instead of Draft:
+it runs the tool the peer named on this machine, with no model turn, and the note line reports
+the exit code. **Back** returns to the list.
 
 To close the pane, run the same command again (`/owlpost:contacts` on the Contacts view,
 `/owlpost:ask` on the Ask view) or press **Close**. Esc only returns focus to the prompt.

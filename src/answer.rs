@@ -183,7 +183,11 @@ pub fn question_context(payload: &Payload) -> Option<&str> {
     match &payload.body {
         Body::Question { context, .. } => context.as_deref(),
         // A content request carries no snippet, and a reply is not a question at all.
-        Body::Answer { .. } | Body::Content { .. } | Body::ContentReply { .. } => None,
+        Body::Answer { .. }
+        | Body::Content { .. }
+        | Body::ContentReply { .. }
+        | Body::ToolCall { .. }
+        | Body::ToolReply { .. } => None,
     }
 }
 
@@ -242,7 +246,9 @@ pub fn thread_history(spool: &Spool, context_id: &str, except: &str) -> Vec<(Str
                         // Only an answer's words belong in the responder prompt's history.
                         Body::Question { .. }
                         | Body::Content { .. }
-                        | Body::ContentReply { .. } => None,
+                        | Body::ContentReply { .. }
+                        | Body::ToolCall { .. }
+                        | Body::ToolReply { .. } => None,
                     })?;
                 Some((rec.received_at.clone(), id, question.to_string(), answer))
             })
@@ -488,7 +494,9 @@ pub fn send(
     // OWL-039: content is keyed by ref and by consent, not by question text — it has no
     // question hash, so no `meta.hash` on the outbox record and no cache entry either way.
     let hash = match question.kind {
-        Kind::Content => None,
+        // OWL-040: a tool run has no question hash either — it is one run, never a cached
+        // answer — so no `meta.hash` on the outbox record and no cache entry.
+        Kind::Content | Kind::ToolCall => None,
         _ => {
             let (project, path, text) = question_body(id, &question)?;
             Some(envelope::question_hash(project, path, text))
@@ -518,6 +526,20 @@ pub fn send(
                         c.ref_resolved.as_deref(),
                         c.truncated,
                         c.redactions,
+                    )
+                }
+                // OWL-040: the output of the one run, with its exit code and duration.
+                Kind::ToolCall => {
+                    let r = crate::tools::stored(&rec).with_context(|| {
+                        format!("record {id} has no tool draft — run `owl draft {id}` first")
+                    })?;
+                    Payload::tool_reply(
+                        &question,
+                        &r.output,
+                        r.exit_code,
+                        r.duration_ms,
+                        r.truncated,
+                        r.redactions,
                     )
                 }
                 _ => Payload::answer(
@@ -572,6 +594,7 @@ pub fn send(
             // OWL-039: the content timeline names its own kinds.
             kind: match question.kind {
                 Kind::Content => "content-sent",
+                Kind::ToolCall => "tool-sent",
                 _ => "sent",
             },
             by: Some(match mode {

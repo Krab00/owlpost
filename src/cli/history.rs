@@ -112,6 +112,9 @@ pub fn run(home: &Path, filters: Filters, json: bool) -> anyhow::Result<()> {
                 (project.as_deref(), path.as_deref().unwrap_or("-"), "")
             }
             Body::ContentReply { content, .. } => (None, "-", content.as_str()),
+            // OWL-040: a tool call lists no path of ours, a reply the output it carried.
+            Body::ToolCall { project, .. } => (project.as_deref(), "-", ""),
+            Body::ToolReply { output, .. } => (None, "-", output.as_str()),
         };
         if let Some(g) = &filters.path
             && !glob_match(g, path)

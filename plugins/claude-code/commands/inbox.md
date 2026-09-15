@@ -64,6 +64,13 @@ stop.
 > their explicit pick. Never widen the request: the path the peer named, the ref they named,
 > nothing else.
 
+> **A tool-call request runs nothing until the human says so.** Show the tool name, the argv
+> it resolves to, the working directory and the input in full, and wait.
+> owl draft <id> is what executes the tool, so run it only after the human allowed this
+> request and asked for the run.
+> Never invent a tool name, never edit the input, and never run `owl send` before the human
+> has read the output.
+
 For every record in state `consent`:
 
 1. Run `owl show <id> --format claude` and paste its output verbatim: the message table

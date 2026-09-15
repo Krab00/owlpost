@@ -178,6 +178,25 @@ A peer asks for a **concrete file** instead of an answer about one (OWL-039):
 6. A's pull ingests the reply and `owl show` verifies the digest before printing it. Nothing
    is written into A's working tree: copying the content somewhere is the human's decision.
 
+### 3.8 Tool-call request
+
+A peer asks for the **result of a command** instead of a file (OWL-040):
+
+1. A runs `owl call B test --input in.json`. The payload is a `tool-call` kind and travels the
+   same `POST /v1/questions` route; `input` is a JSON object, never a command line.
+2. B's daemon validates the name against the **registry** — `responder.tools`, empty unless B
+   added a tool by hand — and answers `400 unknown tool` for anything else, deliberately the
+   same message whether the tool is unknown or there is no registry at all.
+3. The record is spooled in state `consent` **whatever B's policy for A says**, and the
+   scheduler is never offered it. Nothing is spawned on arrival, and nothing on `owl allow`.
+4. `owl draft <id>`, typed by a human after allowing the request, is the only thing that ever
+   runs the tool: the registry's `argv` in the registry's `cwd`, the input on stdin, the run
+   bounded by `timeout_ms`, the output redacted by the §10 patterns and cut at 256 KiB.
+5. The human reads the exit code and the output and runs `owl send`, which signs a
+   `tool-reply`. The draft stays on the finished record, so both sides keep what ran.
+6. A's pull ingests the reply; `owl show` prints the exit code, the duration and the output. A
+   non-zero exit is an answer, not a failure of the request.
+
 ## 4. Trust and cryptography
 
 | Concern | Mechanism |
@@ -189,7 +208,7 @@ A peer asks for a **concrete file** instead of an answer about one (OWL-039):
 | Message authenticity at rest and via relay | ed25519 signature over the exact HTTP body bytes, carried in `X-Owl-Signature`; stored alongside the body |
 | Replay | `id` (UUIDv7) + `ts` (RFC 3339); reject `|now − ts| > 5 min` and ids in the seen window |
 | Abuse | per-peer token bucket (default 20 questions/hour), `429`; asker-side and responder-side caches |
-| Leakage | responder runs read-only with no shell/write/network tools; scope defaults to repo + project files; preview before send in manual mode; redaction regexes + outgoing log in auto mode. A content request (§3.7) serves **only** the explicit allowlist — one path inside a checkout named in `config.projects`, or one key inside `responder.memory_root` with `scope.private_memory` — and is held for a human every time, whatever the peer's policy |
+| Leakage | responder runs read-only with no shell/write/network tools; scope defaults to repo + project files; preview before send in manual mode; redaction regexes + outgoing log in auto mode. A content request (§3.7) serves **only** the explicit allowlist — one path inside a checkout named in `config.projects`, or one key inside `responder.memory_root` with `scope.private_memory` — and is held for a human every time, whatever the peer's policy. A tool call (§3.8) runs **only** a tool named in `responder.tools`, with the peer's input on stdin and never in argv, and only when a human runs `owl draft` — the daemon never spawns one |
 | Prompt injection | incoming text is data; the responder prompt frames it as a quoted question; worst case is a bad answer because the session cannot act |
 | Contact list integrity (repo) | `CODEOWNERS` on `.agents/peers/` + out-of-band fingerprint check by an admin; post-MVP: changes signed by the previous key |
 | Contact list integrity (local) | key pinned on `owl add`; fingerprint shown for out-of-band comparison; auto-accept off by default |
