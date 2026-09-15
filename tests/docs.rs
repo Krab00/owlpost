@@ -1231,6 +1231,8 @@ fn content_request_pinned_in_the_design_doc() {
     ] {
         on_a_line(row);
     }
+    // The leading-`-` refusal is part of the same row: without it `-h` reaches `git` as a flag.
+    on_a_line("a `ref` that is empty or starts with `-` is malformed | `400 malformed ref` |");
     // §8 names all four event kinds of the timeline.
     for kind in [
         "| `content-requested` |",

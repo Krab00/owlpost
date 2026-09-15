@@ -278,9 +278,23 @@ pub fn cut_at_char_boundary(text: &str, max: usize) -> &str {
     &text[..end]
 }
 
-/// `git rev-parse <ref>^{commit}` in `checkout`.
+/// `git rev-parse --verify --end-of-options <ref>^{commit}` in `checkout`. A ref that is
+/// empty or starts with `-` is refused here, before `git` ever sees it: the server's
+/// charset check lets `-h` and `--git-dir/x` through, and `--end-of-options` alone cannot be
+/// relied on to catch them (the appended `^{commit}` already makes the argv one token).
 fn rev_parse(checkout: &Path, git_ref: &str) -> anyhow::Result<String> {
-    let out = git(checkout, &["rev-parse", &format!("{git_ref}^{{commit}}")])?;
+    if git_ref.is_empty() || git_ref.starts_with('-') {
+        bail!("malformed ref {git_ref}");
+    }
+    let out = git(
+        checkout,
+        &[
+            "rev-parse",
+            "--verify",
+            "--end-of-options",
+            &format!("{git_ref}^{{commit}}"),
+        ],
+    )?;
     if !out.status.success() {
         bail!("unknown ref {git_ref}");
     }
@@ -292,7 +306,7 @@ fn rev_parse(checkout: &Path, git_ref: &str) -> anyhow::Result<String> {
 /// `cat-file blob` refuses anything that is not a blob itself.
 fn git_blob(checkout: &Path, commit: &str, path: &str, git_ref: &str) -> anyhow::Result<Vec<u8>> {
     let spec = format!("{commit}:{path}");
-    let out = git(checkout, &["cat-file", "blob", &spec])?;
+    let out = git(checkout, &["cat-file", "blob", "--end-of-options", &spec])?;
     if !out.status.success() {
         bail!("unknown path {path} at {git_ref}");
     }
@@ -333,6 +347,49 @@ fn read_memory(config: &Config, key: &str) -> anyhow::Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `ref` a peer controls never reaches `git` as a flag: `-h`, `--help` and the empty
+    /// ref are refused by name before the child runs, so git never prints its usage text.
+    /// The `^{commit}` suffix alone is not the guard — it makes `-h^{commit}` one token, so
+    /// dropping the leading-`-` refusal would silently depend on that accident.
+    #[test]
+    fn a_ref_that_looks_like_a_flag_is_refused_before_git_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = |args: &[&str]| {
+            let out = Command::new("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(args)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("HOME", dir.path())
+                .env("GIT_AUTHOR_NAME", "T")
+                .env("GIT_AUTHOR_EMAIL", "t@example.org")
+                .env("GIT_COMMITTER_NAME", "T")
+                .env("GIT_COMMITTER_EMAIL", "t@example.org")
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?} failed");
+            out
+        };
+        g(&["init", "-q", "-b", "main"]);
+        std::fs::write(dir.path().join("f.txt"), "hi\n").unwrap();
+        g(&["add", "-A"]);
+        g(&["commit", "-qm", "first"]);
+
+        for bad in ["-h", "--help", "--git-dir/x", "--", ""] {
+            let err = rev_parse(dir.path(), bad).unwrap_err().to_string();
+            assert!(err.contains("malformed ref"), "{bad}: {err}");
+            assert!(
+                !err.to_lowercase().contains("usage"),
+                "{bad} printed git help: {err}"
+            );
+        }
+        // The twins: a well-formed ref still resolves, an unknown one still fails by name.
+        let sha = rev_parse(dir.path(), "main").unwrap();
+        assert_eq!(sha.len(), 40, "resolved sha: {sha}");
+        let err = rev_parse(dir.path(), "nope").unwrap_err().to_string();
+        assert!(err.contains("unknown ref nope"), "{err}");
+    }
 
     /// The cut lands on a character boundary, never inside a `ł`, and never grows the text.
     #[test]

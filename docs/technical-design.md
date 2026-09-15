@@ -324,7 +324,7 @@ Content request allowlist (OWL-039), checked in this order after the shared shap
 | `body.path` absolute, empty, or with a `..` segment (after `\` → `/`) | `400 path escapes the project` |
 | `body.memory` absolute, empty, or with a `..` segment | `400 memory key escapes the memory store` |
 | `body.memory` with no `responder.memory_root` or `scope.private_memory == false` | `400 memory store not configured` |
-| `body.ref` over 200 bytes or with a byte outside `[A-Za-z0-9._/-]` | `400 malformed ref` |
+| `body.ref` over 200 bytes or with a byte outside `[A-Za-z0-9._/-]`; a `ref` that is empty or starts with `-` is malformed | `400 malformed ref` |
 | the `type` tag and the body it parsed into disagree | `400 body does not match type` |
 
 The daemon does **not** stat or read the file here: a path inside the allowlist that does not

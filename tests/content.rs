@@ -301,6 +301,23 @@ async fn validation_table_answers_400_and_spools_nothing() {
             json!({ "project": PROJECT, "path": FILE, "ref": "x".repeat(201) }),
             "malformed ref",
         ),
+        // A ref that would reach `git` as a flag rather than as a revision.
+        (
+            json!({ "project": PROJECT, "path": FILE, "ref": "-h" }),
+            "malformed ref",
+        ),
+        (
+            json!({ "project": PROJECT, "path": FILE, "ref": "--help" }),
+            "malformed ref",
+        ),
+        (
+            json!({ "project": PROJECT, "path": FILE, "ref": "--" }),
+            "malformed ref",
+        ),
+        (
+            json!({ "project": PROJECT, "path": FILE, "ref": "" }),
+            "malformed ref",
+        ),
     ];
     for (body, want) in rows {
         let mut p = request(&a, &d.id, None);
@@ -349,6 +366,18 @@ async fn validation_table_answers_400_and_spools_nothing() {
         spool.get(Dir::Inbox, &rid).unwrap().unwrap().state,
         "consent"
     );
+
+    // The positive twins of the four flag-shaped rows: an ordinary ref is still accepted.
+    // (The daemon never resolves it here, so these need not exist in the fixture repo.)
+    for good in [
+        "main",
+        "v1.0",
+        "feature/x-1",
+        "0123456789abcdef0123456789abcdef01234567",
+    ] {
+        let resp = post_envelope(&c, &d, &signed_content(&a, &d.id, Some(good))).await;
+        assert_eq!(resp.status().as_u16(), 202, "ref {good} must be accepted");
+    }
 }
 
 /// A path inside the allowlist that does not exist still reaches consent: the daemon never
