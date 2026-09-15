@@ -502,8 +502,12 @@ fn validate_content_body(body: &serde_json::Map<String, Value>, config: &Config)
             ));
         }
     }
+    // An empty `ref`, or one starting with `-`, is malformed: the charset alone would let
+    // `-h` or `--git-dir/x` through, and those reach `git` as a flag, not as a revision.
     if let Some(r) = field("ref")
-        && (r.len() > 200
+        && (r.is_empty()
+            || r.starts_with('-')
+            || r.len() > 200
             || !r
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'/' | b'-')))
