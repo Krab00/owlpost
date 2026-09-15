@@ -37,6 +37,12 @@ pub struct Responder {
     pub scope: Scope,
     pub redact: Vec<String>,
     pub timeout_secs: u64,
+    /// Root of the memory store a peer may ask one entry of (OWL-039). Absent by default
+    /// (`owl init` writes nothing for it) and canonicalised by [`Config::load`], so the
+    /// `memory` key check in `owl draft` compares two resolved paths. `scope.private_memory`
+    /// must be `true` as well: this says *where*, that switch says *whether*.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_root: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -89,6 +95,7 @@ impl Default for Responder {
                     .into(),
             ],
             timeout_secs: 180,
+            memory_root: None,
         }
     }
 }
@@ -209,12 +216,21 @@ impl Config {
     /// Missing file → defaults. Malformed file → error.
     pub fn load(home: &Path) -> anyhow::Result<Config> {
         let path = Self::path(home);
-        match std::fs::read(&path) {
+        let mut config: Config = match std::fs::read(&path) {
             Ok(bytes) => serde_json::from_slice(&bytes)
-                .with_context(|| format!("parsing {}", path.display())),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
-            Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
+                .with_context(|| format!("parsing {}", path.display()))?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Config::default(),
+            Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+        };
+        // OWL-039: the memory root is compared against a canonicalised entry path, so it is
+        // resolved here. A root that does not exist stays as configured — `owl draft` is
+        // where that is reported, not `Config::load`, which every command runs.
+        if let Some(root) = &config.responder.memory_root
+            && let Ok(resolved) = std::fs::canonicalize(root)
+        {
+            config.responder.memory_root = Some(resolved.to_string_lossy().into_owned());
         }
+        Ok(config)
     }
 
     pub fn save(&self, home: &Path) -> anyhow::Result<()> {

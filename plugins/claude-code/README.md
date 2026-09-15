@@ -33,6 +33,7 @@ patterns of the next steps a file runs itself); `tests/plugin.rs` pins the rule.
 | `/owlpost:allow <peer> [--once\|--always]` | `commands/allow.md` | `owl allow` — release held questions, set policy (confirms first) |
 | `/owlpost:deny <peer>` | `commands/deny.md` | `owl deny` — policy never (confirms first) |
 | `/owlpost:ask <peer> [path] <question>` | `commands/ask.md` | `owl ask` — send a question at once; the command is the approval, no confirmation step; `--reply-to <id>` continues a thread, `--context <path>` attaches a snippet |
+| `/owlpost:request <peer> <project> <path>` | `commands/request.md` | `owl request` — ask for one file at a ref, or one memory entry (`--memory <key>`); always held for the owner's consent |
 | `/owlpost:status [id]` | `commands/status.md` | `owl status` — where every open question stands, in the peer's words (`waiting for the owner's consent`, …) |
 | `/owlpost:inbox` | `commands/inbox.md` | `owl inbox --json` — walk the records: question verbatim, consent picker (allow once/always, deny), draft / draft & send / reject / skip picker, verbatim draft, send/edit/reject picker |
 | `/owlpost:show <id>` | `commands/show.md` | `owl show` — full record, offer draft/send/reject |

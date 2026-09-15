@@ -1199,3 +1199,83 @@ fn thread_and_event_log_pinned_in_the_design_doc() {
         "guide.md 3.11 must show the bare `owl thread` command"
     );
 }
+
+// ---------- OWL-039: content requests ----------
+
+/// AC11: every literal of the content-request contract sits on one table or executable line
+/// of the design doc, so a rewrite that drops the rule fails here rather than in the field.
+#[test]
+fn content_request_pinned_in_the_design_doc() {
+    let design = repo_file("docs/technical-design.md");
+    let on_a_line = |needle: &str| {
+        assert!(
+            design.lines().any(|l| l.contains(needle)),
+            "docs/technical-design.md lacks {needle:?} on one line"
+        );
+    };
+    // §3 the config key, §6 the reply kind and the cap, §7 the consent rule, §9 the command.
+    on_a_line("\"memory_root\": \"/Users/krzysiek/notes/owlpost\"");
+    on_a_line("`responder.memory_root` (optional, OWL-039)");
+    on_a_line("| `content-reply` | `{ \"content\": \"…\", \"sha256\": \"<hex>\"");
+    on_a_line("`MAX_CONTENT_BYTES = 262144` (256 KiB) bounds the content after redaction");
+    on_a_line("consent whatever the policy");
+    on_a_line("| `owl request <peer> <project> <path> [--ref <ref>] [--reply-to <id>]`");
+    // The allowlist table: every 400 the API can answer for a content request.
+    for row in [
+        "`400 body must carry exactly one of path and memory`",
+        "`400 unknown project`",
+        "`400 path escapes the project`",
+        "`400 memory key escapes the memory store`",
+        "`400 memory store not configured`",
+        "`400 malformed ref`",
+    ] {
+        on_a_line(row);
+    }
+    // The leading-`-` refusal is part of the same row: without it `-h` reaches `git` as a flag.
+    on_a_line("a `ref` that is empty or starts with `-` is malformed | `400 malformed ref` |");
+    // §8 names all four event kinds of the timeline.
+    for kind in [
+        "| `content-requested` |",
+        "| `content-drafted` |",
+        "| `content-sent` |",
+        "| `content-received` |",
+    ] {
+        on_a_line(kind);
+    }
+    // §10: the patterns run over content, the runner does not.
+    on_a_line("invoked for it: `owl draft` reads the named object, redacts it and stops");
+}
+
+/// AC11: the architecture doc gains the flow and names the allowlist in its Leakage row, and
+/// the guide gains the section a reader is sent to.
+#[test]
+fn content_request_pinned_in_architecture_and_guide() {
+    let arch = repo_file("docs/architecture.md");
+    assert!(
+        arch.contains("\n### 3.7 Content request\n"),
+        "architecture.md lacks the 3.7 heading"
+    );
+    let leakage = arch
+        .lines()
+        .find(|l| l.starts_with("| Leakage |"))
+        .expect("architecture.md Leakage row");
+    assert!(
+        leakage.contains("serves **only** the explicit allowlist"),
+        "the Leakage row must name the allowlist: {leakage}"
+    );
+    let guide = repo_file("docs/guide.md");
+    assert!(
+        guide.contains("\n### 3.12 Ask for a file\n"),
+        "guide.md lacks the \"Ask for a file\" section"
+    );
+    for line in [
+        "owl request Bartek github.com/company/monorepo src/auth/session.rs",
+        "owl request Bartek --memory decisions/2026-08-refresh-token.md",
+        "/owlpost:request Bartek github.com/company/monorepo src/auth/session.rs",
+    ] {
+        assert!(
+            guide.lines().any(|l| l.trim() == line),
+            "guide.md lacks the runnable line {line:?}"
+        );
+    }
+}

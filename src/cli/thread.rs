@@ -103,8 +103,8 @@ fn list(home: &Path, json: bool) -> anyhow::Result<()> {
             if !rec.seen {
                 row.unseen += 1;
             }
-            if OPEN_STATES.contains(&rec.state.as_str()) && payload.kind == envelope::Kind::Question
-            {
+            // OWL-039: a held content request is open work too.
+            if OPEN_STATES.contains(&rec.state.as_str()) && payload.kind.is_request() {
                 row.open += 1;
             }
         }
@@ -112,7 +112,7 @@ fn list(home: &Path, json: bool) -> anyhow::Result<()> {
         if (rec.received_at.as_str(), id.as_str()) > (row.last_ts.as_str(), row.last_id.as_str()) {
             row.last_ts = rec.received_at.clone();
             row.last_id = id;
-            row.last_summary = first_line(text, SUMMARY_CHARS);
+            row.last_summary = first_line(&text, SUMMARY_CHARS);
         }
     }
     let mut rows: Vec<Row> = by_peer.into_values().collect();
@@ -160,12 +160,10 @@ fn list(home: &Path, json: bool) -> anyhow::Result<()> {
 
 // ------------------------------------------------------------------ one conversation
 
-/// The question or answer text of a payload.
-fn message_text(payload: &Payload) -> &str {
-    match &payload.body {
-        Body::Question { question, .. } => question,
-        Body::Answer { answer, .. } => answer,
-    }
+/// The question or answer text of a payload (OWL-039: a content request's summary line, a
+/// content reply's content).
+fn message_text(payload: &Payload) -> std::borrow::Cow<'_, str> {
+    super::body_text(&payload.body)
 }
 
 /// One timeline row before rendering: the event plus everything the row needs from its record.
@@ -259,10 +257,7 @@ fn row(e: &Entry) -> Value {
         "context_id": e.payload.context_id,
         "type": kind_str(e.payload.kind),
         "state": e.rec.state,
-        "project": match &e.payload.body {
-            Body::Question { project, .. } => Some(project.as_str()),
-            Body::Answer { .. } => None,
-        },
+        "project": super::body_project(&e.payload.body),
         "path": body_path(&e.payload.body),
         // The full text, never cut: the reader (or the mod) decides what to truncate.
         "text": message_text(&e.payload),
@@ -290,7 +285,7 @@ fn row(e: &Entry) -> Value {
 /// the events that are about our reply (`drafted`, `sent`) carry the stored draft's — a
 /// `received` row is the peer's message and has no harness.
 fn harness_of(e: &Entry) -> Option<String> {
-    if let Body::Answer { harness, .. } = &e.payload.body {
+    if let Body::Answer { harness, .. } | Body::ContentReply { harness, .. } = &e.payload.body {
         return Some(harness.clone());
     }
     if !matches!(e.event.kind.as_str(), "drafted" | "sent") {
@@ -309,7 +304,13 @@ const OUR_TEXT: [&str; 3] = ["drafted", "sent", "asked"];
 /// everything else as one line plus, when the event carries our own text, that text in a
 /// plain ```` ```text ```` block.
 fn block(spool: &Spool, book: &ContactBook, e: &Entry) -> String {
-    if e.dir == "in" && matches!(e.event.kind.as_str(), "received" | "answer-received") {
+    // OWL-039: a content request and a content reply are peer messages too.
+    if e.dir == "in"
+        && matches!(
+            e.event.kind.as_str(),
+            "received" | "answer-received" | "content-requested" | "content-received"
+        )
+    {
         // Byte-for-byte what `owl show <id> --format claude` prints for this record.
         return render::record_block(spool, book, &e.rec, &e.payload, None);
     }

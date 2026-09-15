@@ -53,6 +53,12 @@ fn not_a_candidate(config: &Config, book: &ContactBook, id: &str, rec: &Record) 
         Ok(p) => p,
         Err(e) => return Some(format!("{e:#}")),
     };
+    // OWL-039: content never runs unattended, whatever the peer's policy says. An explicit
+    // guard before the body check, so the reason a test reads is this one and a later kind
+    // inherits it.
+    if payload.kind == crate::envelope::Kind::Content {
+        return Some(format!("record {id} is a content request — consent only"));
+    }
     if answer::question_body(id, &payload).is_err() {
         return Some(format!("record {id} is an answer"));
     }

@@ -37,6 +37,7 @@ fn help_lists_all_subcommands() {
         "allow",
         "deny",
         "ask",
+        "request",
         "status",
         "inbox",
         "show",
