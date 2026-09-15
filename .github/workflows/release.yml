@@ -98,7 +98,7 @@ jobs:
           asset="owl-${VERSION}-${TARGET}.tar.gz"
           tar -C "target/${TARGET}/release" -czf "$asset" owl
           ls -l "$asset"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: owl-${{ env.VERSION }}-${{ matrix.target }}
           path: owl-${{ env.VERSION }}-${{ matrix.target }}.tar.gz
@@ -127,7 +127,7 @@ jobs:
           fi
           sha256sum owl-*.tar.gz > SHA256SUMS
           cat SHA256SUMS
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: SHA256SUMS
           path: dist/SHA256SUMS
