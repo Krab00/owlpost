@@ -404,7 +404,11 @@ pub fn record_block(
                     (_, Some(k)) => format!("asks for memory:{k}"),
                     _ => "asks for content".to_string(),
                 },
-                Body::ContentReply { content, .. } => content.clone(),
+                // The asker's side of the same cap (§4): `--format claude` is a mode of
+                // `owl show`, so it cuts at `CONTENT_SHOW_LINES` like the plain form.
+                Body::ContentReply {
+                    content, sha256, ..
+                } => crate::content::display(content, sha256),
                 _ => unreachable!("outer match selected a content body"),
             };
             let (project, path) = match &payload.body {
