@@ -472,7 +472,7 @@ fn print_rendered(
         match &payload.body {
             // OWL-039: a content request is held for consent and reviewed exactly like a
             // question, so it takes the same two sections.
-            Body::Question { .. } | Body::Content { .. } => {
+            Body::Question { .. } | Body::Content { .. } | Body::ToolCall { .. } => {
                 let draft = StoredDraft::from_record(id, rec)?;
                 let block = render::record_block(spool, book, rec, &payload, draft.as_ref());
                 if rec.state == "consent" {
@@ -481,7 +481,7 @@ fn print_rendered(
                     questions.push(block);
                 }
             }
-            Body::Answer { .. } | Body::ContentReply { .. } => {
+            Body::Answer { .. } | Body::ContentReply { .. } | Body::ToolReply { .. } => {
                 let answer = super::body_text(&payload.body).into_owned();
                 let question_id = payload.in_reply_to.clone();
                 let question_first_line = question_id
@@ -490,7 +490,10 @@ fn print_rendered(
                     .and_then(|q| match &q.body {
                         Body::Question { question, .. } => Some(question.clone()),
                         Body::Content { .. } => Some(owlpost::content::body_summary(&q.body)),
-                        Body::Answer { .. } | Body::ContentReply { .. } => None,
+                        Body::ToolCall { .. } => Some(owlpost::tools::body_summary(&q.body)),
+                        Body::Answer { .. }
+                        | Body::ContentReply { .. }
+                        | Body::ToolReply { .. } => None,
                     })
                     .unwrap_or_default();
                 answers.push(AnswerRow {

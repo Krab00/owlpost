@@ -1279,3 +1279,78 @@ fn content_request_pinned_in_architecture_and_guide() {
         );
     }
 }
+
+// ---------- OWL-040: tool-call requests ----------
+
+/// AC11: every literal of the tool-call contract sits on one table or executable line of the
+/// design doc.
+#[test]
+fn tool_call_pinned_in_the_design_doc() {
+    let design = repo_file("docs/technical-design.md");
+    let on_a_line = |needle: &str| {
+        assert!(
+            design.lines().any(|l| l.contains(needle)),
+            "docs/technical-design.md lacks {needle:?} on one line"
+        );
+    };
+    // §3 the registry, §6 the reply kind and the cap, §9 the command.
+    on_a_line("\"max_input_bytes\": 4096");
+    on_a_line("`responder.tools` (optional, OWL-040)");
+    on_a_line("`config: tools.<name>.argv must not interpolate the input`");
+    on_a_line("| `tool-reply` | `{ \"output\": \"…\", \"exit_code\": 0");
+    on_a_line("`MAX_OUTPUT_BYTES = 262144` (256 KiB) bounds the tool output after redaction");
+    on_a_line(r"| `owl call <peer> <tool> --input <file\|-> [--project <id>] [--reply-to <id>]`");
+    // §7: every 400 the API can answer for a tool call, and the coarse `unknown tool`.
+    for row in [
+        "| `body.tool` missing, empty, or not a key of `responder.tools` | `400 unknown tool` |",
+        "| `responder.tools` empty — no registry, nothing to name | `400 unknown tool` |",
+        "`400 body.input must be an object`",
+        "`400 input is <n> bytes, max <m>`",
+    ] {
+        on_a_line(row);
+    }
+    // §8 names all four event kinds of the timeline.
+    for kind in [
+        "| `tool-requested` |",
+        "| `tool-run` |",
+        "| `tool-sent` |",
+        "| `tool-received` |",
+    ] {
+        on_a_line(kind);
+    }
+    // §13: the ceiling this task accepts.
+    on_a_line("A tool call runs one tool at a time and blocks `owl draft` for the whole run");
+}
+
+/// AC11: the architecture doc gains the flow and names the registry in its Leakage row, and
+/// the guide gains the section a reader is sent to.
+#[test]
+fn tool_call_pinned_in_architecture_and_guide() {
+    let arch = repo_file("docs/architecture.md");
+    assert!(
+        arch.contains("\n### 3.8 Tool-call request\n"),
+        "architecture.md lacks the 3.8 heading"
+    );
+    let leakage = arch
+        .lines()
+        .find(|l| l.starts_with("| Leakage |"))
+        .expect("architecture.md Leakage row");
+    assert!(
+        leakage.contains("runs **only** a tool named in `responder.tools`"),
+        "the Leakage row must name the registry: {leakage}"
+    );
+    let guide = repo_file("docs/guide.md");
+    assert!(
+        guide.contains("\n### 3.13 Let a colleague run one of your tools\n"),
+        "guide.md lacks the \"Let a colleague run one of your tools\" section"
+    );
+    for line in [
+        "owl call Bartek test --input ./in.json",
+        "/owlpost:call Bartek test --input ./in.json",
+    ] {
+        assert!(
+            guide.lines().any(|l| l.trim() == line),
+            "guide.md lacks the runnable line {line:?}"
+        );
+    }
+}

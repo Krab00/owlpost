@@ -20,6 +20,11 @@ pub const MAX_CONTEXT_BYTES: usize = 8192;
 /// `true`; `sha256` stays the digest of the whole redacted content, so the asker can tell it
 /// holds a prefix.
 pub const MAX_CONTENT_BYTES: usize = 262_144;
+/// Largest `body.output` a tool reply carries, in bytes after redaction (OWL-040). Same cap
+/// and same character-boundary cut as [`MAX_CONTENT_BYTES`], with `truncated` going out
+/// `true` when it bites. The output carries no digest: it is the record of one run, not a
+/// file the asker can re-derive.
+pub const MAX_OUTPUT_BYTES: usize = 262_144;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Payload {
@@ -50,6 +55,13 @@ pub enum Kind {
     /// spell it `contentreply`, hence the explicit rename.
     #[serde(rename = "content-reply")]
     ContentReply,
+    /// OWL-040: a peer names a tool of the owner's registry and an input object. Nothing
+    /// runs until the owner allows the record and types `owl draft`.
+    #[serde(rename = "tool-call")]
+    ToolCall,
+    /// OWL-040: the reply carrying that run's output and exit code.
+    #[serde(rename = "tool-reply")]
+    ToolReply,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -87,6 +99,27 @@ pub enum Body {
         /// Always `"human"`: no harness and no model run on this path.
         harness: String,
     },
+    /// OWL-040 request body. Declared before [`Body::Content`] for the same reason
+    /// [`Body::ContentReply`] is: `Content` accepts any object, so it would swallow this one.
+    /// `tool` and `input` are both required, so nothing else is swallowed by it either.
+    ToolCall {
+        tool: String,
+        input: serde_json::Map<String, serde_json::Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project: Option<String>,
+    },
+    /// OWL-040 reply body: the one run's output, its exit code and how long it took.
+    /// `exit_code` is `-1` when the child was killed by the timeout or by a signal, and
+    /// `duration_ms` is then the timeout itself.
+    ToolReply {
+        output: String,
+        exit_code: i32,
+        duration_ms: u64,
+        truncated: bool,
+        redactions: u32,
+        /// Always `"human"`: no harness and no model run on this path.
+        harness: String,
+    },
     /// OWL-039 request body: exactly one of `path` (with `project`) and `memory`. Every
     /// field is optional on the wire so the server can name the missing one itself
     /// (`validate_request`) instead of returning a serde schema error.
@@ -105,12 +138,12 @@ pub enum Body {
 impl Kind {
     /// A kind a peer sends *to* us: it earns a spool record and an A2A `Task` (OWL-039).
     pub fn is_request(self) -> bool {
-        matches!(self, Kind::Question | Kind::Content)
+        matches!(self, Kind::Question | Kind::Content | Kind::ToolCall)
     }
 
     /// A kind we send *back*: what `GET /v1/outbox` serves and a pull ingests (OWL-039).
     pub fn is_reply(self) -> bool {
-        matches!(self, Kind::Answer | Kind::ContentReply)
+        matches!(self, Kind::Answer | Kind::ContentReply | Kind::ToolReply)
     }
 }
 
@@ -219,6 +252,63 @@ impl Payload {
                 content: content.into(),
                 sha256: sha256.into(),
                 ref_resolved: ref_resolved.map(str::to_string),
+                truncated,
+                redactions,
+                harness: "human".into(),
+            },
+        }
+    }
+
+    /// New tool-call request payload (OWL-040). The tool name is checked against the
+    /// owner's registry by `validate_request`; this constructor stays a plain carrier.
+    pub fn tool_call(
+        from: &str,
+        to: &str,
+        tool: &str,
+        input: serde_json::Map<String, serde_json::Value>,
+        project: Option<&str>,
+    ) -> Payload {
+        Payload {
+            v: 1,
+            id: uuid::Uuid::now_v7().to_string(),
+            kind: Kind::ToolCall,
+            from: from.into(),
+            to: to.into(),
+            ts: rfc3339_now(),
+            in_reply_to: None,
+            context_id: None,
+            body: Body::ToolCall {
+                tool: tool.into(),
+                input,
+                project: project.map(str::to_string),
+            },
+        }
+    }
+
+    /// New tool reply payload replying to `request` (OWL-040), mirroring
+    /// [`Payload::content_reply`]: the thread id is copied from the request, `harness` is
+    /// always `"human"`.
+    pub fn tool_reply(
+        request: &Payload,
+        output: &str,
+        exit_code: i32,
+        duration_ms: u64,
+        truncated: bool,
+        redactions: u32,
+    ) -> Payload {
+        Payload {
+            v: 1,
+            id: uuid::Uuid::now_v7().to_string(),
+            kind: Kind::ToolReply,
+            from: request.to.clone(),
+            to: request.from.clone(),
+            ts: rfc3339_now(),
+            in_reply_to: Some(request.id.clone()),
+            context_id: request.context_id.clone(),
+            body: Body::ToolReply {
+                output: output.into(),
+                exit_code,
+                duration_ms,
                 truncated,
                 redactions,
                 harness: "human".into(),

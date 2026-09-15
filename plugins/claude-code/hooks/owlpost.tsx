@@ -7,7 +7,8 @@
 //   browses and filters contacts, sends a question and walks the inbox, all by running `owl`
 //   directly: no model turn, no tokens. Drafting an answer still goes through the model;
 //   drafting a content request (OWL-039) does not — Draft there runs `owl draft` itself,
-//   because that path reads one file and has no model in it.
+//   because that path reads one file and has no model in it. Nor does a tool-call request
+//   (OWL-040): **Run (owl draft)** runs the tool the peer named, again with no model turn.
 //   Running the same command again (or the Close button) closes the pane.
 // The inbox is a thread list (OWL-038): one row per person, Open draws the whole conversation
 // with them oldest first, and the action buttons sit next to the open request only.
@@ -243,7 +244,7 @@ export const register: Register = (on) => {
       const wanted = ['consent', 'pending', 'drafted']
       for (let i = timeline.length - 1; i >= 0; i--) {
         const e = timeline[i]
-        if (e.dir !== 'in' || (e.type !== 'question' && e.type !== 'content')) continue
+        if (e.dir !== 'in' || (e.type !== 'question' && e.type !== 'content' && e.type !== 'tool-call')) continue
         if (!wanted.includes(e.state)) continue
         // The newest event of that record, not an older one of the same record.
         const last = timeline.map((x) => x.record_id).lastIndexOf(e.record_id)
@@ -254,12 +255,20 @@ export const register: Register = (on) => {
 
     // A content request (OWL-039) is a file the peer asked for, not a question: Draft runs
     // `owl draft` directly — there is no model in that path — and there is no own-answer
-    // input, because the answer is the file.
+    // input, because the answer is the file. A tool-call request (OWL-040) is the same
+    // shape: **Run (owl draft)** is the only thing that executes the tool, it goes straight
+    // to `act()` with no model turn, and the note line reports the run's first output line
+    // (`ran <tool> in <t>s — exit <code>, …`), so a long run is visibly in flight.
     const actions = (e: Ev) => (
       <Box flexDirection="column">
         {e.type === 'content' && (
           <Text dimColor wrap="truncate">
             {`asks for ${e.text}${e.state === 'drafted' ? ' · Show content prints the exact bytes before Send' : ''}`}
+          </Text>
+        )}
+        {e.type === 'tool-call' && (
+          <Text dimColor wrap="truncate">
+            {`asks to run ${e.text}${e.state === 'drafted' ? ' · the output above is what Send would return' : ' · Run executes it on this machine'}`}
           </Text>
         )}
         <Box flexDirection="row" gap={1}>
@@ -268,14 +277,16 @@ export const register: Register = (on) => {
           {e.state === 'consent' && <Button label={`Deny (${openPeer})`} onPress={() => void act($, ['deny', openPeer])} />}
           {e.type === 'content' && e.state !== 'consent' && e.state !== 'drafted' &&
             <Button label="Draft" onPress={() => void act($, ['draft', e.record_id])} />}
-          {e.type !== 'content' && e.state !== 'consent' && e.state !== 'drafted' &&
+          {e.type === 'tool-call' && e.state !== 'consent' && e.state !== 'drafted' &&
+            <Button label="Run (owl draft)" onPress={() => void act($, ['draft', e.record_id])} />}
+          {e.type !== 'content' && e.type !== 'tool-call' && e.state !== 'consent' && e.state !== 'drafted' &&
             <Button label="Draft (Claude)" onPress={() => void $.command.run({ command: 'owlpost:draft', args: e.record_id })} />}
-          {e.type === 'content' && e.state === 'drafted' &&
-            <Button label="Show content" onPress={() => void act($, ['show', e.record_id])} />}
+          {(e.type === 'content' || e.type === 'tool-call') && e.state === 'drafted' &&
+            <Button label={e.type === 'content' ? 'Show content' : 'Show output'} onPress={() => void act($, ['show', e.record_id])} />}
           {e.state === 'drafted' && <Button label="Send" onPress={() => void act($, ['send', e.record_id])} />}
           {e.state !== 'consent' && <Button label="Reject" onPress={() => void act($, ['reject', e.record_id])} />}
         </Box>
-        {e.type !== 'content' && e.state !== 'consent' && (
+        {e.type !== 'content' && e.type !== 'tool-call' && e.state !== 'consent' && (
           <Input key={`reply-${e.record_id}`} label="Own answer" placeholder="type and Enter to store it as the draft"
             value={reply[e.record_id] ?? ''} submitLabel="Save draft" onInput={(v) => { reply[e.record_id] = v }}
             onSubmit={(v) => { delete reply[e.record_id]; void act($, ['draft', e.record_id, '--text', v]) }} />

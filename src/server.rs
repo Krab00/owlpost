@@ -316,7 +316,9 @@ pub fn record_state(mode: Option<Mode>) -> (&'static str, bool) {
 /// never even offered the record.
 pub fn record_state_for(kind: Kind, mode: Option<Mode>) -> (&'static str, bool) {
     match kind {
-        Kind::Content => ("consent", false),
+        // OWL-040 holds a tool-call request for exactly the same reason: nothing runs on
+        // this machine without a human typing `owl draft` after allowing the record.
+        Kind::Content | Kind::ToolCall => ("consent", false),
         _ => record_state(mode),
     }
 }
@@ -517,6 +519,40 @@ fn validate_content_body(body: &serde_json::Map<String, Value>, config: &Config)
     Ok(())
 }
 
+/// The §7 table for a `tool-call` body (OWL-040). The registry is the allowlist: a tool the
+/// owner did not configure is `unknown tool`, and so is a request that arrives when there is
+/// no registry at all — deliberately the same message, so a peer cannot enumerate the
+/// owner's tools by the errors it gets back. Nothing is spawned here: the daemon never runs
+/// a tool, `owl draft` does.
+fn validate_tool_body(body: &serde_json::Map<String, Value>, config: &Config) -> ApiResult<()> {
+    let tool = body
+        .get("tool")
+        .and_then(Value::as_str)
+        .filter(|t| !t.is_empty())
+        .and_then(|t| config.responder.tools.get(t))
+        .ok_or_else(|| ApiError::bad_request("unknown tool"))?;
+    let input = body
+        .get("input")
+        .and_then(Value::as_object)
+        .ok_or_else(|| ApiError::bad_request("body.input must be an object"))?;
+    let bytes = serde_json::to_string(input)
+        .map_err(|_| ApiError::bad_request("body.input must be an object"))?
+        .len();
+    if bytes > tool.max_input_bytes {
+        return Err(ApiError::bad_request(format!(
+            "input is {bytes} bytes, max {}",
+            tool.max_input_bytes
+        )));
+    }
+    if let Some(project) = body.get("project") {
+        match project.as_str() {
+            Some(p) if config.projects.contains_key(p) => {}
+            _ => return Err(ApiError::bad_request("unknown project")),
+        }
+    }
+    Ok(())
+}
+
 /// Shape checks with a named error for each field, then the typed parse. `type: "question"`
 /// keeps every check and error string it had; `type: "content"` (OWL-039) runs the §7
 /// allowlist table instead of the question body checks.
@@ -532,10 +568,13 @@ fn validate_request(value: &Value, caller: &str, me: &str, config: &Config) -> A
         return Err(ApiError::bad_request("malformed id"));
     }
     let kind = str_field(obj, "type")?;
-    if kind != "question" && kind != "content" {
-        return Err(ApiError::bad_request("type must be question or content"));
+    if kind != "question" && kind != "content" && kind != "tool-call" {
+        return Err(ApiError::bad_request(
+            "type must be question, content or tool-call",
+        ));
     }
     let content = kind == "content";
+    let tool_call = kind == "tool-call";
     if str_field(obj, "from")? != caller {
         return Err(ApiError::bad_request(
             "from does not match the client certificate",
@@ -551,6 +590,8 @@ fn validate_request(value: &Value, caller: &str, me: &str, config: &Config) -> A
         .ok_or_else(|| ApiError::bad_request("body must be an object"))?;
     if content {
         validate_content_body(body, config)?;
+    } else if tool_call {
+        validate_tool_body(body, config)?;
     } else {
         str_field(body, "project").map_err(|_| ApiError::bad_request("missing body.project"))?;
         let question = str_field(body, "question")
@@ -580,7 +621,8 @@ fn validate_request(value: &Value, caller: &str, me: &str, config: &Config) -> A
     // tag and the body it selected must agree (OWL-039).
     match (payload.kind, &payload.body) {
         (Kind::Question, envelope::Body::Question { .. })
-        | (Kind::Content, envelope::Body::Content { .. }) => Ok(payload),
+        | (Kind::Content, envelope::Body::Content { .. })
+        | (Kind::ToolCall, envelope::Body::ToolCall { .. }) => Ok(payload),
         _ => Err(ApiError::bad_request("body does not match type")),
     }
 }
@@ -682,9 +724,14 @@ async fn post_question(
             }
             Some(hash)
         }
-        envelope::Body::Content { .. } => None,
-        envelope::Body::Answer { .. } | envelope::Body::ContentReply { .. } => {
-            return Err(ApiError::bad_request("type must be question or content"));
+        // OWL-040: a tool call is one run, never a cached answer, so it has no hash either.
+        envelope::Body::Content { .. } | envelope::Body::ToolCall { .. } => None,
+        envelope::Body::Answer { .. }
+        | envelope::Body::ContentReply { .. }
+        | envelope::Body::ToolReply { .. } => {
+            return Err(ApiError::bad_request(
+                "type must be question, content or tool-call",
+            ));
         }
     };
     let (record_state, auto) = record_state_for(payload.kind, mode);
@@ -710,6 +757,7 @@ async fn post_question(
     // show the same word for the same moment.
     let arrival = match payload.kind {
         Kind::Content => "content-requested",
+        Kind::ToolCall => "tool-requested",
         _ => "received",
     };
     crate::events::push(&mut record, arrival, None, None);
@@ -887,7 +935,11 @@ fn task_meta(payload: &Payload) -> Value {
         envelope::Body::Question { project, path, .. } => (Some(project.as_str()), path.as_deref()),
         // OWL-039: a content request's project is optional on the wire.
         envelope::Body::Content { project, path, .. } => (project.as_deref(), path.as_deref()),
-        envelope::Body::Answer { .. } | envelope::Body::ContentReply { .. } => (None, None),
+        // OWL-040: a tool call names a project only when the tool runs in one.
+        envelope::Body::ToolCall { project, .. } => (project.as_deref(), None),
+        envelope::Body::Answer { .. }
+        | envelope::Body::ContentReply { .. }
+        | envelope::Body::ToolReply { .. } => (None, None),
     };
     json!({ "from": payload.from, "to": payload.to, "project": project, "path": path })
 }
@@ -1224,7 +1276,7 @@ mod tests {
         assert_eq!(err_of(v), "malformed id");
         let mut v = valid();
         v["type"] = json!("answer");
-        assert_eq!(err_of(v), "type must be question or content");
+        assert_eq!(err_of(v), "type must be question, content or tool-call");
         let mut v = valid();
         v["type"] = json!(7);
         assert_eq!(err_of(v), "missing type");

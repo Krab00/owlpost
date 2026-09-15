@@ -588,7 +588,7 @@ async fn bad_inputs_are_4xx_never_500() {
         ),
         (
             shape(with(&|v| v["type"] = json!("answer"))),
-            "type must be question or content",
+            "type must be question, content or tool-call",
         ),
         (shape(with(&|v| v["v"] = json!(2))), "unsupported v"),
         (

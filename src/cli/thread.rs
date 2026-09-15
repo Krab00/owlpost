@@ -285,7 +285,10 @@ fn row(e: &Entry) -> Value {
 /// the events that are about our reply (`drafted`, `sent`) carry the stored draft's — a
 /// `received` row is the peer's message and has no harness.
 fn harness_of(e: &Entry) -> Option<String> {
-    if let Body::Answer { harness, .. } | Body::ContentReply { harness, .. } = &e.payload.body {
+    if let Body::Answer { harness, .. }
+    | Body::ContentReply { harness, .. }
+    | Body::ToolReply { harness, .. } = &e.payload.body
+    {
         return Some(harness.clone());
     }
     if !matches!(e.event.kind.as_str(), "drafted" | "sent") {
@@ -297,8 +300,18 @@ fn harness_of(e: &Entry) -> Option<String> {
         .map(|d| d.harness)
 }
 
-/// Kinds whose block carries our own words.
-const OUR_TEXT: [&str; 3] = ["drafted", "sent", "asked"];
+/// Kinds whose block carries our own words: the answer we drafted or sent, the question we
+/// asked, and — OWL-039/OWL-040 — the content we served and the output the tool printed.
+/// Each of these rows is the only place the human format shows what left this machine.
+const OUR_TEXT: [&str; 7] = [
+    "drafted",
+    "sent",
+    "asked",
+    "content-drafted",
+    "content-sent",
+    "tool-run",
+    "tool-sent",
+];
 
 /// One human-format block: a peer message as the `--format claude` table of its record,
 /// everything else as one line plus, when the event carries our own text, that text in a
@@ -308,7 +321,13 @@ fn block(spool: &Spool, book: &ContactBook, e: &Entry) -> String {
     if e.dir == "in"
         && matches!(
             e.event.kind.as_str(),
-            "received" | "answer-received" | "content-requested" | "content-received"
+            "received"
+                | "answer-received"
+                | "content-requested"
+                | "content-received"
+                // OWL-040: a tool-call request and its reply are peer messages too.
+                | "tool-requested"
+                | "tool-received"
         )
     {
         // Byte-for-byte what `owl show <id> --format claude` prints for this record.
@@ -350,6 +369,14 @@ fn detail_line(detail: Option<&Value>) -> Option<String> {
 /// Our own words behind a `drafted`/`sent`/`asked` event: the stored draft when there is one
 /// (what we wrote in reply), else the record's own message (our ask).
 fn our_text(e: &Entry) -> Option<String> {
+    // A content draft and a tool draft can each be 256 KiB; the timeline shows them under
+    // the same 200-line cap `owl show` uses, never the whole buffer (OWL-039, OWL-040).
+    if let Some(c) = owlpost::content::stored(&e.rec) {
+        return Some(owlpost::content::display(&c.text, &c.sha256));
+    }
+    if let Some(r) = owlpost::tools::stored(&e.rec) {
+        return Some(owlpost::tools::display(&r.output));
+    }
     if let Ok(Some(d)) = owlpost::answer::StoredDraft::from_record(&e.record_id, &e.rec) {
         return Some(d.text);
     }

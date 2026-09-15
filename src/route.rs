@@ -427,14 +427,18 @@ fn project_of(spool: &Spool, payload: &Payload) -> Option<String> {
         Body::Question { project, .. } => project.clone(),
         // OWL-039: a content request names its project too; a reply borrows the request's.
         Body::Content { project, .. } => project.clone().unwrap_or_default(),
-        Body::Answer { .. } | Body::ContentReply { .. } => match payload
+        // OWL-040: a tool call names the project its tool runs in, when it names one.
+        Body::ToolCall { project, .. } => project.clone().unwrap_or_default(),
+        Body::Answer { .. } | Body::ContentReply { .. } | Body::ToolReply { .. } => match payload
             .in_reply_to
             .as_deref()
             .and_then(|q| render::find_question(spool, q))
             .map(|q| q.body)
         {
             Some(Body::Question { project, .. }) => project,
-            Some(Body::Content { project, .. }) => project.unwrap_or_default(),
+            Some(Body::Content { project, .. }) | Some(Body::ToolCall { project, .. }) => {
+                project.unwrap_or_default()
+            }
             _ => return None,
         },
     };

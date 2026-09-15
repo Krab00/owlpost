@@ -43,6 +43,27 @@ pub struct Responder {
     /// must be `true` as well: this says *where*, that switch says *whether*.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_root: Option<String>,
+    /// The tool registry a peer's `tool-call` request may name (OWL-040). Empty by default,
+    /// so the feature is off until the owner adds a tool by hand; the registry *is* the
+    /// allowlist, and a tool it does not name never reaches consent.
+    #[serde(default)]
+    pub tools: BTreeMap<String, Tool>,
+}
+
+/// One entry of `responder.tools` (OWL-040). The peer's input never touches `argv`: it goes
+/// to the child on stdin, so there is no placeholder to interpolate and no quoting to get
+/// wrong.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Tool {
+    /// `argv[0]` is resolved on `PATH` like a harness command.
+    pub argv: Vec<String>,
+    /// A key of `config.projects` (the checkout the tool runs in), or `null` for
+    /// `$OWLPOST_HOME`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    pub timeout_ms: u64,
+    /// Cap on the compact serialisation of the request's `input` object, in bytes.
+    pub max_input_bytes: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -96,6 +117,7 @@ impl Default for Responder {
             ],
             timeout_secs: 180,
             memory_root: None,
+            tools: BTreeMap::new(),
         }
     }
 }
@@ -230,7 +252,35 @@ impl Config {
         {
             config.responder.memory_root = Some(resolved.to_string_lossy().into_owned());
         }
+        // OWL-040: the tool registry is the allowlist, so a registry that cannot mean what
+        // it says is refused here rather than at the moment a peer names the tool.
+        config.check_tools()?;
         Ok(config)
+    }
+
+    /// The three refusals of §3's tool registry (OWL-040), each of them a `config:` error
+    /// that stops every command until the owner fixes the file:
+    ///
+    /// - an empty `argv` — there is nothing to run;
+    /// - an `argv` carrying the literal `{input}` — the input is never interpolated, it goes
+    ///   to the child on stdin, and a config written as if it were would silently send the
+    ///   peer's words to a tool that never reads them;
+    /// - a `cwd` naming a project that is not configured.
+    fn check_tools(&self) -> anyhow::Result<()> {
+        for (name, tool) in &self.responder.tools {
+            if tool.argv.is_empty() {
+                anyhow::bail!("config: tools.{name}.argv must not be empty");
+            }
+            if tool.argv.iter().any(|a| a.contains("{input}")) {
+                anyhow::bail!("config: tools.{name}.argv must not interpolate the input");
+            }
+            if let Some(cwd) = &tool.cwd
+                && !self.projects.contains_key(cwd)
+            {
+                anyhow::bail!("config: tools.{name}.cwd names no configured project: {cwd}");
+            }
+        }
+        Ok(())
     }
 
     pub fn save(&self, home: &Path) -> anyhow::Result<()> {
