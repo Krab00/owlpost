@@ -580,6 +580,12 @@ async fn bad_inputs_are_4xx_never_500() {
             shape(with(&|v| v["body"]["path"] = json!(["f"]))),
             "bad schema: data did not match any variant of untagged enum Body",
         ),
+        // OWL-039: a non-string `context` is named explicitly — `Body::Content`'s fields are
+        // all optional, so the untagged parse would otherwise refuse it as a bad content body.
+        (
+            shape(with(&|v| v["body"]["context"] = json!(5))),
+            "bad schema: body.context is not a string",
+        ),
         (
             shape(with(&|v| v["type"] = json!("answer"))),
             "type must be question or content",

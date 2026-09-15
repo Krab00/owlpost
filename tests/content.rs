@@ -21,6 +21,7 @@ use owlpost::contacts::Mode;
 use owlpost::content;
 use owlpost::envelope::{Body, Envelope, Kind, MAX_CONTENT_BYTES, Payload};
 use owlpost::identity::Identity;
+use owlpost::route::{self, Marker};
 use owlpost::server::{record_state, record_state_for};
 use owlpost::spool::{Dir, Record, Spool};
 use serde_json::{Value, json};
@@ -83,6 +84,20 @@ fn fixture_repo() -> (TempDir, String) {
     (dir, first)
 }
 
+/// `git rev-parse <rev>` in `dir`, trimmed.
+fn rev_parse(dir: &Path, rev: &str) -> String {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["rev-parse", rev])
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("HOME", dir)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git rev-parse {rev}");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
 /// Writes one extra file into the checkout's tip commit and returns nothing.
 fn commit_file(repo: &Path, rel: &str, bytes: &[u8]) {
     let p = repo.join(rel);
@@ -109,6 +124,39 @@ async fn responder(repo: &Path, peers: &[Peer<'_>]) -> TestDaemon {
             .insert(PROJECT.into(), repo.display().to_string());
     })
     .await
+}
+
+/// Registers a live Claude session under `home`: a fresh marker (heartbeat now) with its
+/// `wake/` and `tmp/` dirs, exactly as the `SessionStart` hook writes one.
+fn register_session(home: &Path, sid: &str, cwd: &Path) {
+    route::write_marker(home, &Marker::new(sid, &cwd.to_string_lossy(), "startup")).unwrap();
+}
+
+/// The AC2 invariant: session `sid` was not woken and nothing was routed. `wake/` must exist
+/// (a typo'd session id would otherwise make this vacuous) and hold no entry, and
+/// `spool/routing/` must be absent or empty.
+fn assert_quiet(home: &Path, sid: &str, want: &str) {
+    let wake = route::wake_dir(home, sid);
+    assert!(wake.is_dir(), "{want}: the session's wake dir must exist");
+    let woken: Vec<String> = std::fs::read_dir(&wake)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        woken.is_empty(),
+        "{want}: no session may be woken: {woken:?}"
+    );
+    let routing = route::routing_dir(home);
+    let routed: Vec<String> = std::fs::read_dir(&routing)
+        .map(|it| {
+            it.map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(
+        routed.is_empty(),
+        "{want}: nothing may be routed: {routed:?}"
+    );
 }
 
 fn owl(home: &Path, args: &[&str]) -> (i32, String, String) {
@@ -256,6 +304,11 @@ async fn validation_table_answers_400_and_spools_nothing() {
     )
     .await;
     let c = client(Some(&a), &d.id);
+    // A live session on the responder, so "no session is woken" is a real assertion and not
+    // a vacuously empty `sessions/`: a request that got past validation would be routed to
+    // this one synchronously, inside the handler (`server::route_new_record`).
+    let sid = "OWL039-AC2";
+    register_session(d.home(), sid, repo.path());
 
     // `body` overrides applied to a valid content request.
     let rows: Vec<(Value, &str)> = vec![
@@ -330,6 +383,9 @@ async fn validation_table_answers_400_and_spools_nothing() {
         let env = Envelope { raw, sig };
         let _ = p;
         let resp = post_envelope(&c, &d, &env).await;
+        // Asserted before the status, so a validation row that fell through to routing fails
+        // here — on the invariant — rather than on the 400 the fall-through also loses.
+        assert_quiet(d.home(), sid, want);
         assert_error(resp, 400, want).await;
         assert!(
             d.spool().list(Dir::Inbox, |_| true).unwrap().is_empty(),
@@ -348,12 +404,16 @@ async fn validation_table_answers_400_and_spools_nothing() {
     )
     .await;
     let c2 = client(Some(&a), &d2.id);
+    let sid2 = "OWL039-AC2-MEM";
+    register_session(d2.home(), sid2, repo.path());
     let mem = Payload::content(&fp(&a), &d2.fp(), None, None, None, Some("note.md"));
     let resp = post_envelope(&c2, &d2, &Envelope::sign(&mem, &a)).await;
+    assert_quiet(d2.home(), sid2, "memory store not configured");
     assert_error(resp, 400, "memory store not configured").await;
     assert!(d2.spool().list(Dir::Inbox, |_| true).unwrap().is_empty());
 
-    // The positive twin: a well-formed request is accepted and always SUBMITTED.
+    // The positive twin: a well-formed request is accepted and always SUBMITTED — and it
+    // *does* wake the session the table rows left alone.
     let env = signed_content(&a, &d.id, Some("main"));
     let resp = post_envelope(&c, &d, &env).await;
     assert_eq!(resp.status().as_u16(), 202);
@@ -365,6 +425,15 @@ async fn validation_table_answers_400_and_spools_nothing() {
     assert_eq!(
         spool.get(Dir::Inbox, &rid).unwrap().unwrap().state,
         "consent"
+    );
+    assert!(
+        route::wake_file(d.home(), sid, &rid).is_file(),
+        "a valid request does wake the session"
+    );
+    assert_eq!(
+        route::load_routing(d.home(), &rid).current.as_deref(),
+        Some(sid),
+        "and the routing names it"
     );
 
     // The positive twins of the four flag-shaped rows: an ordinary ref is still accepted.
@@ -596,6 +665,18 @@ fn drafting(tweak: impl FnOnce(&mut Config), payload: Payload) -> Drafting {
         id: payload.id.clone(),
         first,
     }
+}
+
+/// [`content_at`] for a path other than [`FILE`].
+fn content_at_path(path: &str, git_ref: Option<&str>) -> Payload {
+    Payload::content(
+        &fp(&id(1)),
+        &fp(&id(2)),
+        Some(PROJECT),
+        git_ref,
+        Some(path),
+        None,
+    )
 }
 
 fn content_at(git_ref: Option<&str>) -> Payload {
@@ -852,6 +933,17 @@ fn memory_requests_serve_the_store_and_refuse_an_escape() {
     let c = content::stored(&spool.get(Dir::Inbox, &d.id).unwrap().unwrap()).unwrap();
     assert_eq!(c.text, "a decision\n");
     assert_eq!(c.ref_resolved, None, "a memory entry has no commit");
+    // AC1's negative twin for the outgoing reply: what the asker receives names no commit
+    // either, not just what we stored.
+    owl_ok(d.home.path(), &["send", &d.id]);
+    let oid = only_id(&spool, Dir::Outbox);
+    let sent: Value =
+        serde_json::from_str(&spool.get(Dir::Outbox, &oid).unwrap().unwrap().raw).unwrap();
+    assert_eq!(
+        sent["body"]["ref_resolved"],
+        Value::Null,
+        "a memory reply carries no commit: {sent}"
+    );
 
     // The escape twin: the key is shape-clean but resolves outside the store.
     let d2 = drafting(
@@ -961,8 +1053,36 @@ async fn end_to_end_request_consent_draft_send_and_verify() {
         shown.contains(&format!("sha256 {sha} — verified")),
         "show: {shown}"
     );
+    // AC1: the commit the responder resolved travels to the asker, on the record it
+    // received — not only on the envelope the responder kept.
+    let received: Value = serde_json::from_str(
+        &a_spool
+            .get(Dir::Inbox, &pulled)
+            .unwrap()
+            .unwrap()
+            .raw
+            .clone(),
+    )
+    .unwrap();
+    let head = rev_parse(repo.path(), "main");
+    assert_eq!(head.len(), 40, "a full commit id");
+    assert_eq!(
+        received["body"]["ref_resolved"].as_str(),
+        Some(head.as_str()),
+        "the asker's reply names the commit the responder read"
+    );
 
-    // The tamper twin: the same record with one byte changed exits 1 and says so.
+    // The verdict is not a property of the plain format: `--json` and `--format claude` say
+    // the same thing about the same bytes, first for the untouched reply.
+    let verified = format!("sha256 {sha} — verified");
+    let rendered = owl_ok(a_home.path(), &["show", &pulled, "--format", "claude"]);
+    assert!(rendered.contains(&verified), "claude: {rendered}");
+    let as_json = owl_ok(a_home.path(), &["--json", "show", &pulled]);
+    let v: Value = serde_json::from_str(&as_json).unwrap();
+    assert_eq!(v["sha256_verified"], json!(true), "json: {as_json}");
+
+    // The tamper twin: the same record with one byte changed exits 1 and says so — in every
+    // mode, because the mod and the skill read the rendered and the JSON form, not the plain.
     let rec = a_spool.get(Dir::Inbox, &pulled).unwrap().unwrap();
     let mut v: Value = serde_json::from_str(&rec.raw).unwrap();
     v["body"]["content"] = json!(format!("{redacted}tampered"));
@@ -971,12 +1091,20 @@ async fn end_to_end_request_consent_draft_send_and_verify() {
         ..rec
     };
     a_spool.put(Dir::Inbox, &pulled, &tampered).unwrap();
-    let (code, out, err) = owl(a_home.path(), &["show", &pulled]);
-    assert_eq!(code, 1, "a mismatch must exit 1: {err}");
-    assert!(
-        out.contains("sha256 mismatch — the content does not match its digest"),
-        "stdout: {out}"
-    );
+    const MISMATCH: &str = "sha256 mismatch — the content does not match its digest";
+    for args in [
+        vec!["show", &pulled],
+        vec!["show", &pulled, "--format", "claude"],
+    ] {
+        let (code, out, err) = owl(a_home.path(), &args);
+        assert_eq!(code, 1, "a mismatch must exit 1 for {args:?}: {err}");
+        assert!(out.contains(MISMATCH), "{args:?}: {out}");
+        assert!(!out.contains(&verified), "{args:?}: {out}");
+    }
+    let (code, out, err) = owl(a_home.path(), &["--json", "show", &pulled]);
+    assert_eq!(code, 1, "a mismatch must exit 1 under --json: {err}");
+    let v: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["sha256_verified"], json!(false), "json: {out}");
 }
 
 /// One pull of B's outbox into A's spool through the real ingestion path; returns the id of
@@ -999,6 +1127,94 @@ fn pull_once(a: &Identity, a_home: &Path) -> String {
         .map(|(i, _)| i)
         .next()
         .expect("the reply landed in the asker's inbox")
+}
+
+/// §9: the 200-line display cap, at every call site that prints content. A 250-line file is
+/// shown through `owl show` on the responder (plain and `--format claude`) and through
+/// `owl show` on the asker's received reply: each prints line 200, none prints line 201, and
+/// each ends the block with the documented trailer. Every fixture line carries a delimited
+/// token, so `L-20-END` is never a substring of `L-200-END`.
+#[test]
+fn the_display_cap_cuts_at_two_hundred_lines_in_every_view() {
+    const LINES: usize = 250;
+    let text: String = (1..=LINES).map(|n| format!("L-{n}-END\n")).collect();
+    let cut = content::CONTENT_SHOW_LINES;
+    let sha = hex(&Sha256::digest(text.as_bytes()));
+    let trailer = format!(
+        "… {} more lines — {} bytes, sha256 {sha}",
+        LINES - cut,
+        text.len()
+    );
+    let kept = format!("L-{cut}-END");
+    let dropped = format!("L-{}-END", cut + 1);
+    assert!(
+        text.len() < MAX_CONTENT_BYTES,
+        "the cut under test is the display one"
+    );
+
+    // The responder's two views of its own draft: plain (`cli::show`) and the rendered
+    // message table (`render::record_block`).
+    let d = drafting(|_| {}, content_at_path("big.txt", Some("main")));
+    commit_file(d._repo.path(), "big.txt", text.as_bytes());
+    owl_ok(d.home.path(), &["draft", &d.id]);
+    let stored = content::stored(
+        &Spool::new(d.home.path())
+            .unwrap()
+            .get(Dir::Inbox, &d.id)
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(stored.text, text, "nothing is cut on the way to the record");
+    assert!(!stored.truncated, "well under the wire cap");
+    assert_eq!(stored.sha256, sha);
+    for args in [
+        vec!["show", d.id.as_str()],
+        vec!["show", d.id.as_str(), "--format", "claude"],
+    ] {
+        let out = owl_ok(d.home.path(), &args);
+        assert!(
+            out.contains(&kept),
+            "{args:?}: line {cut} must be shown: {out}"
+        );
+        assert!(
+            !out.contains(&dropped),
+            "{args:?}: line {} must not be shown: {out}",
+            cut + 1
+        );
+        assert!(out.contains(&trailer), "{args:?}: trailer missing: {out}");
+    }
+
+    // The asker's view of the reply it received (`cli::show`, the `ContentReply` arm).
+    let (a, b) = (id(1), id(2));
+    let home = tempfile::tempdir().unwrap();
+    prepare_home_with(home.path(), &a, &[Peer::new(&b, "Bea", None)], |_| {});
+    let req = request(&a, &b, Some("main"));
+    let reply = Payload::content_reply(&req, &text, &sha, Some(&"c".repeat(40)), false, 0);
+    Spool::new(home.path())
+        .unwrap()
+        .put(
+            Dir::Inbox,
+            &reply.id,
+            &common::record(&Envelope::sign(&reply, &b), "pending"),
+        )
+        .unwrap();
+    let out = owl_ok(home.path(), &["show", &reply.id]);
+    assert!(
+        out.contains(&kept),
+        "asker: line {cut} must be shown: {out}"
+    );
+    assert!(
+        !out.contains(&dropped),
+        "asker: line {} must not be shown: {out}",
+        cut + 1
+    );
+    assert!(out.contains(&trailer), "asker: trailer missing: {out}");
+    // The digest is still of the whole content, so the cut view is still verified.
+    assert!(
+        out.contains(&format!("sha256 {sha} — verified")),
+        "asker: {out}"
+    );
 }
 
 // ---------------------------------------------------------------- AC9: the thread
