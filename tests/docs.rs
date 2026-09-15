@@ -1354,3 +1354,32 @@ fn tool_call_pinned_in_architecture_and_guide() {
         );
     }
 }
+
+/// §10: the redaction rule for a tool call's output, and the sentence that says no model
+/// stands between the tool and the human. Both sit on one line each, so a reword of either
+/// is caught here rather than only by reading.
+#[test]
+fn tool_output_redaction_pinned_in_the_design_doc() {
+    let design = repo_file("docs/technical-design.md");
+    for needle in [
+        "- The same patterns run over a tool call's output (OWL-040), over the combined stdout and",
+        "`src/tools.rs` from `owl draft`, and no model sees the output before the human does.",
+    ] {
+        assert!(
+            design.lines().any(|l| l.contains(needle)),
+            "docs/technical-design.md lacks {needle:?} on one line"
+        );
+    }
+}
+
+/// The `owl send` row promises the draft stays on the `done/` record, which is what
+/// `end_to_end_call_consent_draft_send_and_show` asserts in code.
+#[test]
+fn the_draft_surviving_send_is_pinned_in_the_design_doc() {
+    let design = repo_file("docs/technical-design.md");
+    let needle = "the draft **stays** on the `done/` record after the send, so `owl show` and `owl thread` still say what ran";
+    assert!(
+        design.lines().any(|l| l.contains(needle)),
+        "docs/technical-design.md lacks {needle:?} on one line"
+    );
+}
