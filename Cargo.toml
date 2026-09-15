@@ -19,7 +19,7 @@ ed25519-dalek = { version = "2", features = ["rand_core"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sha2 = "0.10"
+sha2 = "0.11"
 uuid = { version = "1", features = ["v7", "serde"] }
 regex = "1"
 # ring backend for both: one crypto stack, Ed25519 certs + TLS1.3 sigs, no cmake/nasm build deps.
