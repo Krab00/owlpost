@@ -11,6 +11,11 @@
 #
 #   fake-tool.sh FAKE_TOOL_LOG=<path> [FAKE_TOOL_EXIT=<n>] [FAKE_TOOL_SLEEP=<secs>]
 #                [FAKE_TOOL_STDERR=<text>] [FAKE_TOOL_SECRET=1] [FAKE_TOOL_BIG=<bytes>]
+#                [FAKE_TOOL_RAW=<text>] [FAKE_TOOL_NO_STDOUT=1]
+#
+# `FAKE_TOOL_RAW` writes <text> to stdout with **no** trailing newline and `FAKE_TOOL_NO_STDOUT`
+# writes nothing at all — the two stdout shapes `echo` can never produce, and the ones the
+# stderr join's newline branch turns on.
 set -u
 export LC_ALL=C
 
@@ -20,6 +25,8 @@ sleep_for=""
 stderr_text=""
 secret=0
 big=0
+raw=""
+no_stdout=0
 for a in "$@"; do
   case "$a" in
     FAKE_TOOL_LOG=*)    log="${a#*=}" ;;
@@ -28,6 +35,8 @@ for a in "$@"; do
     FAKE_TOOL_STDERR=*) stderr_text="${a#*=}" ;;
     FAKE_TOOL_SECRET=*) secret="${a#*=}" ;;
     FAKE_TOOL_BIG=*)    big="${a#*=}" ;;
+    FAKE_TOOL_RAW=*)    raw="${a#*=}" ;;
+    FAKE_TOOL_NO_STDOUT=*) no_stdout="${a#*=}" ;;
   esac
 done
 
@@ -38,7 +47,11 @@ if [ -n "$log" ]; then
     "$*" "$(env | sort | tr '\n' '|')" "$input" "$PWD" >> "$log"
 fi
 
-if [ "$big" != 0 ]; then
+if [ "$no_stdout" != 0 ]; then
+  : # stdout stays genuinely empty
+elif [ -n "$raw" ]; then
+  printf '%s' "$raw"
+elif [ "$big" != 0 ]; then
   # A one-byte prefix in front of two-byte characters and nothing else on stdout, so the
   # cap's byte offset lands inside a character and a byte slice would panic or split it.
   s="ł"
