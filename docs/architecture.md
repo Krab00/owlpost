@@ -157,6 +157,27 @@ When the human reads an answer in a session, the skill instructs the agent to re
 harness's native memory (Claude Code: auto-memory / `CLAUDE.md` as appropriate) with provenance
 (peer, date, question id). The daemon does not write into any harness's memory.
 
+### 3.7 Content request
+
+A peer asks for a **concrete file** instead of an answer about one (OWL-039):
+
+1. A runs `owl request B <project> <path> [--ref <ref>]` (or `--memory <key>`). The payload is
+   a `content` kind and travels the same `POST /v1/questions` route.
+2. B's daemon validates the request against the **allowlist** — a path inside a checkout named
+   in `config.projects`, or a key inside `responder.memory_root` with
+   `scope.private_memory` — and refuses anything else with a `4xx` that never reaches the
+   spool. It does not read the disk: that would let an unanswered peer probe for a file by
+   timing.
+3. The record is spooled in state `consent` **whatever B's policy for A says**. There is no
+   mode in which content leaves the machine without a human pressing send.
+4. After `owl allow`, `owl draft <id>` resolves the ref in B's checkout, reads that one blob,
+   refuses anything that is not UTF-8 text, runs the §10 redaction patterns over it and cuts
+   it at 256 KiB. No harness and no model run.
+5. The human reads the exact bytes and runs `owl send`, which signs a `content-reply` carrying
+   the content and the `sha256` of the whole redacted content.
+6. A's pull ingests the reply and `owl show` verifies the digest before printing it. Nothing
+   is written into A's working tree: copying the content somewhere is the human's decision.
+
 ## 4. Trust and cryptography
 
 | Concern | Mechanism |
@@ -168,7 +189,7 @@ harness's native memory (Claude Code: auto-memory / `CLAUDE.md` as appropriate) 
 | Message authenticity at rest and via relay | ed25519 signature over the exact HTTP body bytes, carried in `X-Owl-Signature`; stored alongside the body |
 | Replay | `id` (UUIDv7) + `ts` (RFC 3339); reject `|now − ts| > 5 min` and ids in the seen window |
 | Abuse | per-peer token bucket (default 20 questions/hour), `429`; asker-side and responder-side caches |
-| Leakage | responder runs read-only with no shell/write/network tools; scope defaults to repo + project files; preview before send in manual mode; redaction regexes + outgoing log in auto mode |
+| Leakage | responder runs read-only with no shell/write/network tools; scope defaults to repo + project files; preview before send in manual mode; redaction regexes + outgoing log in auto mode. A content request (§3.7) serves **only** the explicit allowlist — one path inside a checkout named in `config.projects`, or one key inside `responder.memory_root` with `scope.private_memory` — and is held for a human every time, whatever the peer's policy |
 | Prompt injection | incoming text is data; the responder prompt frames it as a quoted question; worst case is a bad answer because the session cannot act |
 | Contact list integrity (repo) | `CODEOWNERS` on `.agents/peers/` + out-of-band fingerprint check by an admin; post-MVP: changes signed by the previous key |
 | Contact list integrity (local) | key pinned on `owl add`; fingerprint shown for out-of-band comparison; auto-accept off by default |

@@ -162,6 +162,7 @@ Every command also takes `--home <dir>`, `--json` and `-q/--quiet`.
 | `owl allow <peer>` | `/owlpost:allow` | `owl allow bartek --always --i-verified-the-fingerprint` |
 | `owl deny <peer>` | `/owlpost:deny` | `owl deny bartek` |
 | `owl ask <peer> [path] <question>` | `/owlpost:ask` | `owl ask bartek src/db.rs "why the retry loop?"` |
+| `owl request <peer> <project> <path>` | `/owlpost:request` | `owl request bartek github.com/co/mono src/db.rs --ref main` |
 | `owl status [id]` | `/owlpost:status` | `owl status` |
 | `owl inbox` | `/owlpost:inbox` | `owl inbox --new` |
 | `owl show <id>` | `/owlpost:show` | `owl show 0192f3a1` |

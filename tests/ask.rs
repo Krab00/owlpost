@@ -113,7 +113,7 @@ fn payload(rec: &Record) -> Payload {
 fn answer_text(p: &Payload) -> &str {
     match &p.body {
         Body::Answer { answer, .. } => answer,
-        Body::Question { .. } => panic!("not an answer: {p:?}"),
+        _ => panic!("not an answer: {p:?}"),
     }
 }
 
@@ -1597,7 +1597,7 @@ async fn project_comes_from_origin_remote_unless_overridden() {
         let qid = accepted_id(out);
         match payload(&b.spool().get(Dir::Inbox, &qid).unwrap().unwrap()).body {
             Body::Question { project, .. } => project,
-            Body::Answer { .. } => unreachable!(),
+            _ => unreachable!("the fixture signs a question"),
         }
     };
     // Detected from the remote, also from a subdirectory of the repo.
@@ -1907,7 +1907,7 @@ fn transitions(err: &str) -> Vec<String> {
 fn question_context(p: &Payload) -> Option<&str> {
     match &p.body {
         Body::Question { context, .. } => context.as_deref(),
-        Body::Answer { .. } => panic!("not a question: {p:?}"),
+        _ => panic!("not a question: {p:?}"),
     }
 }
 

@@ -310,6 +310,17 @@ pub fn record_state(mode: Option<Mode>) -> (&'static str, bool) {
     }
 }
 
+/// [`record_state`] for a request of `kind` (OWL-039). A content request is held for
+/// `consent` whatever the policy says — there is no mode in which a file leaves the machine
+/// without a human running `owl send` — and the `auto` flag is `false`, so the scheduler is
+/// never even offered the record.
+pub fn record_state_for(kind: Kind, mode: Option<Mode>) -> (&'static str, bool) {
+    match kind {
+        Kind::Content => ("consent", false),
+        _ => record_state(mode),
+    }
+}
+
 /// Only a peer the owner has already allowed (`manual`/`auto`) may receive a cached answer.
 pub fn may_read_cache(mode: Option<Mode>) -> bool {
     matches!(mode, Some(Mode::Manual) | Some(Mode::Auto))
@@ -452,8 +463,64 @@ fn str_field<'a>(obj: &'a serde_json::Map<String, Value>, key: &str) -> ApiResul
     }
 }
 
-/// Shape checks with a named error for each field, then the typed parse.
-fn validate_question(value: &Value, caller: &str, me: &str) -> ApiResult<Payload> {
+/// True when `p` is absolute, empty, or carries a `..` segment. Backslashes count as
+/// separators too, so a `..\\..\\etc` never reaches the filesystem as one segment (OWL-039).
+fn escapes_root(p: &str) -> bool {
+    let norm = p.replace('\\', "/");
+    norm.is_empty() || norm.starts_with('/') || norm.split('/').any(|seg| seg == "..")
+}
+
+/// The §7 allowlist table for a `content` body (OWL-039). The file is deliberately **not**
+/// stat'ed or read here: reading the disk at arrival would let an unanswered peer probe for
+/// file existence by timing, which the consent gate exists to prevent. A path inside the
+/// allowlist that does not exist reaches consent and fails at `owl draft`.
+fn validate_content_body(body: &serde_json::Map<String, Value>, config: &Config) -> ApiResult<()> {
+    let field = |k: &str| body.get(k).and_then(Value::as_str);
+    match (field("path"), field("memory")) {
+        (Some(path), None) => {
+            let project =
+                field("project").ok_or_else(|| ApiError::bad_request("missing body.project"))?;
+            if !config.projects.contains_key(project) {
+                return Err(ApiError::bad_request("unknown project"));
+            }
+            if escapes_root(path) {
+                return Err(ApiError::bad_request("path escapes the project"));
+            }
+        }
+        (None, Some(key)) => {
+            if escapes_root(key) {
+                return Err(ApiError::bad_request("memory key escapes the memory store"));
+            }
+            // `memory_root` says *where*, `scope.private_memory` says *whether*: both.
+            if config.responder.memory_root.is_none() || !config.responder.scope.private_memory {
+                return Err(ApiError::bad_request("memory store not configured"));
+            }
+        }
+        _ => {
+            return Err(ApiError::bad_request(
+                "body must carry exactly one of path and memory",
+            ));
+        }
+    }
+    // An empty `ref`, or one starting with `-`, is malformed: the charset alone would let
+    // `-h` or `--git-dir/x` through, and those reach `git` as a flag, not as a revision.
+    if let Some(r) = field("ref")
+        && (r.is_empty()
+            || r.starts_with('-')
+            || r.len() > 200
+            || !r
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'/' | b'-')))
+    {
+        return Err(ApiError::bad_request("malformed ref"));
+    }
+    Ok(())
+}
+
+/// Shape checks with a named error for each field, then the typed parse. `type: "question"`
+/// keeps every check and error string it had; `type: "content"` (OWL-039) runs the §7
+/// allowlist table instead of the question body checks.
+fn validate_request(value: &Value, caller: &str, me: &str, config: &Config) -> ApiResult<Payload> {
     let obj = value
         .as_object()
         .ok_or_else(|| ApiError::bad_request("payload must be a JSON object"))?;
@@ -464,9 +531,11 @@ fn validate_question(value: &Value, caller: &str, me: &str) -> ApiResult<Payload
     if id.is_empty() || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
         return Err(ApiError::bad_request("malformed id"));
     }
-    if str_field(obj, "type")? != "question" {
-        return Err(ApiError::bad_request("type must be question"));
+    let kind = str_field(obj, "type")?;
+    if kind != "question" && kind != "content" {
+        return Err(ApiError::bad_request("type must be question or content"));
     }
+    let content = kind == "content";
     if str_field(obj, "from")? != caller {
         return Err(ApiError::bad_request(
             "from does not match the client certificate",
@@ -480,21 +549,40 @@ fn validate_question(value: &Value, caller: &str, me: &str) -> ApiResult<Payload
         .get("body")
         .and_then(Value::as_object)
         .ok_or_else(|| ApiError::bad_request("body must be an object"))?;
-    str_field(body, "project").map_err(|_| ApiError::bad_request("missing body.project"))?;
-    let question =
-        str_field(body, "question").map_err(|_| ApiError::bad_request("missing body.question"))?;
-    if question.trim().is_empty() {
-        return Err(ApiError::bad_request("body.question is empty"));
+    if content {
+        validate_content_body(body, config)?;
+    } else {
+        str_field(body, "project").map_err(|_| ApiError::bad_request("missing body.project"))?;
+        let question = str_field(body, "question")
+            .map_err(|_| ApiError::bad_request("missing body.question"))?;
+        if question.trim().is_empty() {
+            return Err(ApiError::bad_request("body.question is empty"));
+        }
+        // OWL-034: the asker's snippet is bounded in bytes after trimming. A non-string
+        // `context` is named here rather than left to the typed parse: `Body::Content` has
+        // only optional fields, so an untagged parse would now fit such a body into it and
+        // the question would be refused for the wrong reason.
+        match body.get("context") {
+            None | Some(Value::Null) => {}
+            Some(Value::String(c)) if envelope::check_context(c).is_ok() => {}
+            Some(Value::String(_)) => return Err(ApiError::bad_request("context too long")),
+            Some(_) => {
+                return Err(ApiError::bad_request(
+                    "bad schema: body.context is not a string",
+                ));
+            }
+        }
     }
-    // OWL-034: the asker's snippet is bounded in bytes after trimming; a non-string is a
-    // schema error below.
-    if let Some(Value::String(c)) = body.get("context")
-        && envelope::check_context(c).is_err()
-    {
-        return Err(ApiError::bad_request("context too long"));
+    let payload: Payload = serde_json::from_value(value.clone())
+        .map_err(|e| ApiError::bad_request(format!("bad schema: {e}")))?;
+    // `Body` is untagged, so a `content` payload whose body also fits `Question` would parse
+    // as a question and then be spooled under the question's rules (cache, auto-answer). The
+    // tag and the body it selected must agree (OWL-039).
+    match (payload.kind, &payload.body) {
+        (Kind::Question, envelope::Body::Question { .. })
+        | (Kind::Content, envelope::Body::Content { .. }) => Ok(payload),
+        _ => Err(ApiError::bad_request("body does not match type")),
     }
-    serde_json::from_value(value.clone())
-        .map_err(|e| ApiError::bad_request(format!("bad schema: {e}")))
 }
 
 fn policy_of(book: &ContactBook, fp: &str) -> Option<Policy> {
@@ -526,7 +614,7 @@ async fn post_question(
     if !identity::verify(&pubkey, &body, &sig) {
         return Err(ApiError::bad_request("bad signature"));
     }
-    let payload = validate_question(&value, &caller, &state.fingerprint())?;
+    let payload = validate_request(&value, &caller, &state.fingerprint(), &state.config)?;
     let now = envelope::now_unix();
     if envelope::parse_rfc3339_to_unix(&payload.ts).is_none() {
         return Err(ApiError::bad_request("malformed ts"));
@@ -565,40 +653,41 @@ async fn post_question(
     if !state.config.responder.enabled || policy.as_ref().is_some_and(|p| p.mode == Mode::Never) {
         return Err(ApiError::unavailable());
     }
-    let (project, path, question, context) = match &payload.body {
+    let mode = policy.as_ref().map(|p| p.mode);
+    // The responder cache is a question's, keyed by its text. A content request is keyed by
+    // ref and by consent instead, so it reads no cache entry here and writes none in
+    // `answer::send` — and carries no `meta.hash` (OWL-039).
+    let hash = match &payload.body {
         envelope::Body::Question {
             project,
             path,
             question,
             context,
-        } => (
-            project.as_str(),
-            path.as_deref(),
-            question.as_str(),
-            context.as_deref(),
-        ),
-        envelope::Body::Answer { .. } => {
-            return Err(ApiError::bad_request("type must be question"));
+        } => {
+            let hash = envelope::question_hash(project, path.as_deref(), question);
+            // OWL-034: a question with a context snippet, or one continuing a thread this
+            // daemon already holds, is never served from the cache (nor written to it).
+            let threaded = context.is_some()
+                || payload
+                    .context_id
+                    .as_deref()
+                    .is_some_and(|cid| crate::answer::thread_known(&state.spool, cid, &payload.id));
+            if may_read_cache(mode)
+                && !threaded
+                && let Some(cached) = state.spool.cache_get(&hash).map_err(ApiError::storage)?
+            {
+                remember(&state, &payload.id, now)?;
+                tracing::info!(peer = %caller, id = %payload.id, "cache hit");
+                return Ok(answer_response(&cached.raw, &cached.sig));
+            }
+            Some(hash)
+        }
+        envelope::Body::Content { .. } => None,
+        envelope::Body::Answer { .. } | envelope::Body::ContentReply { .. } => {
+            return Err(ApiError::bad_request("type must be question or content"));
         }
     };
-    let hash = envelope::question_hash(project, path, question);
-    let mode = policy.as_ref().map(|p| p.mode);
-    // OWL-034: a question with a context snippet, or one continuing a thread this daemon
-    // already holds, is never served from the cache (nor written to it, see `answer::send`).
-    let threaded = context.is_some()
-        || payload
-            .context_id
-            .as_deref()
-            .is_some_and(|cid| crate::answer::thread_known(&state.spool, cid, &payload.id));
-    if may_read_cache(mode)
-        && !threaded
-        && let Some(cached) = state.spool.cache_get(&hash).map_err(ApiError::storage)?
-    {
-        remember(&state, &payload.id, now)?;
-        tracing::info!(peer = %caller, id = %payload.id, "cache hit");
-        return Ok(answer_response(&cached.raw, &cached.sig));
-    }
-    let (record_state, auto) = record_state(mode);
+    let (record_state, auto) = record_state_for(payload.kind, mode);
     let sig_text = headers
         .get(SIGNATURE_HEADER)
         .and_then(|v| v.to_str().ok())
@@ -611,10 +700,19 @@ async fn post_question(
         seen: false,
         received_at: envelope::unix_to_rfc3339(now),
         draft: None,
-        meta: json!({ "peer": caller, "hash": hash }),
+        meta: match &hash {
+            Some(h) => json!({ "peer": caller, "hash": h }),
+            None => json!({ "peer": caller }),
+        },
     };
     // Record birth (OWL-038): the arrival, and the consent hold when the peer has no policy.
-    crate::events::push(&mut record, "received", None, None);
+    // OWL-039: a content request names its own arrival kind, so both sides of the thread
+    // show the same word for the same moment.
+    let arrival = match payload.kind {
+        Kind::Content => "content-requested",
+        _ => "received",
+    };
+    crate::events::push(&mut record, arrival, None, None);
     if record_state == "consent" {
         crate::events::push(&mut record, "held", None, None);
     }
@@ -692,7 +790,8 @@ fn answer_response(raw: &str, sig: &str) -> Response {
 fn payload_to(rec: &Record) -> Option<String> {
     serde_json::from_str::<Payload>(&rec.raw)
         .ok()
-        .filter(|p| p.kind == Kind::Answer)
+        // OWL-039: a content reply is served from the outbox exactly like an answer.
+        .filter(|p| p.kind.is_reply())
         .map(|p| p.to)
 }
 
@@ -786,7 +885,9 @@ pub fn task_json(
 fn task_meta(payload: &Payload) -> Value {
     let (project, path) = match &payload.body {
         envelope::Body::Question { project, path, .. } => (Some(project.as_str()), path.as_deref()),
-        envelope::Body::Answer { .. } => (None, None),
+        // OWL-039: a content request's project is optional on the wire.
+        envelope::Body::Content { project, path, .. } => (project.as_deref(), path.as_deref()),
+        envelope::Body::Answer { .. } | envelope::Body::ContentReply { .. } => (None, None),
     };
     json!({ "from": payload.from, "to": payload.to, "project": project, "path": path })
 }
@@ -798,7 +899,7 @@ fn find_task(spool: &Spool, caller: &str, id: &str) -> anyhow::Result<Option<Val
     let parse = |rec: &Record| serde_json::from_str::<Payload>(&rec.raw).ok();
     if let Some(rec) = spool.get(Dir::Inbox, id).unwrap_or_default()
         && let Some(q) = parse(&rec)
-        && q.kind == Kind::Question
+        && q.kind.is_request()
         && q.from == caller
     {
         let (state, text) = a2a_state(&rec.state, crate::answer::auto_error(&rec).is_some());
@@ -813,7 +914,7 @@ fn find_task(spool: &Spool, caller: &str, id: &str) -> anyhow::Result<Option<Val
     }
     for (_, rec) in spool.list_lenient(Dir::Outbox)? {
         if let Some(a) = parse(&rec)
-            && a.kind == Kind::Answer
+            && a.kind.is_reply()
             && a.in_reply_to.as_deref() == Some(id)
             && a.to == caller
         {
@@ -839,7 +940,7 @@ fn find_task(spool: &Spool, caller: &str, id: &str) -> anyhow::Result<Option<Val
     }
     if let Some(rec) = spool.get(Dir::Done, id).unwrap_or_default()
         && let Some(q) = parse(&rec)
-        && q.kind == Kind::Question
+        && q.kind.is_request()
         && q.from == caller
     {
         let (state, text) = a2a_state(&rec.state, false);
@@ -1099,14 +1200,14 @@ mod tests {
     }
 
     fn err_of(v: Value) -> String {
-        validate_question(&v, "owl:aaaa", "owl:bbbb")
+        validate_request(&v, "owl:aaaa", "owl:bbbb", &Config::default())
             .unwrap_err()
             .error
     }
 
     #[test]
-    fn validate_question_names_every_problem() {
-        assert!(validate_question(&valid(), "owl:aaaa", "owl:bbbb").is_ok());
+    fn validate_request_names_every_problem() {
+        assert!(validate_request(&valid(), "owl:aaaa", "owl:bbbb", &Config::default()).is_ok());
         assert_eq!(err_of(json!([1])), "payload must be a JSON object");
         assert_eq!(err_of(json!("x")), "payload must be a JSON object");
         let mut v = valid();
@@ -1123,7 +1224,7 @@ mod tests {
         assert_eq!(err_of(v), "malformed id");
         let mut v = valid();
         v["type"] = json!("answer");
-        assert_eq!(err_of(v), "type must be question");
+        assert_eq!(err_of(v), "type must be question or content");
         let mut v = valid();
         v["type"] = json!(7);
         assert_eq!(err_of(v), "missing type");
@@ -1148,7 +1249,7 @@ mod tests {
         // OWL-018: a repo-level question has no path; a non-string path is still a bad schema.
         let mut v = valid();
         v["body"].as_object_mut().unwrap().remove("path");
-        let p = validate_question(&v, "owl:aaaa", "owl:bbbb").unwrap();
+        let p = validate_request(&v, "owl:aaaa", "owl:bbbb", &Config::default()).unwrap();
         assert!(matches!(
             p.body,
             envelope::Body::Question { path: None, .. }

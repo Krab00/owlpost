@@ -77,9 +77,12 @@ pub fn thread_of(
     let Some(payload) = found else {
         return Err(ExitError::error(1, format!("no exchange {id}")));
     };
-    let peer = match payload.kind {
-        envelope::Kind::Question => &payload.to,
-        envelope::Kind::Answer => &payload.from,
+    // A request of ours names the peer in `to`, a reply we received in `from` (OWL-039:
+    // a content request and its reply behave exactly like a question and its answer).
+    let peer = if payload.kind.is_request() {
+        &payload.to
+    } else {
+        &payload.from
     };
     if *peer != contact.fingerprint {
         return Err(ExitError::error(
@@ -344,7 +347,9 @@ fn print_answer(answer: &Payload, json: bool) -> anyhow::Result<()> {
     }
     match &answer.body {
         Body::Answer { answer, .. } => println!("{answer}"),
-        Body::Question { .. } => bail!("payload {} is not an answer", answer.id),
+        Body::Question { .. } | Body::Content { .. } | Body::ContentReply { .. } => {
+            bail!("payload {} is not an answer", answer.id)
+        }
     }
     Ok(())
 }

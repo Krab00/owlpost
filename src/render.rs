@@ -387,6 +387,52 @@ pub fn record_block(
             }
             out
         }
+        // OWL-039: a content request and its reply are rendered by `owl show` itself (the
+        // request head, the content in a plain text block), never squeezed into the message
+        // table, so the table here shows the request's own summary line.
+        Body::Content { .. } | Body::ContentReply { .. } => {
+            let text = match &payload.body {
+                Body::Content {
+                    path,
+                    memory,
+                    git_ref,
+                    ..
+                } => match (path, memory) {
+                    (Some(p), _) => {
+                        format!("asks for {p}@{}", git_ref.as_deref().unwrap_or("HEAD"))
+                    }
+                    (_, Some(k)) => format!("asks for memory:{k}"),
+                    _ => "asks for content".to_string(),
+                },
+                // The asker's side of the same cap (§4): `--format claude` is a mode of
+                // `owl show`, so it cuts at `CONTENT_SHOW_LINES` like the plain form.
+                Body::ContentReply {
+                    content, sha256, ..
+                } => crate::content::display(content, sha256),
+                _ => unreachable!("outer match selected a content body"),
+            };
+            let (project, path) = match &payload.body {
+                Body::Content { project, path, .. } => {
+                    (project.as_deref().unwrap_or("-"), path.as_deref())
+                }
+                _ => ("-", None),
+            };
+            let mut out = message_table(
+                &header(n, &name, fingerprint, &hh_mm, project, path),
+                &text,
+                None,
+                None,
+            );
+            // Our own content, once drafted: the exact bytes (to the display cap) in a plain
+            // text block, never squeezed into the table.
+            if let Some(c) = crate::content::stored(rec) {
+                out.push('\n');
+                out.push_str("content:\n");
+                out.push_str(&fenced_text(&crate::content::display(&c.text, &c.sha256)));
+                out.push_str(&format!("\nsha256: {}", c.sha256));
+            }
+            out
+        }
         Body::Answer { answer, .. } => {
             let question = payload
                 .in_reply_to

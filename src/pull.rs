@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 use crate::client::{self, Iroh};
 use crate::config::Config;
 use crate::contacts::{Contact, ContactBook};
-use crate::envelope::{self, Body, Envelope, Payload};
+use crate::envelope::{self, Body, Envelope, Kind, Payload};
 use crate::identity::Identity;
 use crate::server::{AnswerIngested, AppState, DaemonEvent, Declined, on_pull_event};
 use crate::spool::{Dir, Record, Spool};
@@ -113,15 +113,20 @@ pub fn open_ask(id: &str, rec: &Record) -> Option<OpenAsk> {
             return None;
         }
     };
-    let Body::Question {
-        project,
-        path,
-        question,
-        ..
-    } = &payload.body
-    else {
-        tracing::warn!(id, "skipping ask: payload is not a question");
-        return None;
+    // OWL-039: a content ask has no question hash at all — it is keyed by ref and by the
+    // owner's consent — so it carries an empty one and is never cached in either direction.
+    let question = match &payload.body {
+        Body::Question {
+            project,
+            path,
+            question,
+            ..
+        } => Some((project.clone(), path.clone(), question.clone())),
+        Body::Content { .. } if payload.kind == crate::envelope::Kind::Content => None,
+        _ => {
+            tracing::warn!(id, "skipping ask: payload is not a question");
+            return None;
+        }
     };
     let meta_str = |key: &str| {
         rec.meta
@@ -133,9 +138,18 @@ pub fn open_ask(id: &str, rec: &Record) -> Option<OpenAsk> {
     Some(OpenAsk {
         id: id.to_string(),
         peer: meta_str("peer").unwrap_or_else(|| payload.to.clone()),
-        hash: meta_str("hash")
-            .unwrap_or_else(|| envelope::question_hash(project, path.as_deref(), question)),
-        path: path.clone().unwrap_or_else(|| "-".to_string()),
+        hash: meta_str("hash").unwrap_or_else(|| match &question {
+            Some((project, path, question)) => {
+                envelope::question_hash(project, path.as_deref(), question)
+            }
+            None => String::new(),
+        }),
+        path: match (&question, &payload.body) {
+            (Some((_, path, _)), _) => path.clone(),
+            (None, Body::Content { path, .. }) => path.clone(),
+            (None, _) => None,
+        }
+        .unwrap_or_else(|| "-".to_string()),
         threaded: rec
             .meta
             .get("threaded")
@@ -175,8 +189,13 @@ pub fn store_answer(
         draft: None,
         meta: json!({ "peer": peer, "hash": hash, "in_reply_to": question_id }),
     };
-    // Record birth (OWL-038): the peer's answer landing here.
-    crate::events::push(&mut rec, "answer-received", None, None);
+    // Record birth (OWL-038): the peer's answer landing here. OWL-039: a content reply
+    // names its own kind, so `owl thread` shows the content leg of the exchange.
+    let kind = match answer.kind {
+        Kind::ContentReply => "content-received",
+        _ => "answer-received",
+    };
+    crate::events::push(&mut rec, kind, None, None);
     spool.put(Dir::Inbox, &answer.id, &rec)?;
     if cache {
         spool.cache_put(hash, &rec)?;
@@ -247,6 +266,9 @@ pub fn ingest_envelope(
         );
         return Ok(Verdict::Unrelated);
     };
+    // OWL-039: a content reply never enters the asker's cache — the cache answers questions
+    // by their text, and content is keyed by ref and by the owner's consent.
+    let cache = !ask.threaded && answer.kind == Kind::Answer && !ask.hash.is_empty();
     store_answer(
         spool,
         env,
@@ -254,7 +276,7 @@ pub fn ingest_envelope(
         &contact.fingerprint,
         &ask.hash,
         &ask.id,
-        !ask.threaded,
+        cache,
     )?;
     spool.move_to(Dir::Asks, &ask.id, Dir::Done)?;
     spool.set_state_with_event(

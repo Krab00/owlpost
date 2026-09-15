@@ -364,6 +364,45 @@ owl thread Ania --since 7d
 `owl thread` only reads. It never answers anything, never marks a record seen and never
 changes a policy — use `/owlpost:inbox` to act on an open question you find there.
 
+### 3.12 Ask for a file
+
+Sometimes you do not want an answer about a file — you want the file. `owl request` asks a
+colleague for one concrete path at one ref of a project they own, or for one entry of the
+memory store they configured:
+
+```
+owl request Bartek github.com/company/monorepo src/auth/session.rs
+owl request Bartek github.com/company/monorepo src/auth/session.rs --ref v2.1.0
+owl request Bartek --memory decisions/2026-08-refresh-token.md
+/owlpost:request Bartek github.com/company/monorepo src/auth/session.rs
+```
+
+Three things are always true, and they are the point of the feature:
+
+- **Bartek approves every single one by hand.** Even if he set your policy to `auto`, a
+  content request is held for his consent. There is no setting that sends a file out
+  unattended.
+- **Only what he opted into is reachable.** A path inside a checkout he listed in
+  `projects`, or a key inside his `memory_root` — anything else is refused by his daemon
+  before it reaches his inbox at all.
+- **Nothing runs on his machine when the request arrives.** His daemon spools it; the file is
+  read only when he runs `owl draft`, and his redaction patterns run over the content exactly
+  as over an answer.
+
+On his side the request shows up in `owl inbox` like a question, `owl show <id>` prints what
+you asked for, `owl draft <id>` reads the file (no agent, no model) and prints how many bytes
+and how many redactions it came to, and `owl send <id>` is the moment it leaves.
+
+You get it back in your inbox:
+
+```
+owl show <reply id>
+```
+
+which prints the content and one line telling you the digest matched. Files over 256 KiB
+arrive cut, and the line says so — the digest is still of the whole file, so you can tell.
+Nothing is written into your checkout: what you do with the content is yours to decide.
+
 ---
 
 ## 4. History

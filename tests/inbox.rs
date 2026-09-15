@@ -298,7 +298,7 @@ impl Home {
                 question,
                 ..
             } => envelope::question_hash(project, path.as_deref(), question),
-            Body::Answer { .. } => String::new(),
+            _ => String::new(),
         };
         let rec = Record {
             raw: env.raw.clone(),
@@ -376,7 +376,7 @@ fn answer_body(p: &Payload) -> (String, String, u32, bool) {
             redactions,
             cached,
         } => (answer.clone(), harness.clone(), *redactions, *cached),
-        Body::Question { .. } => panic!("expected an answer payload"),
+        _ => panic!("expected an answer payload"),
     }
 }
 
@@ -1011,7 +1011,7 @@ fn draft_send_moves_records() {
             question,
             ..
         } => envelope::question_hash(project, path.as_deref(), question),
-        Body::Answer { .. } => unreachable!(),
+        _ => unreachable!("the fixture signs a question"),
     };
     let cached = h
         .spool()

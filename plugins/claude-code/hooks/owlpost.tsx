@@ -5,7 +5,9 @@
 //   classic hook injects on every prompt and tool call, which this module strips);
 // - a pane (`/owlpost:contacts`, `/owlpost:ask` without arguments, or the band's buttons)
 //   browses and filters contacts, sends a question and walks the inbox, all by running `owl`
-//   directly: no model turn, no tokens. Drafting an answer still goes through the model.
+//   directly: no model turn, no tokens. Drafting an answer still goes through the model;
+//   drafting a content request (OWL-039) does not — Draft there runs `owl draft` itself,
+//   because that path reads one file and has no model in it.
 //   Running the same command again (or the Close button) closes the pane.
 // The inbox is a thread list (OWL-038): one row per person, Open draws the whole conversation
 // with them oldest first, and the action buttons sit next to the open request only.
@@ -235,13 +237,14 @@ export const register: Register = (on) => {
       </Box>
     )
 
-    // The open request of the conversation: the newest event of a question record still
-    // waiting for the owner. Only that row carries the action buttons.
+    // The open request of the conversation: the newest event of a question or content
+    // record still waiting for the owner. Only that row carries the action buttons.
     const openRow = (() => {
       const wanted = ['consent', 'pending', 'drafted']
       for (let i = timeline.length - 1; i >= 0; i--) {
         const e = timeline[i]
-        if (e.dir !== 'in' || e.type !== 'question' || !wanted.includes(e.state)) continue
+        if (e.dir !== 'in' || (e.type !== 'question' && e.type !== 'content')) continue
+        if (!wanted.includes(e.state)) continue
         // The newest event of that record, not an older one of the same record.
         const last = timeline.map((x) => x.record_id).lastIndexOf(e.record_id)
         if (last === i) return i
@@ -249,18 +252,30 @@ export const register: Register = (on) => {
       return -1
     })()
 
+    // A content request (OWL-039) is a file the peer asked for, not a question: Draft runs
+    // `owl draft` directly — there is no model in that path — and there is no own-answer
+    // input, because the answer is the file.
     const actions = (e: Ev) => (
       <Box flexDirection="column">
+        {e.type === 'content' && (
+          <Text dimColor wrap="truncate">
+            {`asks for ${e.text}${e.state === 'drafted' ? ' · Show content prints the exact bytes before Send' : ''}`}
+          </Text>
+        )}
         <Box flexDirection="row" gap={1}>
           {e.state === 'consent' && <Button label={`Allow once (${openPeer})`} onPress={() => void act($, ['allow', openPeer, '--once'])} />}
           {e.state === 'consent' && <Button label={`Allow always (${openPeer})`} onPress={() => void act($, ['allow', openPeer, '--always'])} />}
           {e.state === 'consent' && <Button label={`Deny (${openPeer})`} onPress={() => void act($, ['deny', openPeer])} />}
-          {e.state !== 'consent' && e.state !== 'drafted' &&
+          {e.type === 'content' && e.state !== 'consent' && e.state !== 'drafted' &&
+            <Button label="Draft" onPress={() => void act($, ['draft', e.record_id])} />}
+          {e.type !== 'content' && e.state !== 'consent' && e.state !== 'drafted' &&
             <Button label="Draft (Claude)" onPress={() => void $.command.run({ command: 'owlpost:draft', args: e.record_id })} />}
+          {e.type === 'content' && e.state === 'drafted' &&
+            <Button label="Show content" onPress={() => void act($, ['show', e.record_id])} />}
           {e.state === 'drafted' && <Button label="Send" onPress={() => void act($, ['send', e.record_id])} />}
           {e.state !== 'consent' && <Button label="Reject" onPress={() => void act($, ['reject', e.record_id])} />}
         </Box>
-        {e.state !== 'consent' && (
+        {e.type !== 'content' && e.state !== 'consent' && (
           <Input key={`reply-${e.record_id}`} label="Own answer" placeholder="type and Enter to store it as the draft"
             value={reply[e.record_id] ?? ''} submitLabel="Save draft" onInput={(v) => { reply[e.record_id] = v }}
             onSubmit={(v) => { delete reply[e.record_id]; void act($, ['draft', e.record_id, '--text', v]) }} />

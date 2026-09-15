@@ -71,6 +71,8 @@ enum Cmd {
     Deny { peer: String },
     /// Send a question to a peer
     Ask(cli::ask::AskArgs),
+    /// Ask a peer for one file at a ref, or for one entry of their memory store
+    Request(cli::request::RequestArgs),
     /// Where every open question stands (the peer's task state), or one by id
     Status { id: Option<String> },
     /// List or count inbox records
@@ -460,6 +462,7 @@ fn main() -> ExitCode {
             cli::history::run(&home, cli::history::Filters { peer, path, since }, cli.json)
         }
         Cmd::Ask(args) => cli::ask::run(&home, args, cli.json, cli.quiet),
+        Cmd::Request(args) => cli::request::run(&home, args, cli.json),
         Cmd::Status { id } => cli::status::run(&home, id.as_deref(), cli.json),
         Cmd::Card { peer } => cli::card::run(&home, peer.as_deref()),
         Cmd::Watch { id, timeout } => cli::watch::run(&home, id.as_deref(), timeout),
