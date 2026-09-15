@@ -3,7 +3,8 @@
 // plain plugin and a session with it gets the UI on top:
 // - the band above the prompt shows the unseen inbox count (instead of the context line the
 //   classic hook injects on every prompt and tool call, which this module strips);
-// - a pane (`/owlpost:contacts`, `/owlpost:ask` without arguments, or the band's buttons)
+// - a pane (`/owlpost:contacts`, `/owlpost:inbox`, `/owlpost:ask` without arguments, or the
+//   band's buttons)
 //   browses and filters contacts, sends a question and walks the inbox, all by running `owl`
 //   directly: no model turn, no tokens. Drafting an answer still goes through the model;
 //   drafting a content request (OWL-039) does not — Draft there runs `owl draft` itself,
@@ -132,6 +133,10 @@ export const register: Register = (on) => {
 
   on('command.run', { command: 'owlpost:contacts' }, async ($) => {
     await toggle($, 'contacts')
+    return {}
+  })
+  on('command.run', { command: 'owlpost:inbox' }, async ($) => {
+    await toggle($, 'threads')
     return {}
   })
   on('command.run', { command: 'owlpost:ask' }, async ($, e, next) => {

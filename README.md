@@ -57,8 +57,9 @@ questions. `owl update` replaces the binary and the plugin later on.
 
 Optional: owlpost also runs as a **Claude Code mod**. Set `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1`
 and restart Claude Code. You get an inbox band above the prompt and a pane
-(`/owlpost:contacts` or `/owlpost:ask` with no arguments) for browsing contacts, asking and
-answering without spending model tokens. Run the same command again to close the pane. See
+(`/owlpost:contacts`, `/owlpost:inbox`, or `/owlpost:ask` with no arguments) for browsing
+contacts, asking and answering without spending model tokens. Run the same command again to
+close the pane. See
 [the plugin README](plugins/claude-code/README.md#claude-code-mods).
 
 ### 2. Exchange identities
