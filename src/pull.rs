@@ -123,6 +123,8 @@ pub fn open_ask(id: &str, rec: &Record) -> Option<OpenAsk> {
             ..
         } => Some((project.clone(), path.clone(), question.clone())),
         Body::Content { .. } if payload.kind == crate::envelope::Kind::Content => None,
+        // OWL-040: a tool-call ask has no question hash either, for the same reason.
+        Body::ToolCall { .. } if payload.kind == crate::envelope::Kind::ToolCall => None,
         _ => {
             tracing::warn!(id, "skipping ask: payload is not a question");
             return None;
@@ -193,6 +195,7 @@ pub fn store_answer(
     // names its own kind, so `owl thread` shows the content leg of the exchange.
     let kind = match answer.kind {
         Kind::ContentReply => "content-received",
+        Kind::ToolReply => "tool-received",
         _ => "answer-received",
     };
     crate::events::push(&mut rec, kind, None, None);

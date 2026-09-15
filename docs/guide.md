@@ -403,6 +403,40 @@ which prints the content and one line telling you the digest matched. Files over
 arrive cut, and the line says so — the digest is still of the whole file, so you can tell.
 Nothing is written into your checkout: what you do with the content is yours to decide.
 
+### 3.13 Let a colleague run one of your tools
+
+Sometimes the answer is not in a file at all: it is what a command prints on the machine that
+has the checkout. `owl call` asks a colleague to run one tool **they** configured:
+
+```
+owl call Bartek test --input ./in.json
+owl call Bartek build --input - --project github.com/company/monorepo
+/owlpost:call Bartek test --input ./in.json
+```
+
+The input file is a JSON object; it reaches the tool on its standard input and never as a
+command-line argument. Four things are always true:
+
+- **Only tools Bartek listed exist.** The registry lives in his `responder.tools` and is
+  empty until he adds one by hand. A name he did not configure comes back as `unknown tool`,
+  and so does every name when he configured none — on purpose, so nobody can map his tools
+  by guessing.
+- **Nothing runs when the request arrives.** His daemon spools it and stops. Even `owl allow`
+  runs nothing.
+- **He starts the run himself.** `owl draft <id>` is the command that executes the tool, and
+  he types it. It prints `ran test in 4.1s — exit 0, 3120 bytes, 1 redaction` and the output,
+  which his redaction patterns have already been over.
+- **He decides whether you see it.** `owl send <id>` is the moment the output leaves.
+
+You get it back in your inbox, exit code and all:
+
+```
+owl show <reply id>
+```
+
+A non-zero exit is an answer, not an error: a failing build is exactly the thing you asked
+about.
+
 ---
 
 ## 4. History

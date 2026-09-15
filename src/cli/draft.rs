@@ -23,6 +23,7 @@ use owlpost::envelope::Kind;
 use owlpost::route;
 use owlpost::runner::DraftStatus;
 use owlpost::spool::{Dir, Spool};
+use owlpost::tools;
 use serde_json::json;
 
 use super::{
@@ -58,7 +59,16 @@ pub fn run(home: &Path, id: &str, opts: Opts<'_>, json: bool) -> anyhow::Result<
                 )));
             }
         }
-        Kind::Answer | Kind::ContentReply => {
+        // OWL-040: the same refusal, for the same reason — the tool is the answer, so a
+        // flag that picks a harness or replaces the text has nothing to act on.
+        Kind::ToolCall => {
+            if harness.is_some() || text.is_some() || agent || prompt {
+                return Err(user_error(format!(
+                    "record {id} is a tool-call request — run owl draft {id} with no flags"
+                )));
+            }
+        }
+        Kind::Answer | Kind::ContentReply | Kind::ToolReply => {
             return Err(user_error(format!(
                 "record {id} is an answer, not a question — nothing to draft"
             )));
@@ -85,6 +95,9 @@ pub fn run(home: &Path, id: &str, opts: Opts<'_>, json: bool) -> anyhow::Result<
     }
     if payload.kind == Kind::Content {
         return draft_content(&config, &spool, home, id, rec, &payload, json);
+    }
+    if payload.kind == Kind::ToolCall {
+        return draft_tool(&config, &spool, home, id, rec, &payload, json);
     }
     if prompt {
         if json {
@@ -176,6 +189,63 @@ fn draft_content(
         print_json(&v)?;
     } else {
         println!("{}", resolved.draft_line(&label));
+        println!("state: drafted ({id})");
+    }
+    Ok(())
+}
+
+/// `owl draft <id>` on a tool-call record (OWL-040): the **only** place the owner's machine
+/// ever spawns a peer-named tool. The record is already allowed by hand (the `consent` gate
+/// above), the registry is the allowlist, the input goes to the child on stdin and the
+/// redacted, cut output is stored as the draft.
+///
+/// A non-zero exit is not a CLI failure: a failing build is a legitimate answer and the
+/// human decides whether to send it. Only a tool that could not be started at all is exit 1.
+fn draft_tool(
+    config: &Config,
+    spool: &Spool,
+    home: &Path,
+    id: &str,
+    mut rec: owlpost::spool::Record,
+    payload: &owlpost::envelope::Payload,
+    json: bool,
+) -> anyhow::Result<()> {
+    let request = tools::request_of(id, payload).map_err(|e| user_error(e.to_string()))?;
+    let tool = tools::lookup(config, request.tool).map_err(|e| user_error(e.to_string()))?;
+    let run = tools::run(
+        config,
+        home,
+        request.tool,
+        tool,
+        request.input,
+        &payload.from,
+    )
+    .map_err(|e| user_error(format!("{e:#}")))?;
+    rec.state = "drafted".into();
+    rec.draft = Some(run.to_draft());
+    owlpost::events::push(
+        &mut rec,
+        "tool-run",
+        Some("human"),
+        Some(json!({
+            "tool": run.tool,
+            "exit_code": run.exit_code,
+            "duration_ms": run.duration_ms,
+        })),
+    );
+    spool.put(Dir::Inbox, id, &rec)?;
+    // Being handled: no session needs to wake for it (OWL-033).
+    route::release(home, id);
+    if json {
+        let mut v = rec.draft.clone().unwrap_or_default();
+        if let Some(obj) = v.as_object_mut() {
+            obj.insert("id".into(), json!(id));
+            obj.insert("state".into(), json!("drafted"));
+        }
+        print_json(&v)?;
+    } else {
+        println!("{}", run.draft_line());
+        println!("{}", run.output);
         println!("state: drafted ({id})");
     }
     Ok(())

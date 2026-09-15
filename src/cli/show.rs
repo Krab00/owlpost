@@ -14,11 +14,13 @@
 use std::path::Path;
 
 use anyhow::Context;
+use owlpost::config::Config;
 use owlpost::content;
 use owlpost::envelope::{self, Body, Kind};
 use owlpost::render;
 use owlpost::route;
 use owlpost::spool::{Dir, Record, Spool};
+use owlpost::tools;
 use serde_json::{Value, json};
 
 use super::inbox::Format;
@@ -29,6 +31,7 @@ pub fn run(home: &Path, id: &str, json: bool, format: Option<&str>) -> anyhow::R
     // `--json` wins: the json branch below is checked first.
     let rendered = matches!(format, Some(Format::Claude | Format::Codex | Format::Kimi));
     let spool = Spool::new(home)?;
+    let config = Config::load(home)?;
     let book = super::contact_book(home)?;
     let records: Vec<(String, Record)> = if id == "all" {
         spool.list(Dir::Inbox, |_| true)?
@@ -139,6 +142,59 @@ pub fn run(home: &Path, id: &str, json: bool, format: Option<&str>) -> anyhow::R
                         println!("memory:   {key}");
                     }
                 }
+                // OWL-040: what would run, before anything runs: the tool, the argv it
+                // resolves to, the directory it would run in and the input in full.
+                Body::ToolCall {
+                    tool,
+                    input,
+                    project,
+                } => {
+                    println!("tool:     {tool}");
+                    match tools::lookup(&config, tool) {
+                        Ok(t) => {
+                            println!("argv:     {}", t.argv.join(" "));
+                            println!(
+                                "cwd:      {}",
+                                tools::cwd_of(&config, home, t)
+                                    .map(|p| p.display().to_string())
+                                    .unwrap_or_else(|e| e.to_string())
+                            );
+                        }
+                        // The owner removed the tool since the request arrived: say so
+                        // rather than printing an argv this machine would not run.
+                        Err(e) => println!("argv:     {e}"),
+                    }
+                    println!("project:  {}", project.as_deref().unwrap_or("-"));
+                    println!("input:");
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(input).unwrap_or_else(|_| "{}".into())
+                    );
+                }
+                // OWL-040: a reply we received — the run's line, then its output.
+                Body::ToolReply {
+                    output,
+                    exit_code,
+                    duration_ms,
+                    truncated,
+                    redactions,
+                    harness,
+                } => {
+                    if let Some(q) = &payload.in_reply_to {
+                        println!("reply to: {q}");
+                    }
+                    println!("harness:  {harness}");
+                    println!("redactions: {redactions}");
+                    println!(
+                        "{}",
+                        tools::Run::show_line(*exit_code, *duration_ms, output.len())
+                    );
+                    println!("output:");
+                    println!("{}", render::fenced_text(&tools::display(output)));
+                    if *truncated {
+                        println!("truncated: {} bytes received", output.len());
+                    }
+                }
                 // OWL-039: a reply we received — the content, then the digest verdict.
                 Body::ContentReply {
                     content,
@@ -168,7 +224,13 @@ pub fn run(home: &Path, id: &str, json: bool, format: Option<&str>) -> anyhow::R
             // OWL-039: our own drafted content goes in a plain text block under
             // `content:`, never as the generic draft dump — the human reads the exact bytes
             // (or, above the display cap, the byte count and the digest) before `owl send`.
-            if let Some(c) = content::stored(rec).filter(|_| payload.kind == Kind::Content) {
+            if let Some(r) = tools::stored(rec).filter(|_| payload.kind == Kind::ToolCall) {
+                // OWL-040: our own run, once drafted — the line and the exact output the
+                // human reads before `owl send`.
+                println!("{}", r.draft_line());
+                println!("output:");
+                println!("{}", render::fenced_text(&tools::display(&r.output)));
+            } else if let Some(c) = content::stored(rec).filter(|_| payload.kind == Kind::Content) {
                 println!("content:");
                 println!(
                     "{}",

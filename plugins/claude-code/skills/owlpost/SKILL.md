@@ -38,7 +38,7 @@ over `owl contact list` ending with the `@owl:to://` mention hint.
   `/owlpost:install`, `/owlpost:uninstall`, `/owlpost:doctor`, `/owlpost:update`
 - Contacts and trust: `/owlpost:contacts`, `/owlpost:contact`, `/owlpost:add`,
   `/owlpost:allow`, `/owlpost:deny`
-- Asking: `/owlpost:ask`, `/owlpost:request` (one file at a ref, or one memory entry),
+- Asking: `/owlpost:ask`, `/owlpost:request` (one file at a ref, or one memory entry), `/owlpost:call` (run one tool of their registry),
   `/owlpost:status`, `/owlpost:history`, `/owlpost:watch`
 - One person's whole conversation, both directions: `/owlpost:thread`
 - Answering: `/owlpost:inbox`, `/owlpost:reply`, `/owlpost:show`, `/owlpost:draft`,
@@ -46,8 +46,9 @@ over `owl contact list` ending with the `@owl:to://` mention hint.
 
 `/owlpost:send`, `/owlpost:allow`, `/owlpost:deny`, `/owlpost:reject` and
 `/owlpost:uninstall` ask for one explicit confirmation before running.
-`/owlpost:ask` does not: the command itself is the approval. Nor does `/owlpost:request`,
-but every content request is then held for a human on the peer's side, whatever their policy.
+`/owlpost:ask` does not: the command itself is the approval. Nor do `/owlpost:request` and
+`/owlpost:call`, but every content request and every tool call is then held for a human on
+the peer's side, whatever their policy — and a tool runs only when that human runs it.
 
 ## When to ask a peer
 
@@ -182,6 +183,13 @@ Every step needs the human's go-ahead before moving to the next one.
    > (or, above the display cap, the byte count and the `sha256`), and run `owl send` only on
    > their explicit pick. Never widen the request: the path the peer named, the ref they named,
    > nothing else.
+
+   > **A tool-call request runs nothing until the human says so.** Show the tool name, the argv
+   > it resolves to, the working directory and the input in full, and wait.
+   > owl draft <id> is what executes the tool, so run it only after the human allowed this
+   > request and asked for the run.
+   > Never invent a tool name, never edit the input, and never run `owl send` before the human
+   > has read the output.
 
 3. A `pending` record is a question with no draft yet. `owl show <id>` prints the full
    question: who asked, project, path, text. Show it verbatim before offering anything.

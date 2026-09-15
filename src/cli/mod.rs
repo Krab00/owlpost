@@ -5,6 +5,7 @@
 pub mod add;
 pub mod allow;
 pub mod ask;
+pub mod call;
 pub mod card;
 pub mod deny;
 pub mod doctor;
@@ -118,6 +119,9 @@ pub fn kind_str(kind: Kind) -> &'static str {
         // OWL-039 wire names, so `owl inbox --json`'s `type` is the payload's own `type`.
         Kind::Content => "content",
         Kind::ContentReply => "content-reply",
+        // OWL-040 wire names.
+        Kind::ToolCall => "tool-call",
+        Kind::ToolReply => "tool-reply",
     }
 }
 
@@ -136,7 +140,10 @@ pub fn body_path(body: &Body) -> &str {
         Body::Question { path: None, .. }
         | Body::Answer { .. }
         | Body::Content { path: None, .. }
-        | Body::ContentReply { .. } => "-",
+        | Body::ContentReply { .. }
+        // OWL-040: a tool call is about a checkout, never about one file of ours.
+        | Body::ToolCall { .. }
+        | Body::ToolReply { .. } => "-",
     }
 }
 
@@ -170,7 +177,9 @@ pub fn body_project(body: &Body) -> Option<&str> {
     match body {
         Body::Question { project, .. } => Some(project.as_str()),
         Body::Content { project, .. } => project.as_deref(),
-        Body::Answer { .. } | Body::ContentReply { .. } => None,
+        // OWL-040: a tool call names the project its tool runs in, when it names one.
+        Body::ToolCall { project, .. } => project.as_deref(),
+        Body::Answer { .. } | Body::ContentReply { .. } | Body::ToolReply { .. } => None,
     }
 }
 
@@ -183,6 +192,10 @@ pub fn body_text(body: &Body) -> std::borrow::Cow<'_, str> {
         Body::Answer { answer, .. } => Cow::Borrowed(answer),
         Body::ContentReply { content, .. } => Cow::Borrowed(content),
         Body::Content { .. } => Cow::Owned(owlpost::content::body_summary(body)),
+        // OWL-040: `<tool> <compact input>`; the 60-char cut is `first_line`'s, as for
+        // every other kind, so one width governs every listing.
+        Body::ToolCall { .. } => Cow::Owned(owlpost::tools::body_summary(body)),
+        Body::ToolReply { output, .. } => Cow::Borrowed(output),
     }
 }
 

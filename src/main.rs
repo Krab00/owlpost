@@ -73,6 +73,8 @@ enum Cmd {
     Ask(cli::ask::AskArgs),
     /// Ask a peer for one file at a ref, or for one entry of their memory store
     Request(cli::request::RequestArgs),
+    /// Ask a peer to run one tool of their registry with a JSON input
+    Call(cli::call::CallArgs),
     /// Where every open question stands (the peer's task state), or one by id
     Status { id: Option<String> },
     /// List or count inbox records
@@ -463,6 +465,7 @@ fn main() -> ExitCode {
         }
         Cmd::Ask(args) => cli::ask::run(&home, args, cli.json, cli.quiet),
         Cmd::Request(args) => cli::request::run(&home, args, cli.json),
+        Cmd::Call(args) => cli::call::run(&home, args, cli.json),
         Cmd::Status { id } => cli::status::run(&home, id.as_deref(), cli.json),
         Cmd::Card { peer } => cli::card::run(&home, peer.as_deref()),
         Cmd::Watch { id, timeout } => cli::watch::run(&home, id.as_deref(), timeout),

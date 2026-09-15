@@ -387,6 +387,44 @@ pub fn record_block(
             }
             out
         }
+        // OWL-040: a tool-call request shows what would run (the tool and its input) and,
+        // once drafted, the run's own line over the output in a plain text block; the reply
+        // shows the same line over what came back. Never squeezed into the message table.
+        Body::ToolCall { .. } | Body::ToolReply { .. } => {
+            let text = match &payload.body {
+                Body::ToolCall { .. } => {
+                    format!("asks to run {}", crate::tools::body_summary(&payload.body))
+                }
+                Body::ToolReply {
+                    output,
+                    exit_code,
+                    duration_ms,
+                    ..
+                } => format!(
+                    "{}\n{}",
+                    crate::tools::Run::show_line(*exit_code, *duration_ms, output.len()),
+                    crate::tools::display(output)
+                ),
+                _ => unreachable!("outer match selected a tool body"),
+            };
+            let project = match &payload.body {
+                Body::ToolCall { project, .. } => project.as_deref().unwrap_or("-"),
+                _ => "-",
+            };
+            let mut out = message_table(
+                &header(n, &name, fingerprint, &hh_mm, project, None),
+                &text,
+                None,
+                None,
+            );
+            if let Some(r) = crate::tools::stored(rec) {
+                out.push('\n');
+                out.push_str(&r.draft_line());
+                out.push('\n');
+                out.push_str(&fenced_text(&crate::tools::display(&r.output)));
+            }
+            out
+        }
         // OWL-039: a content request and its reply are rendered by `owl show` itself (the
         // request head, the content in a plain text block), never squeezed into the message
         // table, so the table here shows the request's own summary line.

@@ -59,6 +59,11 @@ fn not_a_candidate(config: &Config, book: &ContactBook, id: &str, rec: &Record) 
     if payload.kind == crate::envelope::Kind::Content {
         return Some(format!("record {id} is a content request — consent only"));
     }
+    // OWL-040: the same guard for a tool call, and for a stronger reason — the daemon never
+    // spawns a tool at all, whatever the peer's policy says.
+    if payload.kind == crate::envelope::Kind::ToolCall {
+        return Some(format!("record {id} is a tool-call request — consent only"));
+    }
     if answer::question_body(id, &payload).is_err() {
         return Some(format!("record {id} is an answer"));
     }
