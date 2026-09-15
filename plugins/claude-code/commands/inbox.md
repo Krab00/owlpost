@@ -133,6 +133,9 @@ The reply is a command word or the human's own answer:
 3. Show the command's output. On a non-zero exit show the error line and stop; the record
    is untouched and the flow can be repeated.
 
+For the history of one person — everything they asked, everything you asked them, and what
+happened to each request — use `/owlpost:thread <peer>` instead of walking the inbox.
+
 Never chain `owl draft` and `owl send` unless the human picked "Draft & send" (or passed `--send`); the draft is still printed in full before `owl send` runs.
 
 ## 5. `answer` records (a peer answered a question asked from here)

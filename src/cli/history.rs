@@ -130,6 +130,8 @@ pub fn run(home: &Path, filters: Filters, json: bool) -> anyhow::Result<()> {
             "state": rec.state,
             "project": project,
             "path": path,
+            // OWL-038: the payload's thread id, `null` when the record is not threaded.
+            "context_id": payload.context_id,
             "text": text,
             "received_at": rec.received_at,
             "age": format_age(age),

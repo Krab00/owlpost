@@ -48,6 +48,7 @@ pub fn run(home: &Path, id: Option<&str>, json: bool) -> anyhow::Result<()> {
             Some(_) if offline.contains_key(&ask.peer) => ("offline".into(), None),
             Some(contact) => match client::fetch_task(&identity, contact, &iroh, &ask.id) {
                 Ok(Some(task)) => {
+                    pull::note_task_state(&spool, &ask.id, &task);
                     if task.rejected() {
                         pull::close_declined(&spool, &ask.id)?;
                     }

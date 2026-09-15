@@ -160,6 +160,36 @@ impl Spool {
         self.update(dir, id, |r| r.state = state.to_string())
     }
 
+    /// `set_state` plus one `meta.events` entry, in a single read-modify-write (OWL-038):
+    /// the state change and the log line it explains can never come apart.
+    pub fn set_state_with_event(
+        &self,
+        dir: Dir,
+        id: &str,
+        state: &str,
+        kind: &str,
+        by: Option<&str>,
+        detail: Option<serde_json::Value>,
+    ) -> anyhow::Result<()> {
+        self.update(dir, id, |r| {
+            r.state = state.to_string();
+            crate::events::push(r, kind, by, detail);
+        })
+    }
+
+    /// Appends one `meta.events` entry without touching the state (OWL-038): what a
+    /// `state-seen` poll records on an open ask.
+    pub fn push_event(
+        &self,
+        dir: Dir,
+        id: &str,
+        kind: &str,
+        by: Option<&str>,
+        detail: Option<serde_json::Value>,
+    ) -> anyhow::Result<()> {
+        self.update(dir, id, |r| crate::events::push(r, kind, by, detail))
+    }
+
     pub fn mark_seen(&self, dir: Dir, id: &str) -> anyhow::Result<()> {
         self.update(dir, id, |r| r.seen = true)
     }

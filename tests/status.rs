@@ -413,6 +413,7 @@ async fn rejected_task_moves_the_ask_to_done_declined() {
         held,
         "denied",
         &[("previous_state", serde_json::json!("consent"))],
+        owlpost::events::Ev::by("denied", "human"),
     )
     .unwrap();
 
@@ -546,4 +547,45 @@ async fn a_failing_task_route_prints_the_error_and_is_not_cached_per_peer() {
         assert!(spool.get(Dir::Done, &q.id).unwrap().is_none());
     }
     peer.shutdown();
+}
+
+/// OWL-038: `owl status` records the peer's Task state on the still-open ask as one
+/// `state-seen` event (`by: "peer"`, `detail.state` and `detail.text`), and a second run with
+/// the same state collapses into the first rather than appending a twin.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn status_records_the_peers_task_state_once() {
+    let t = two_peers().await;
+    let spool = Spool::new(t.home.path()).unwrap();
+    let events = |id: &str| -> Vec<Value> {
+        spool.get(Dir::Asks, id).unwrap().unwrap().meta["events"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+    };
+    assert!(
+        events(&t.qb.id).is_empty(),
+        "the filed ask starts with no log"
+    );
+
+    let out = ok(&status(t.home.path(), &[]));
+    assert!(out.contains(CONSENT), "the peer was reached: {out}");
+    let first = events(&t.qb.id);
+    assert_eq!(first.len(), 1, "one state-seen per state: {first:?}");
+    assert_eq!(first[0]["kind"], "state-seen");
+    assert_eq!(first[0]["by"], "peer");
+    assert_eq!(first[0]["detail"]["state"], envelope::TASK_STATE_SUBMITTED);
+    assert_eq!(first[0]["detail"]["text"], CONSENT);
+    // The unreachable peer's ask never grew one.
+    assert!(
+        events(&t.qc.id).is_empty(),
+        "an offline peer reports nothing"
+    );
+
+    ok(&status(t.home.path(), &[]));
+    assert_eq!(
+        events(&t.qb.id).len(),
+        1,
+        "the same state does not append a second event"
+    );
+    t.b.running.shutdown();
 }

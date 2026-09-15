@@ -1172,3 +1172,30 @@ fn design_doc_and_ask_help_name_the_uri_as_a_peer_form() {
         "the --peer help must list the four forms: {peer}"
     );
 }
+
+/// OWL-038 AC11: the design doc's event-log keys and the `owl thread` §9 row, each pinned on
+/// the table line that carries it rather than on prose around it.
+#[test]
+fn thread_and_event_log_pinned_in_the_design_doc() {
+    let design = repo_file("docs/technical-design.md");
+    for needle in [
+        "| `meta.events` |",
+        "| `EVENTS_MAX` |",
+        "| `state-seen` |",
+        "| `owl thread [<peer>] [--since <date>] [--context <id>]` |",
+    ] {
+        assert!(
+            design.lines().any(|l| l.starts_with(needle)),
+            "technical-design.md lacks the table row {needle:?}"
+        );
+    }
+    let guide = repo_file("docs/guide.md");
+    assert!(
+        guide.contains("### 3.11 The whole conversation with one person"),
+        "guide.md lacks section 3.11"
+    );
+    assert!(
+        guide.lines().any(|l| l.trim() == "owl thread"),
+        "guide.md 3.11 must show the bare `owl thread` command"
+    );
+}

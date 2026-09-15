@@ -166,7 +166,7 @@ pub fn store_answer(
     question_id: &str,
     cache: bool,
 ) -> anyhow::Result<()> {
-    let rec = Record {
+    let mut rec = Record {
         raw: env.raw.clone(),
         sig: env.sig.clone(),
         state: "pending".into(),
@@ -175,6 +175,8 @@ pub fn store_answer(
         draft: None,
         meta: json!({ "peer": peer, "hash": hash, "in_reply_to": question_id }),
     };
+    // Record birth (OWL-038): the peer's answer landing here.
+    crate::events::push(&mut rec, "answer-received", None, None);
     spool.put(Dir::Inbox, &answer.id, &rec)?;
     if cache {
         spool.cache_put(hash, &rec)?;
@@ -255,7 +257,14 @@ pub fn ingest_envelope(
         !ask.threaded,
     )?;
     spool.move_to(Dir::Asks, &ask.id, Dir::Done)?;
-    spool.set_state(Dir::Done, &ask.id, "answered")?;
+    spool.set_state_with_event(
+        Dir::Done,
+        &ask.id,
+        "answered",
+        "answer-received",
+        None,
+        None,
+    )?;
     let ack_error = client::ack(identity, contact, iroh, &answer.id).err();
     Ok(Verdict::Ingested(Box::new(Ingested {
         ask: ask.clone(),
@@ -272,11 +281,26 @@ fn claimed_id(env: &Envelope) -> String {
         .unwrap_or_else(|| "?".to_string())
 }
 
+/// Records the peer's Task state on the still-open ask `id` (OWL-038): one `state-seen`
+/// event, collapsed by `events::push` when the state has not moved since the last one.
+/// Best effort — the ask may have been closed between the fetch and this write.
+pub fn note_task_state(spool: &Spool, id: &str, task: &client::Task) {
+    if let Err(e) = spool.push_event(
+        Dir::Asks,
+        id,
+        crate::events::STATE_SEEN,
+        Some("peer"),
+        Some(json!({ "state": task.state, "text": task.text })),
+    ) {
+        tracing::debug!(id, error = %format!("{e:#}"), "recording the peer's task state failed");
+    }
+}
+
 /// Closes ask `id` as declined (OWL-034): the `asks/` record moves to `done/` with state
 /// `declined`. Move first, like the ack handler, so a failed move leaves the ask open.
 pub fn close_declined(spool: &Spool, id: &str) -> anyhow::Result<()> {
     spool.move_to(Dir::Asks, id, Dir::Done)?;
-    spool.set_state(Dir::Done, id, "declined")
+    spool.set_state_with_event(Dir::Done, id, "declined", "declined", Some("peer"), None)
 }
 
 /// One pull over every responder with an open ask (iroh first, then `endpoints`, see
@@ -380,7 +404,10 @@ pub fn pull_once(
                         tracing::warn!(peer, id, error = %format!("{e:#}"), "closing declined ask failed")
                     }
                 },
-                Ok(Some(task)) => tracing::debug!(peer, id, state = %task.state, "task state"),
+                Ok(Some(task)) => {
+                    note_task_state(spool, &id, &task);
+                    tracing::debug!(peer, id, state = %task.state, "task state");
+                }
                 Ok(None) => tracing::debug!(peer, id, "peer holds no task for the ask"),
                 Err(e) => tracing::warn!(peer, id, error = %format!("{e:#}"), "task fetch failed"),
             }
@@ -408,10 +435,9 @@ pub fn expire_outbox(spool: &Spool, ttl_days: u64, now_unix: u64) -> anyhow::Res
             continue;
         }
         // Move first, like the ack handler: a failed move must not leave `expired` in outbox/.
-        match spool
-            .move_to(Dir::Outbox, &id, Dir::Done)
-            .and_then(|_| spool.set_state(Dir::Done, &id, "expired"))
-        {
+        match spool.move_to(Dir::Outbox, &id, Dir::Done).and_then(|_| {
+            spool.set_state_with_event(Dir::Done, &id, "expired", "expired", None, None)
+        }) {
             Ok(()) => {
                 tracing::info!(id, "outbox entry expired");
                 expired += 1;

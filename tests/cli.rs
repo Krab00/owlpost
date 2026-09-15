@@ -45,6 +45,7 @@ fn help_lists_all_subcommands() {
         "send",
         "reject",
         "route",
+        "thread",
         "history",
         "watch",
         "daemon",
