@@ -25,6 +25,14 @@ pub fn run(home: &Path, id: &str, json: bool) -> anyhow::Result<()> {
             "record {id} is a content request — its draft is the file itself and cannot be edited; `owl reject {id}` declines it"
         )));
     }
+    // OWL-040: the same rule for a run. The draft is what the tool printed, next to the
+    // exit code it printed it with; an edited output would be a claim about a run that
+    // never happened.
+    if payload_of(id, &rec)?.kind == owlpost::envelope::Kind::ToolCall {
+        return Err(user_error(format!(
+            "record {id} is a tool-call request — its draft is what the tool printed and cannot be edited; `owl reject {id}` declines it"
+        )));
+    }
     let mut draft = StoredDraft::from_record(id, &rec)?.ok_or_else(|| {
         user_error(format!(
             "record {id} has no draft — run `owl draft {id}` first"
