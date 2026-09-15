@@ -12,7 +12,7 @@ no shared memory and no account to create.
 - [Plan](docs/plan.md) — milestones and the task backlog
 - [User guide](docs/guide.md) — every command end to end, `owl` and `/owlpost:` side by side
 
-Status: pre-alpha, private. Rust, single static binary `owl`.
+Status: pre-alpha. Rust, single static binary `owl`.
 
 ---
 
@@ -231,6 +231,8 @@ same question does not have to be asked twice. `owl history` is worth a look bef
 
 ## Security
 
+Found a vulnerability? Report it privately — see [SECURITY.md](SECURITY.md).
+
 - **Identity is a key, not an account.** `owl init` creates an ed25519 keypair. Your fingerprint
   is `owl:` plus 16 characters of the hash of your public key; you compare it with your colleague
   out of band before trusting them.
@@ -254,3 +256,11 @@ same question does not have to be asked twice. `owl history` is worth a look bef
 - **Limits.** `--context` attachments are capped at 8192 bytes. Each peer has a rate limit
   (default 20 questions/hour, then `429`). Replayed or stale messages (more than 5 minutes off)
   are rejected. Incoming text is treated as data, never as instructions.
+
+---
+
+## License
+
+owlpost is licensed under the GNU General Public License, version 3 or later
+(GPL-3.0-or-later). You may use, modify and redistribute it; derived works must stay under the
+same license. The full text is in [LICENSE](LICENSE).
