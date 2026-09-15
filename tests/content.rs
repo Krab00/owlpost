@@ -1199,22 +1199,53 @@ fn the_display_cap_cuts_at_two_hundred_lines_in_every_view() {
             &common::record(&Envelope::sign(&reply, &b), "pending"),
         )
         .unwrap();
-    let out = owl_ok(home.path(), &["show", &reply.id]);
+    for args in [
+        vec!["show", reply.id.as_str()],
+        vec!["show", reply.id.as_str(), "--format", "claude"],
+    ] {
+        let out = owl_ok(home.path(), &args);
+        assert!(
+            out.contains(&kept),
+            "asker {args:?}: line {cut} must be shown: {out}"
+        );
+        assert!(
+            !out.contains(&dropped),
+            "asker {args:?}: line {} must not be shown: {out}",
+            cut + 1
+        );
+        assert!(
+            out.contains(&trailer),
+            "asker {args:?}: trailer missing: {out}"
+        );
+        // The digest is still of the whole content, so the cut view is still verified.
+        assert!(
+            out.contains(&format!("sha256 {sha} — verified")),
+            "asker {args:?}: {out}"
+        );
+    }
+
+    // `verify_line`'s third case, through `owl show`: a reply the responder cut is a
+    // deliberate prefix, so its digest cannot match and the line says what arrived instead
+    // of crying tamper — and it exits 0.
+    let head = text[..text.len() / 2].to_string();
+    let cut_reply = Payload::content_reply(&req, &head, &sha, None, true, 0);
+    Spool::new(home.path())
+        .unwrap()
+        .put(
+            Dir::Inbox,
+            &cut_reply.id,
+            &common::record(&Envelope::sign(&cut_reply, &b), "pending"),
+        )
+        .unwrap();
+    let out = owl_ok(home.path(), &["show", &cut_reply.id]);
     assert!(
-        out.contains(&kept),
-        "asker: line {cut} must be shown: {out}"
+        out.contains(&format!(
+            "truncated — {} bytes received, sha256 {sha} is of the full content",
+            head.len()
+        )),
+        "truncated: {out}"
     );
-    assert!(
-        !out.contains(&dropped),
-        "asker: line {} must not be shown: {out}",
-        cut + 1
-    );
-    assert!(out.contains(&trailer), "asker: trailer missing: {out}");
-    // The digest is still of the whole content, so the cut view is still verified.
-    assert!(
-        out.contains(&format!("sha256 {sha} — verified")),
-        "asker: {out}"
-    );
+    assert!(!out.contains("sha256 mismatch"), "truncated: {out}");
 }
 
 // ---------------------------------------------------------------- AC9: the thread
