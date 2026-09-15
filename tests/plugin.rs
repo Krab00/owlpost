@@ -2573,3 +2573,23 @@ fn the_mod_runs_a_tool_call_without_a_model_turn() {
         "plugins/claude-code/README.md must name the Run button"
     );
 }
+
+// ---------- OWL-041: `/owlpost:inbox` opens the pane's thread list ----------
+
+/// The mod registers `/owlpost:inbox` as a pane command, and the README's mods section
+/// names it among the commands that open the pane.
+#[test]
+fn inbox_command_opens_the_mod_pane() {
+    let tsx = read("hooks/owlpost.tsx");
+    assert!(
+        tsx.lines().any(|l| l.contains("command: 'owlpost:inbox'")),
+        "hooks/owlpost.tsx must register a command.run handler for owlpost:inbox"
+    );
+    let readme = read("README.md");
+    let mods = section(&readme, "## Claude Code mods");
+    assert!(
+        mods.lines()
+            .any(|l| l.contains("a pane opened by") && l.contains("/owlpost:inbox")),
+        "the mods section must name /owlpost:inbox as a way to open the pane:\n{mods}"
+    );
+}
