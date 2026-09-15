@@ -943,7 +943,15 @@ fn edit_refuses_a_tool_draft() {
     owl_ok(d.home.path(), &["draft", &d.id]);
     let (code, _, err) = owl(d.home.path(), &["edit", &d.id]);
     assert_eq!(code, 1);
-    assert!(err.contains("is a tool-call request"), "stderr: {err}");
+    // The whole sentence, not its opening: the tail is what tells the owner what to do
+    // instead, so a reword of the tail is a change to the contract too.
+    assert!(
+        err.contains(&format!(
+            "record {} is a tool-call request — its draft is what the tool printed and cannot be edited; `owl reject {}` declines it",
+            d.id, d.id
+        )),
+        "stderr: {err}"
+    );
 }
 
 // ---------------------------------------------------------------- AC7: redact, stderr, cut
@@ -1620,4 +1628,249 @@ fn the_human_timeline_caps_a_long_tool_output() {
         "one line past the cap was printed"
     );
     assert!(out.contains("… 50 more lines — "), "the trailer:\n{out}");
+}
+
+// ------------------------------------------------- round 2: the gaps the reviewer named
+
+/// `owl send` on a tool-call record that was never drafted refuses with the same line every
+/// other kind gets, exits non-zero and queues nothing: there is no "send it anyway" path
+/// that would sign an empty tool reply.
+#[test]
+fn send_refuses_a_tool_call_that_was_never_drafted() {
+    let logs = tempfile::tempdir().unwrap();
+    let d = drafting(fake(&logs.path().join("t.log"), &[]), input(&[]));
+    let (code, _out, err) = owl(d.home.path(), &["send", &d.id]);
+    assert_ne!(code, 0, "an undrafted record cannot be sent: {err}");
+    assert!(
+        err.contains(&format!(
+            "record {} has no draft — run `owl draft {}` first",
+            d.id, d.id
+        )),
+        "stderr: {err}"
+    );
+    let spool = Spool::new(d.home.path()).unwrap();
+    assert!(
+        spool.list(Dir::Outbox, |_| true).unwrap().is_empty(),
+        "nothing may be queued"
+    );
+    let rec = spool.get(Dir::Inbox, &d.id).unwrap().unwrap();
+    assert_eq!(rec.state, "pending", "the record is untouched");
+    assert!(rec.draft.is_none());
+}
+
+/// The owner removed the tool between the request's arrival and their `owl draft`: the
+/// lookup fails by name, exit 1, nothing is stored and no child is started. The request
+/// passed the API's `unknown tool` gate when it arrived — this is the second, later gate.
+#[test]
+fn a_tool_removed_after_arrival_is_refused_at_draft_time() {
+    let logs = tempfile::tempdir().unwrap();
+    let log = logs.path().join("gone.log");
+    let d = drafting_with(fake(&log, &[]), input(&[]), |cfg| {
+        // The registry the request named is gone by the time the human types `owl draft`.
+        cfg.responder.tools.clear();
+    });
+    let (code, _out, err) = owl(d.home.path(), &["draft", &d.id]);
+    assert_eq!(code, 1, "a tool that is no longer registered is a failure");
+    assert!(
+        err.contains(&format!("unknown tool {TOOL}")),
+        "the message names the tool: {err}"
+    );
+    assert!(!log.exists(), "no child may be started");
+    let rec = Spool::new(d.home.path())
+        .unwrap()
+        .get(Dir::Inbox, &d.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(rec.state, "pending", "nothing drafted");
+    assert!(rec.draft.is_none());
+}
+
+/// `owl call`'s three remaining flags: `--reply-to` reuses the named exchange's thread id,
+/// `--project` reaches the peer in `body.project` (and an unknown one is refused by the
+/// peer's API, not locally), and `--json` prints the accepted id with the peer's state.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn call_carries_the_thread_the_project_and_the_json_state() {
+    let logs = tempfile::tempdir().unwrap();
+    let log = logs.path().join("tool.log");
+    let a = id(1);
+    let tool = fake(&log, &[]);
+    let b = spawn_daemon_with(
+        2,
+        &[Peer::new(&a, "Ana", Some(policy(Mode::Manual, None)))],
+        move |cfg| {
+            cfg.responder.tools.insert(TOOL.into(), tool);
+            // Only the key matters: the API checks membership and never touches the path.
+            cfg.projects
+                .insert(PROJECT.into(), "/nowhere/monorepo".into());
+        },
+    )
+    .await;
+    let a_home = tempfile::tempdir().unwrap();
+    prepare_home_with(a_home.path(), &a, &[], |_| {});
+    write_contact_full(
+        a_home.path(),
+        &Peer::new(&b.id, "Bea", None),
+        &[&b.addr.to_string()],
+        &["bea@example.org"],
+    );
+    let in_json = a_home.path().join("in.json");
+    std::fs::write(&in_json, r#"{"package": "auth"}"#).unwrap();
+    let in_path = in_json.display().to_string();
+    let a_spool = Spool::new(a_home.path()).unwrap();
+
+    // A project the peer does not have is refused by the peer, and nothing is spooled here.
+    let (code, _out, err) = owl(
+        a_home.path(),
+        &[
+            "call",
+            "Bea",
+            TOOL,
+            "--input",
+            &in_path,
+            "--project",
+            "github.com/other/repo",
+        ],
+    );
+    assert_ne!(code, 0, "an unknown project is a failure: {err}");
+    assert!(err.contains("unknown project"), "stderr: {err}");
+    assert!(
+        a_spool.list(Dir::Asks, |_| true).unwrap().is_empty(),
+        "a refused call spools nothing"
+    );
+    assert!(b.spool().list(Dir::Inbox, |_| true).unwrap().is_empty());
+
+    // The configured project is accepted, and `--json` names the id and the peer's state.
+    let out = owl_ok(
+        a_home.path(),
+        &[
+            "--json",
+            "call",
+            "Bea",
+            TOOL,
+            "--input",
+            &in_path,
+            "--project",
+            PROJECT,
+        ],
+    );
+    let v: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["status"], "accepted");
+    assert_eq!(
+        v["state"], "TASK_STATE_SUBMITTED",
+        "every tool call is held: {out}"
+    );
+    let first = v["id"].as_str().expect("the accepted id").to_string();
+    assert!(
+        a_spool.get(Dir::Asks, &first).unwrap().is_some(),
+        "the id `--json` printed is the record's own"
+    );
+
+    // The project reached the peer on the body, not just the local record.
+    let theirs = b.spool().get(Dir::Inbox, &first).unwrap().unwrap();
+    let payload: Value = serde_json::from_str(&theirs.raw).unwrap();
+    assert_eq!(payload["body"]["project"], PROJECT);
+    assert_eq!(payload["body"]["tool"], TOOL);
+
+    // `--reply-to` continues that exchange: same thread id, a new record.
+    let out = owl_ok(
+        a_home.path(),
+        &[
+            "--json",
+            "call",
+            "Bea",
+            TOOL,
+            "--input",
+            &in_path,
+            "--reply-to",
+            &first,
+        ],
+    );
+    let second = serde_json::from_str::<Value>(&out).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(second, first, "a reply-to is still a new request");
+    let ctx = |rid: &str| -> String {
+        let rec = a_spool.get(Dir::Asks, rid).unwrap().unwrap();
+        serde_json::from_str::<Payload>(&rec.raw)
+            .unwrap()
+            .context_id
+            .expect("a tool call is always threaded")
+    };
+    assert_eq!(ctx(&second), ctx(&first), "the thread id is reused");
+    // The twin: without `--reply-to` the thread is a fresh one.
+    let out = owl_ok(
+        a_home.path(),
+        &["--json", "call", "Bea", TOOL, "--input", &in_path],
+    );
+    let third = serde_json::from_str::<Value>(&out).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(ctx(&third), ctx(&first), "a fresh call opens a new thread");
+
+    assert!(!log.exists(), "no arrival ever starts the tool");
+}
+
+/// AC7, the join itself: with both streams non-empty the stored output is exactly stdout,
+/// the marker line, then stderr — in that order, with no blank line anywhere.
+#[test]
+fn stdout_and_stderr_are_joined_under_the_marker_in_order() {
+    let logs = tempfile::tempdir().unwrap();
+    let d = drafting(
+        fake(
+            &logs.path().join("both.log"),
+            // Nothing here matches a default redaction pattern, so the output is verbatim.
+            &["FAKE_TOOL_STDERR=heads up, this was slow"],
+        ),
+        input(&[("k", json!("v"))]),
+    );
+    owl_ok(d.home.path(), &["draft", &d.id]);
+    let rec = Spool::new(d.home.path())
+        .unwrap()
+        .get(Dir::Inbox, &d.id)
+        .unwrap()
+        .unwrap();
+    let run = tools::stored(&rec).unwrap();
+    assert_eq!(run.redactions, 0, "nothing to redact: {}", run.output);
+    assert_eq!(
+        run.output, "{\"k\":\"v\"}\n--- stderr ---\nheads up, this was slow\n",
+        "stdout, the marker, then stderr"
+    );
+}
+
+/// The inbox summary's **width**: a tool-call row whose compact JSON is exactly
+/// `SUMMARY_CHARS` long is kept whole, one character more is cut with `…`, and a row whose
+/// cut lands inside a two-byte character is cut on the character — never on the byte.
+#[test]
+fn the_inbox_summary_is_cut_at_sixty_characters_on_a_boundary() {
+    let logs = tempfile::tempdir().unwrap();
+    let summary_of = |value: String| -> String {
+        let d = drafting(
+            fake(&logs.path().join("t.log"), &[]),
+            input(&[("k", json!(value))]),
+        );
+        let out = owl_ok(d.home.path(), &["--json", "inbox"]);
+        let rows: Vec<Value> = serde_json::from_str(&out).unwrap();
+        rows[0]["summary"].as_str().unwrap().to_string()
+    };
+    // `test {"k":"<v>"}` is 13 + v chars, so 47 characters of value make exactly 60.
+    let exact = summary_of("x".repeat(47));
+    assert_eq!(exact.chars().count(), 60);
+    assert_eq!(exact, format!("test {{\"k\":\"{}\"}}", "x".repeat(47)));
+    assert!(!exact.ends_with('…'), "exactly at the width is kept whole");
+
+    // One character more is cut: 60 characters and the ellipsis.
+    let over = summary_of("x".repeat(48));
+    assert_eq!(over, format!("test {{\"k\":\"{}\"…", "x".repeat(48)));
+    assert_eq!(over.chars().count(), 61);
+
+    // 25 `ł` then ASCII: byte offset 60 lands *inside* the 25th character, so a byte slice
+    // would panic. The cut keeps 60 whole characters — 24 of the x's, none split.
+    let multi = summary_of(format!("{}{}", "ł".repeat(25), "x".repeat(30)));
+    assert_eq!(
+        multi,
+        format!("test {{\"k\":\"{}{}…", "ł".repeat(25), "x".repeat(24))
+    );
+    assert_eq!(multi.chars().count(), 61, "60 characters and the ellipsis");
 }
