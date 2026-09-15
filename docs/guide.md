@@ -78,8 +78,9 @@ Restart the session afterwards so the hooks register.
 
 Optional: run it as a Claude Code mod. Set `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` (in the shell
 or under `env` in `~/.claude/settings.json`) and restart. You get an inbox band above the prompt
-and a pane for contacts, asking and the inbox. `/owlpost:contacts` or `/owlpost:ask` with no
-arguments opens the pane, and running the same command again closes it (so does **Close**).
+and a pane for contacts, asking and the inbox. `/owlpost:contacts`, `/owlpost:inbox` or
+`/owlpost:ask` with no arguments opens the pane (`/owlpost:inbox` on its Inbox view), and
+running the same command again closes it (so does **Close**).
 Details: `plugins/claude-code/README.md`, "Claude Code mods".
 
 ### 1.6 Check the setup

@@ -36,7 +36,7 @@ patterns of the next steps a file runs itself); `tests/plugin.rs` pins the rule.
 | `/owlpost:request <peer> <project> <path>` | `commands/request.md` | `owl request` — ask for one file at a ref, or one memory entry (`--memory <key>`); always held for the owner's consent |
 | `/owlpost:call <peer> <tool> --input <file>` | `commands/call.md` | `owl call` — ask a peer to run one tool of their registry; nothing runs there until a human allows it and runs `owl draft` |
 | `/owlpost:status [id]` | `commands/status.md` | `owl status` — where every open question stands, in the peer's words (`waiting for the owner's consent`, …) |
-| `/owlpost:inbox` | `commands/inbox.md` | `owl inbox --json` — walk the records: question verbatim, consent picker (allow once/always, deny), draft / draft & send / reject / skip picker, verbatim draft, send/edit/reject picker |
+| `/owlpost:inbox` | `commands/inbox.md` | `owl inbox --json` — walk the records: question verbatim, consent picker (allow once/always, deny), draft / draft & send / reject / skip picker, verbatim draft, send/edit/reject picker. With mods on, the same command opens the pane's Inbox instead |
 | `/owlpost:show <id>` | `commands/show.md` | `owl show` — full record, offer draft/send/reject |
 | `/owlpost:reply [text]` | `commands/reply.md` | `owl draft` on the question last shown in this session (else the newest pending one): `text` is stored as the human's own answer (`--text`), no text drafts through the Agent tool (`owl draft --prompt` → subagent → `owl draft --agent --text`); the draft is shown verbatim, then Send / Save as draft / Edit / Reject |
 | `/owlpost:draft <id> [--harness <name>] [--send]` | `commands/draft.md` | `owl draft --prompt` → the Agent tool (sonnet, read-only) → `owl draft --agent --text`; `--harness` runs a headless harness instead; show the draft; `--send` then runs `owl send` at once |
@@ -81,9 +81,9 @@ With mods on, `hooks/owlpost.tsx` adds:
 
 - a band above the prompt showing the unseen inbox count, with **Inbox** and **Contacts**
   buttons (it replaces the counter line the classic hook injects);
-- a pane opened by `/owlpost:contacts` or `/owlpost:ask` with no arguments. You can search
-  contacts, send a question and walk the inbox there. It runs `owl` directly, with no model
-  turn and no tokens.
+- a pane opened by `/owlpost:contacts`, `/owlpost:inbox` or `/owlpost:ask` with no arguments
+  (`/owlpost:inbox` opens the Inbox view, the thread list). You can search contacts, send a
+  question and walk the inbox there. It runs `owl` directly, with no model turn and no tokens.
 
 In the pane's Inbox is a thread list: one row per person, and **Open** draws the whole
 conversation with that person oldest first, with the Allow/Deny and Draft/Send/Reject buttons
@@ -92,7 +92,8 @@ it runs the tool the peer named on this machine, with no model turn, and the not
 the exit code. **Back** returns to the list.
 
 To close the pane, run the same command again (`/owlpost:contacts` on the Contacts view,
-`/owlpost:ask` on the Ask view) or press **Close**. Esc only returns focus to the prompt.
+`/owlpost:inbox` on the Inbox view, `/owlpost:ask` on the Ask view) or press **Close**. Esc
+only returns focus to the prompt.
 
 ## Requirements
 
