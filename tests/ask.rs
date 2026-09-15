@@ -2749,3 +2749,77 @@ async fn context_file_that_does_not_exist_sends_nothing() {
     }
     peer.shutdown();
 }
+
+// ---- OWL-038: the event log a new ask is born with -----------------------------------------
+
+/// The `meta.events` kinds and `by` values of a record, or a panic naming the record.
+fn events_of(spool: &Spool, dir: Dir, id: &str) -> Vec<(String, Option<String>)> {
+    let rec = spool
+        .get(dir, id)
+        .unwrap()
+        .unwrap_or_else(|| panic!("no {id} in {}", dir.name()));
+    rec.meta["events"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no meta.events on {id}: {}", rec.meta))
+        .iter()
+        .map(|e| {
+            assert!(e["ts"].as_str().is_some_and(|t| t.ends_with('Z')), "{e}");
+            (
+                e["kind"].as_str().unwrap().to_string(),
+                e["by"].as_str().map(str::to_string),
+            )
+        })
+        .collect()
+}
+
+/// OWL-038: a `202` files the ask with exactly one birth event, `asked` by the human.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn accepted_ask_is_born_with_an_asked_event() {
+    let a = id(1);
+    let b = spawn_daemon(2, true, &[Peer::new(&a, "Ana", manual())]).await;
+    let home = asker_home(&a, &b.id, &[&b.addr.to_string()]);
+    let qid = accepted_id(&ask(home.path(), &[]));
+    let spool = Spool::new(home.path()).unwrap();
+    assert_eq!(
+        events_of(&spool, Dir::Asks, &qid),
+        [("asked".to_string(), Some("human".to_string()))],
+        "the asks/ record carries exactly its birth event"
+    );
+    b.running.shutdown();
+}
+
+/// OWL-038: a `200` answers in the same call, so the `done/` question record is born with
+/// `asked` then `answer-received`, and the answer it stored carries `answer-received` too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn answered_ask_is_born_with_asked_then_answer_received() {
+    let a = id(1);
+    let b = spawn_daemon(2, true, &[Peer::new(&a, "Ana", manual())]).await;
+    let hash = question_hash(PROJECT, Some(PATH), QUESTION);
+    let c = id(3);
+    let earlier = Payload::question(&fp(&c), &fp(&b.id), PROJECT, Some(PATH), QUESTION);
+    let ans = Payload::answer(&earlier, "From the responder cache.", "fake", 1, false);
+    let env = Envelope::sign(&ans, &b.id);
+    b.spool()
+        .cache_put(&hash, &record(&env, "pending"))
+        .unwrap();
+
+    let home = asker_home(&a, &b.id, &[&b.addr.to_string()]);
+    let out = ask(home.path(), &[]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let spool = Spool::new(home.path()).unwrap();
+    let done = ids(&spool, Dir::Done);
+    assert_eq!(done.len(), 1, "the question is filed as answered");
+    assert_eq!(
+        events_of(&spool, Dir::Done, &done[0]),
+        [
+            ("asked".to_string(), Some("human".to_string())),
+            ("answer-received".to_string(), None),
+        ]
+    );
+    // `pull::store_answer` writes the same birth event on the answer it spooled.
+    assert_eq!(
+        events_of(&spool, Dir::Inbox, &ans.id),
+        [("answer-received".to_string(), None)]
+    );
+    b.running.shutdown();
+}
