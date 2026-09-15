@@ -2,4 +2,4 @@
 /.worktrees
 *.log
 .DS_Store
-/.orch/tasks/
+/.orch/
