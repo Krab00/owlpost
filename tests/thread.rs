@@ -10,7 +10,7 @@ use std::process::Command;
 
 use common::{PATH, PROJECT, Peer, claude_home, fp, id, prepare_home_with};
 use owlpost::config::Harness;
-use owlpost::envelope::{Envelope, Payload};
+use owlpost::envelope::{self, Envelope, Payload};
 use owlpost::events::EVENTS_KEY;
 use owlpost::identity::Identity;
 use owlpost::route;
@@ -728,29 +728,21 @@ fn thread_human_format_tables_peer_messages_and_fences_ours() {
 fn thread_since_and_context_filter_with_negative_twins() {
     let h = Home::new();
     let s = h.spool();
+    // `--since 1d` is measured against the wall clock, so both fixtures are stamped relative
+    // to now: a fixed date would drop out of the window on the day after it was written.
+    let ago = |secs: u64| envelope::unix_to_rfc3339(envelope::now_unix() - secs);
+    let (old, recent) = (ago(3 * 86_400), ago(7_200));
     put(
         &s,
-        Fx::q(
-            Dir::Done,
-            &h.ania,
-            &h.me,
-            "old question",
-            "2020-01-01T10:00:00Z",
-        )
-        .state("answered")
-        .events(json!([ev("2020-01-01T10:00:00Z", "received")])),
+        Fx::q(Dir::Done, &h.ania, &h.me, "old question", &old)
+            .state("answered")
+            .events(json!([ev(&old, "received")])),
     );
     put(
         &s,
-        Fx::q(
-            Dir::Inbox,
-            &h.ania,
-            &h.me,
-            "threaded question",
-            "2026-09-14T10:00:00Z",
-        )
-        .context("ctx-keep")
-        .events(json!([ev("2026-09-14T10:00:00Z", "received")])),
+        Fx::q(Dir::Inbox, &h.ania, &h.me, "threaded question", &recent)
+            .context("ctx-keep")
+            .events(json!([ev(&recent, "received")])),
     );
     let texts = |v: &Value| -> Vec<String> {
         v.as_array()
